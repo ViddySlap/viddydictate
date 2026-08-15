@@ -1,0 +1,1246 @@
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--vd-panel-bg);
+  color: var(--vd-green);
+  font-family: var(--vd-font);
+}
+
+button {
+  font-family: var(--vd-font);
+}
+
+#app {
+  display: grid;
+  /* notes bug 3d: pin an explicit column track so #tabbar/#tabs cannot size to max-content and overflow #app.
+     Without it the implicit column is max-content: the strip grows unbounded, #app's overflow:hidden CLIPS the
+     excess (no scroll), and #tabs.scrollWidth stays <= clientWidth so the wheel-scroll guard always no-ops.
+     minmax(0, 1fr) holds the grid at the viewport width, forcing #tabs (flex:1 1 auto, min-width:0,
+     overflow-x:auto) to scroll its own overflow so the wheel listener + native trackpad scroll work.
+     body.mini-mode #app only overrides grid-template-rows, so this column track carries into mini too. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 42px 1fr;
+}
+
+/* `isolation: isolate` makes the strip its own stacking context, which is what lets the pinned
+   lane (see #new-tab::before below) paint ABOVE this background and BELOW every control in the row. Without
+   it a negative-z descendant escapes to the root context and slides under #tabbar's own background, and a
+   zero-or-higher one covers the hamburger/Mini cluster, which is not positioned and therefore paints earlier.
+   Nothing else in the row needs to escape the bar: #drag-indicator's z-index 5 only ever had to beat the tabs
+   beside it, and the mini band's own z-index 5 (which must stay under #mini-overlay's 6) is set on this same
+   element, so it still competes at the root. */
+#tabbar {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  padding: 7px 10px 0;
+  border-bottom: 1px solid var(--vd-green-28);
+  background: linear-gradient(180deg, var(--vd-panel-bg), var(--vd-cell-off));
+}
+
+/* Tab drag rail (L7): the vertical insertion bar Swift positions via dragIndicator. It sits
+   at a tab boundary within the strip; left is set inline (strip-local px). No transform on the lifted tab
+   below, so its geometry stays put for the drop-index computation. */
+#drag-indicator {
+  position: absolute;
+  top: 7px;
+  height: 35px;
+  width: 2px;
+  background: var(--vd-green);
+  box-shadow: 0 0 8px var(--vd-green-70);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.tab.dragging {
+  opacity: 0.4;
+}
+
+body.tab-drag-selection-guard,
+body.tab-drag-selection-guard * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+/* #tabs is the SOLE horizontal scroller: it takes the width its tabs actually want and SHRINKS (never grows)
+   to whatever room the pinned control cluster leaves, and tabs scroll under it via overflow-x when they no
+   longer fit. No fragile width reservation — #tab-controls is a flex:0 0 auto sibling, so the strip width is
+   computed by flexbox rather than a calc() that drifts whenever the control count/width changes
+   (notes-9-layout).
+
+   `flex: 0 1 auto`, not `1 1 auto`. Growing caused the reported "the + is always parked far
+   right" defect: a scroller that grows always eats the leftover width, so its flex:0 0 auto sibling gets
+   pushed to the window edge at ANY tab count (measured: 3 tabs in a 900px window left 365.67px of empty
+   strip between the last tab and the +). Dropping flex-grow to 0 makes the width min(max-content, available):
+   under-full, #tabs ends where the tabs end and the + sits directly beside the last one; full, #tabs shrinks
+   to the available width, the tabs scroll inside it, and the + detaches to its always-visible lane at the
+   right. One property carries both halves of the rule, in mini and full alike — nothing measures anything.
+
+   The lane is a real LANE, not an overlay (D4): #tab-controls is a sibling flex item, so the scroller ENDS
+   before it. Never make the cluster position:absolute over the strip — an overlaid button puts a permanent
+   dead zone on top of live tabs, so a tab sits half-hidden under it and a click meant for the tab hits +. */
+#tabs {
+  display: flex;
+  flex: 0 1 auto;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0;
+}
+
+/* The history/collapse-to-mini cluster is pinned always-visible AND always at the right edge: flex:0 0 auto
+   never shrinks or gets pushed off-strip at any tab count or window width down to the mini flip (which hides
+   #tabbar entirely), and margin-left:auto eats the leftover width so window-level chrome keeps one fixed spot
+   whatever the tabs do.
+   The + is outside this cluster and is now the flex item between #tabs and this one. Only the
+   + follows the tabs; the hamburger and Mini are window chrome, and having them shuffle every time a note is
+   opened or closed would cost the muscle memory of clicking them. */
+#tab-controls {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.tab {
+  height: 35px;
+  min-width: 116px;
+  max-width: 210px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 5px;
+  align-items: center;
+  padding: 0 7px 0 11px;
+  color: var(--vd-green-70);
+  background: var(--vd-cell-off);
+  border: 1px solid var(--vd-green-18);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  user-select: none;
+}
+
+.tab.active {
+  color: var(--vd-green);
+  background: var(--vd-cell-on);
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 18px var(--vd-green-24);
+}
+
+.tab-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.tab-close,
+.icon-button,
+.floating-button,
+#blank-new,
+.history-delete {
+  color: var(--vd-green);
+  background: transparent;
+  border: 1px solid var(--vd-green-24);
+  border-radius: 6px;
+  cursor: default;
+}
+
+.tab-close {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 16px;
+  opacity: 0.72;
+}
+
+.tab-close:hover,
+.icon-button:hover,
+.floating-button:hover,
+#blank-new:hover,
+.history-delete:hover {
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 10px var(--vd-green-24);
+}
+
+.icon-button {
+  width: 32px;
+  height: 30px;
+  margin-bottom: 5px;
+  font-size: 18px;
+}
+
+#history-button {
+  font-size: 17px;
+}
+
+/* The + is an inline SVG mark on a fixed SQUARE hit target, optically centered by the box.
+   It was a typographic "+" in a 32x30 block button, and a text glyph's ink is placed by the BASELINE, not by
+   the box: this one measures ascent 9.09 / descent 0, so all of its ink hangs above a baseline that sits
+   below the box midline. Measured drift was 0.75px low in full and 1.25px low in mini — small in absolute
+   terms, larger as a fraction of the smaller box, which is exactly why it looked worst in mini. A mark that
+   IS its own box centers by construction and drifts at no size.
+
+   Keep the plus, same style (explicit requirement): the SVG is a 12px stroked cross, measured 11.0 x 11.0px of ink
+   against the 10.0 x 9.5px ink of the 18px glyph it replaces. This is geometry, not a restyle.
+
+   Square comes off the ID, never off the shared .icon-button class — same rule the worded #mini-enter
+   follows — because .icon-button is also the untouched 32x30 hamburger box.
+
+   It is also its OWN flex item on #tabbar, between the scroller and the pinned cluster, which is what makes
+   "the + follows the last tab, the hamburger and Mini do not" expressible at all: three flex items on one
+   line, #tabs shrink-only, this one flex:0 0 auto, the cluster carrying margin-left:auto. Under-full, the
+   leftover width lands in the cluster's auto margin, so the + stays welded to the last tab. Full, #tabs eats
+   the line and the + comes to rest immediately left of the cluster — the always-visible pinned lane. */
+#new-tab {
+  flex: 0 0 auto;
+  position: relative;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+
+/* Where the scrolling strip meets the pinned lane, a clipped tab must read as CONTINUING
+   UNDERNEATH a control, never as truncated by a rendering bug. In the overflow reference, the last tab read
+   "not" in full and "no" in mini, and the hard vertical cut felt "abrupt and kind of buggish" - the strip
+   ends, and the next thing along is more window background, so nothing says the tab went anywhere.
+
+   Two halves, both gated on classes render.js writes from the LIVE scroller, so the under-full strip - which
+   has no clip to solve - renders exactly as L2 shipped it, and neither half can be on when there is nothing
+   underneath to go under:
+
+   - `tabs-overflow` paints the pinned lane as a surface: a flat panel behind the + (and, in full view, behind
+     the hamburger/Mini cluster it runs on to reach), with a hairline left edge in the accent and a shadow that
+     falls back over the strip. That edge is the thing the tab now disappears behind.
+   - `tabs-clipped` dissolves the strip's last 26px instead of guillotining them (see body.tabs-clipped #tabs).
+
+   D4 IS INTACT: this is paint, not layout. pointer-events:none and z-index:-1 under #tabbar's stacking
+   context put it behind every control and outside hit-testing, and #tabs is still a sibling flex item that
+   ENDS before the lane - no tab is ever laid out under a button, so the dead zone D4 rejected cannot appear.
+   D5 is untouched: no glyph, no target, no inset changes.
+
+   Drawn by #new-tab::before rather than a new element or a measured width: the + is the leftmost thing in the
+   lane, so its own box is the only place in the layout that knows where the lane STARTS without JS measuring
+   it. From there it runs right for 100vw - past the cluster in full, past nothing in mini - and #app's
+   overflow:hidden clips it at the window edge, so it never needs to know what the lane CONTAINS. `left: -6px`
+   is #tabbar's flex gap, which is exactly the strip's right edge (measured 900x400, 8 tabs: #tabs ends
+   766.09, the + starts 772.09). It stops 1px short of the bar's bottom so the bar's own border still crosses
+   the lane unbroken. */
+body.tabs-overflow #new-tab::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  top: -6px;
+  bottom: -5px;
+  left: -6px;
+  width: 100vw;
+  background: linear-gradient(180deg, var(--vd-cell-on), var(--vd-panel-bg));
+  border-left: 1px solid var(--vd-green-28);
+  box-shadow: -10px 0 14px -5px var(--vd-note-bg);
+}
+
+/* The fade that makes the cut a dissolve. It masks the SCROLLPORT's trailing 26px, so whichever tab is under
+   the lane edge is the one that fades, and it goes to transparent rather than to a colour: the bar behind is a
+   vertical gradient (panel -> cell-off), so any horizontal scrim in a single colour would be the wrong tone at
+   one end. 26px is under a fifth of the 116px minimum tab, so a faded tab still reads as a tab.
+
+   Dropped the moment the strip is scrolled to its end (`tabs-clipped` is scroll-position-aware, `tabs-overflow`
+   is not): there the last tab is whole and flush against the lane, and fading its close button would be a new
+   bug of exactly the kind this item exists to remove. */
+body.tabs-clipped #tabs {
+  -webkit-mask-image: linear-gradient(to left, transparent 0, #000 26px);
+  mask-image: linear-gradient(to left, transparent 0, #000 26px);
+}
+
+/* Its own class, not .glyph-svg — that class means "the copy-assets camera", and the L6 gate counts its two
+   instances to prove the full-view and mini copies of that ONE control never drift apart. Borrowing it would
+   have made this button a third camera as far as that check is concerned.
+   Sized in px rather than the camera's 1.15em: em sizing lets one rule track two hosts by their font-size,
+   but this button has no text left to size against, and its inherited 18px font would draw a 20.7px cross in
+   a 26px mini box. 12px puts 11px of ink in the box, matching the 10.0 x 9.5px ink of the retired glyph. */
+.plus-svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  flex: 0 0 auto;
+}
+
+/* L6 — the mini/full toggle is the ONE control in this app that carries a WORD instead of a mark, and it is
+   labelled with the state it takes you to: "Mini" from full view, "Full" from mini. It earns the word because
+   it was the ambiguous one twice over — as a mark it read as a direction rather than a destination, and ⊟ sat
+   next to ☰ in this very row as one more lined square. Naming the destination also retires that collision for
+   free, which is why the hamburger stays exactly as it is.
+
+   The width comes off the ID, never off the shared class: .icon-button is a fixed 32x30 single-glyph box, and
+   widening it generically would also resize #new-tab and #history-button, which are still marks. Same reason
+   the font drops to 12px — 18px is a glyph size, not a label size. */
+#mini-enter {
+  width: auto;
+  min-width: 32px;
+  padding: 0 9px;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+#main {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--vd-note-bg);
+}
+
+/* Editor flexes to fill the note area; the attachment tray (when visible) is a fixed-height sibling
+   below it, so showing the tray shrinks the editor rather than overlapping it. */
+#editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.cm-editor {
+  height: 100%;
+  background: var(--vd-note-bg);
+  color: var(--vd-note-text);
+  font-family: var(--vd-font);
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.cm-scroller {
+  font-family: var(--vd-font) !important;
+  padding: 30px 54px 44px 36px;
+}
+
+.cm-focused {
+  outline: none !important;
+}
+
+.cm-cursor,
+.cm-dropCursor {
+  border-left-color: var(--vd-green) !important;
+}
+
+.cm-selectionBackground {
+  background: var(--vd-green-24) !important;
+}
+
+.cm-activeLine,
+.cm-activeLineGutter {
+  background: transparent !important;
+}
+
+.cm-line {
+  caret-color: var(--vd-green);
+}
+
+.cm-line span[style*="font-weight"] {
+  color: var(--vd-green);
+}
+
+/* Live markdown preview: styled spans + sized heading lines (markers hidden off the active line). */
+.cm-md-strong { font-weight: 700; }
+.cm-md-em { font-style: italic; }
+.cm-md-strike { text-decoration: line-through; opacity: 0.8; }
+.cm-md-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  background: var(--vd-green-18);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+.cm-md-link {
+  color: var(--vd-green);
+  text-decoration: underline;
+}
+/* Inline armed-bullseye marker (notes-bullseye BT3): a small phosphor bullseye glyph pinned inline at the
+   armed bullseye's anchor. Zero-width so arming/disarming never reflows the note text; the glyph is drawn as
+   an absolutely-positioned overlay straddling the anchor boundary. Rendered by the bullseye-marker
+   StateField, visible only while armed. */
+.cm-bullseye-marker {
+  display: inline;
+  position: relative;
+}
+.cm-bullseye-marker::after {
+  content: "\25CE"; /* ◎ bullseye */
+  position: absolute;
+  left: -0.34em;
+  bottom: -0.05em;
+  font-size: 0.82em;
+  line-height: 1;
+  color: var(--vd-green);
+  text-shadow: 0 0 5px var(--vd-green-70), 0 0 2px var(--vd-green);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* One-shot reveal cue (notes-bullseye BT6, Option+Shift+N): the glyph arrives oversized and springs down to
+   its resting size, so the eye is handed the spot instead of hunting for a 12px mark. Added by the marker
+   widget for exactly one rebuild, on the reveal path only.
+
+   Animated on the ::after and in transform/opacity ONLY. The marker itself is a zero-width side:-1 widget whose
+   glyph is drawn by this absolutely-positioned pseudo-element (it covers the character under it rather than
+   occupying space, which is the shipped, hand-tested behaviour) — so a transform on an out-of-flow box cannot
+   reflow the line, move the text, or make the marker take up room. transform-origin is the glyph's own centre,
+   so it grows and shrinks around the position it is pointing at. animation-fill-mode is left at its default
+   `none`: the moment the animation ends the pseudo-element is back to the plain rule above, with no residue. */
+@keyframes cm-bullseye-reveal-pulse {
+  0%   { opacity: 0;   transform: scale(5); }
+  12%  { opacity: 1;   transform: scale(4.1); }
+  58%  { transform: scale(0.84); }
+  74%  { transform: scale(1.16); }
+  88%  { transform: scale(0.95); }
+  100% { transform: scale(1); }
+}
+.cm-bullseye-pulse::after {
+  transform-origin: 50% 50%;
+  animation: cm-bullseye-reveal-pulse 560ms ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cm-bullseye-pulse::after { animation: none; }
+}
+
+/* Four-color replace highlight (notes-bullseye BT4): tints the note text a pending level-based operation
+   will REPLACE, four hues keyed to Raw / Cleanup / Tighten / Summarize. The hues run cool -> warm as the
+   transform strengthens (raw = untouched, summarize = strongest), so the color reads as "how much will
+   change." Translucent so the note text stays legible over --vd-note-bg in either the light or dark palette;
+   a soft box-shadow ring separates it from the green selection background. Rendered by the replace-highlight
+   StateField over the captured range; shown only during an Option+P pick or a selection-overwriting take. */
+.cm-replace-raw,
+.cm-replace-cleanup,
+.cm-replace-tighten,
+.cm-replace-summarize {
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+}
+.cm-replace-raw       { background: rgba(120, 170, 255, 0.30); }  /* Raw — cool blue (no transform) */
+.cm-replace-cleanup   { background: rgba(90, 220, 140, 0.30); }   /* Cleanup — green */
+.cm-replace-tighten   { background: rgba(240, 200, 90, 0.32); }   /* Tighten — amber */
+.cm-replace-summarize { background: rgba(240, 130, 205, 0.34); }  /* Summarize — magenta (strongest) */
+
+.cm-md-h1 { font-size: 1.7em; font-weight: 700; line-height: 1.3; color: var(--vd-green); }
+.cm-md-h2 { font-size: 1.45em; font-weight: 700; line-height: 1.3; color: var(--vd-green); }
+.cm-md-h3 { font-size: 1.25em; font-weight: 700; line-height: 1.35; color: var(--vd-green); }
+.cm-md-h4 { font-size: 1.1em; font-weight: 700; line-height: 1.4; }
+.cm-md-h5 { font-size: 1em; font-weight: 700; }
+.cm-md-h6 { font-size: 0.95em; font-weight: 700; opacity: 0.85; }
+
+.floating-button {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  font-size: 15px;
+  background: var(--vd-note-bg-soft);
+}
+
+/* Copy-assets button: a second top-right floating button, left of the text-copy button, shown only when
+   the active note has attachments. Distinct glyph so it does not read as the text-copy button. */
+#copy-assets-button {
+  right: 54px;
+}
+
+/* L6 — the copy-attached-assets mark, and the ONLY SVG in the web island: every other glyph in this app is a
+   single Unicode character set as button text. It is an exception on purpose. ▦ (U+25A6) read as one more
+   lined square sitting beside ⊞/⊟, which is exactly the confusion this item exists to remove, and no Unicode
+   codepoint says "camera plus film" without being an emoji — and an emoji brings its own colour.
+
+   That colour point is the load-bearing one: the whole palette is hue-derived from the user's accent at runtime
+   (theme.css is generated, not authored), so this mark is drawn ENTIRELY in currentColor and inherits the
+   phosphor like every neighbouring glyph. It carries no colour of its own, and must not gain one.
+
+   Sized in em rather than px so one rule serves both hosts and each tracks its own button: 15px on
+   .floating-button, 14px on .mini-button. Both hosts are already inline-flex + centered, so the mark centers
+   by construction. */
+.glyph-svg {
+  width: 1.15em;
+  height: 1.15em;
+  display: block;
+  flex: 0 0 auto;
+}
+
+/* Info button: same glyph-in-bordered-capsule shape as the copy button, pinned bottom-right. */
+#info-button {
+  top: auto;
+  bottom: 14px;
+  right: 16px;
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* When the tray is visible it occupies the bottom band; lift the bottom-right info button and its
+   cheat-sheet popover above the tray so they never sit on top of the thumbnails. */
+body.tray-mode #info-button {
+  bottom: 102px;
+}
+
+body.tray-mode #md-cheatsheet {
+  bottom: 140px;
+}
+
+.cheatsheet {
+  position: absolute;
+  right: 16px;
+  bottom: 52px;
+  z-index: 10;
+  width: 302px;
+  max-height: calc(100% - 84px);
+  overflow: auto;
+  padding: 12px 14px 11px;
+  background: var(--vd-cell-on);
+  border: 1px solid var(--vd-green-70);
+  border-radius: 9px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5), 0 0 20px var(--vd-green-18);
+  color: var(--vd-note-text);
+  font-size: 12px;
+}
+
+.cheatsheet-title {
+  color: var(--vd-green);
+  font-size: 13px;
+  margin-bottom: 9px;
+}
+
+.cheatsheet-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.cheatsheet-rows > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--vd-green);
+  background: var(--vd-green-18);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.cheatsheet-rows span code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--vd-green-18);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+.cheatsheet-foot {
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--vd-green-18);
+  color: var(--vd-note-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#blank {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  background: var(--vd-note-bg);
+}
+
+#blank-new {
+  width: 46px;
+  height: 42px;
+  font-size: 26px;
+}
+
+#history {
+  position: absolute;
+  inset: 0;
+  display: none;
+  overflow: auto;
+  padding: 26px 34px 48px;
+  background: var(--vd-note-bg);
+}
+
+.history-title {
+  color: var(--vd-green);
+  font-size: 18px;
+  margin: 0 0 18px;
+}
+
+.history-empty {
+  color: var(--vd-note-muted);
+  font-size: 13px;
+}
+
+.history-entry {
+  display: grid;
+  grid-template-columns: 1fr 82px;
+  gap: 12px;
+  padding: 13px 0;
+  border-top: 1px solid var(--vd-green-18);
+}
+
+.history-entry:first-of-type {
+  border-top: none;
+}
+
+.history-entry-main {
+  min-width: 0;
+}
+
+.history-entry-title {
+  color: var(--vd-green);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-entry-meta,
+.history-entry-preview {
+  color: var(--vd-note-muted);
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+.history-delete {
+  width: 78px;
+  height: 26px;
+  align-self: center;
+}
+
+#toast {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  min-width: 120px;
+  max-width: 360px;
+  padding: 7px 13px;
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  font-size: 12px;
+  color: var(--vd-note-bg);
+  background: var(--vd-green);
+  border-radius: 8px;
+  transition: opacity 120ms ease;
+  z-index: 8;
+}
+
+#toast.show {
+  opacity: 1;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 20;
+  width: 142px;
+  padding: 5px;
+  background: var(--vd-cell-on);
+  border: 1px solid var(--vd-green-70);
+  border-radius: 7px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.48), 0 0 20px var(--vd-green-18);
+}
+
+.context-menu button {
+  width: 100%;
+  height: 28px;
+  padding: 0 9px;
+  color: var(--vd-note-text);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.context-menu button:hover,
+.context-menu button:focus-visible {
+  color: var(--vd-note-bg);
+  background: var(--vd-green);
+  outline: none;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 5px 4px 4px;
+  background: var(--vd-green-28);
+}
+
+.context-menu-heading {
+  padding: 2px 9px 3px;
+  color: var(--vd-green-70);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+#sticky-skills-menu-items button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inline tab rename: the title cell becomes this text input in place (replaces the old modal dialog). */
+.tab-title-input {
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  padding: 0 4px;
+  color: var(--vd-green);
+  background: var(--vd-note-bg);
+  border: 1px solid var(--vd-green-70);
+  border-radius: 4px;
+  font-family: var(--vd-font);
+  font-size: 12px;
+}
+
+.tab-title-input:focus {
+  outline: none;
+  box-shadow: 0 0 10px var(--vd-green-18);
+}
+
+/* Attachment tray: per-note thumbnail strip pinned at the bottom of the editor area. Fixed height,
+   horizontally scrollable as it fills (comfortable at 20 thumbs); [hidden] collapses it entirely. */
+#attachment-tray {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  height: 88px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid var(--vd-green-28);
+  background: var(--vd-note-bg-soft);
+}
+
+.attachment-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--vd-green-24);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vd-cell-off);
+  cursor: default;
+}
+
+.attachment-thumb:hover {
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 10px var(--vd-green-24);
+}
+
+.attachment-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachment-file-tile {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  align-items: center;
+  justify-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 8px 6px 6px;
+  text-align: center;
+}
+
+.attachment-file-icon {
+  align-self: end;
+  width: 48px;
+  padding: 4px 0;
+  color: var(--vd-green);
+  border: 1px solid var(--vd-green-24);
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.attachment-file-tile.video .attachment-file-icon {
+  background: var(--vd-green-18);
+}
+
+.attachment-file-name {
+  width: 100%;
+  min-width: 0;
+  margin-top: 5px;
+  color: var(--vd-green);
+  font-size: 9px;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inline attachment rename (notes-8-rename): the name band becomes this input, pinned across the bottom of
+   the 72px thumb (over the image / file tile) while a right-click rename is in flight. */
+.attachment-name-input {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 3px;
+  height: 18px;
+  min-width: 0;
+  padding: 0 3px;
+  color: var(--vd-green);
+  background: var(--vd-note-bg);
+  border: 1px solid var(--vd-green-70);
+  border-radius: 4px;
+  font-family: var(--vd-font);
+  font-size: 10px;
+}
+
+.attachment-name-input:focus {
+  outline: none;
+  box-shadow: 0 0 8px var(--vd-green-24);
+}
+
+.attachment-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 15px;
+  font-size: 12px;
+  color: var(--vd-green);
+  background: var(--vd-panel-bg);
+  border: 1px solid var(--vd-green-24);
+  border-radius: 5px;
+  opacity: 0;
+  cursor: default;
+  transition: opacity 100ms ease;
+}
+
+.attachment-thumb:hover .attachment-remove {
+  opacity: 1;
+}
+
+.attachment-remove:hover {
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 8px var(--vd-green-24);
+}
+
+/* Drop affordance: overlay + highlight ring on the note surface while an attachable drag is over it. */
+#drop-overlay {
+  position: absolute;
+  inset: 8px;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--vd-green-70);
+  border-radius: 12px;
+  background: var(--vd-green-18);
+  pointer-events: none;
+}
+
+.drop-overlay-label {
+  padding: 10px 18px;
+  color: var(--vd-green);
+  background: var(--vd-cell-on);
+  border: 1px solid var(--vd-green-70);
+  border-radius: 9px;
+  font-size: 14px;
+  box-shadow: 0 0 20px var(--vd-green-24);
+}
+
+/* Hamburger settings strip (L5): a slim bar pinned at the top of the history view holding
+   Back, the cheat-sheet toggle, and the retention popup. Only shown in history-mode; #history is pushed
+   down by the strip height so the list scrolls beneath it. */
+#settings-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: none;
+  align-items: center;
+  gap: 16px;
+  height: 46px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--vd-green-28);
+  background: linear-gradient(180deg, var(--vd-cell-on), var(--vd-note-bg-soft));
+}
+
+body.history-mode #settings-strip {
+  display: flex;
+}
+
+.strip-back {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+  color: var(--vd-green);
+  background: transparent;
+  border: 1px solid var(--vd-green-24);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: default;
+}
+
+.strip-back:hover {
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 10px var(--vd-green-24);
+}
+
+.strip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--vd-green-70);
+  font-size: 12px;
+  user-select: none;
+}
+
+.strip-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--vd-green);
+}
+
+.strip-retention {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: var(--vd-green-70);
+  font-size: 12px;
+  user-select: none;
+}
+
+#retention-select {
+  height: 26px;
+  padding: 0 6px;
+  color: var(--vd-green);
+  background: var(--vd-note-bg);
+  border: 1px solid var(--vd-green-24);
+  border-radius: 6px;
+  font-family: var(--vd-font);
+  font-size: 12px;
+}
+
+#retention-select:hover {
+  border-color: var(--vd-green-70);
+}
+
+body.history-mode #editor,
+body.history-mode #copy-button,
+body.history-mode #copy-assets-button,
+body.history-mode #attachment-tray,
+body.history-mode #info-button,
+body.history-mode #md-cheatsheet {
+  display: none;
+}
+
+body.history-mode #history {
+  display: block;
+  top: 46px;
+  padding-top: 22px;
+}
+
+body.blank-mode #editor,
+body.blank-mode #copy-button,
+body.blank-mode #copy-assets-button,
+body.blank-mode #attachment-tray,
+body.blank-mode #info-button,
+body.blank-mode #md-cheatsheet {
+  display: none;
+}
+
+body.blank-mode #blank {
+  display: grid;
+}
+
+/* Mini view (notes-miniview A2): the window collapses to just the active note's editor, edge to edge. The tab
+   strip (#tabbar — the tabs, the + button, and the ☰ hamburger) and the floating button row (copy /
+   copy-assets / info) are hidden, and the single editor row fills the window. With #tabbar out of the grid,
+   the two-row template (42px 1fr) collapses to one 1fr row so #main takes the whole height. The attachment
+   tray is hidden with the rest of the chrome in mini and revealed on hover (7a) as a floating band overlaid on
+   the editor's bottom edge (see below), so revealing it does not reflow the editor. Entering/leaving mini is
+   driven entirely by Swift toggling body.mini-mode (manual toggle OR content width < 560); A3 adds the hover
+   overlay + toggle. */
+body.mini-mode #app {
+  grid-template-rows: 1fr;
+}
+
+body.mini-mode #tabbar,
+body.mini-mode #copy-button,
+body.mini-mode #copy-assets-button,
+body.mini-mode #info-button,
+body.mini-mode #md-cheatsheet {
+  display: none;
+}
+
+/* 7a: in mini the attachment tray is chrome-hidden with the rest; on hover it returns as a floating band pinned
+   to the editor's bottom edge (absolute within the position:relative #main) so the reveal overlays the editor
+   rather than reflowing it. Notes with attachments reserve the tray's measured 88px border-box height whether
+   hovered or not, so the last line can scroll above the overlay without moving when hover toggles. z-index 5
+   keeps it below #mini-overlay (z-index 6) so the overlay buttons win. */
+body.mini-mode #attachment-tray {
+  display: none;
+}
+
+body.mini-mode.tray-mode .cm-scroller {
+  padding-bottom: 88px;
+}
+
+body.mini-mode.mini-hover #attachment-tray {
+  display: flex;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+}
+
+/* Mini view hover overlay (notes-miniview A3): the ONLY chrome visible in mini, and only while the pointer is
+   over the window (body.mini-hover). It floats the per-note copy buttons, the "i" cheat-sheet button, and the
+   mini-toggle back to full. Off-hover (or in full view) it is fully hidden. The overlay toggle posts
+   setManualMini to Swift, which owns the effective-mini decision. */
+#mini-overlay {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: none;
+  gap: 6px;
+  padding: 5px;
+  background: var(--vd-note-bg-soft);
+  border: 1px solid var(--vd-green-28);
+  border-radius: 9px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42), 0 0 14px var(--vd-green-18);
+}
+
+body.mini-mode.mini-hover #mini-overlay {
+  display: flex;
+}
+
+/* Mini drag-out grab handle (round-5 R2, item 7b): a small pill on the mini window's TOP EDGE, revealed only in
+   mini + hover (like a macOS menu-bar item). In mini the tab strip is display:none, so there is no `.tab` to
+   grab — grabbing THIS handle IS the drag-out: a mousedown that crosses the drag threshold starts a
+   Swift-mediated tab drag of the active note through the same drop coordinator. Hidden in full view and
+   off-hover. The bare rule is first so the probe's cssBlock reads its display:none default. */
+#mini-grab {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  width: 42px;
+  height: 7px;
+  border-radius: 4px;
+  background: var(--vd-green-28);
+  border: 1px solid var(--vd-green-24);
+  box-shadow: 0 0 10px var(--vd-green-18);
+  cursor: grab;
+  display: none;
+}
+
+#mini-grab:hover {
+  background: var(--vd-green-70);
+  border-color: var(--vd-green-70);
+}
+
+#mini-grab:active {
+  cursor: grabbing;
+}
+
+body.mini-mode.mini-hover #mini-grab {
+  display: block;
+}
+
+.mini-button {
+  width: 28px;
+  height: 28px;
+  /* notes bug 3e: center the glyph in the 28x28 box (ported from .floating-button, commit 740bec9). The gate
+     rules reveal #mini-copy-assets / #mini-info via display:inline-flex WITHOUT any centering, so their glyphs
+     sat top-left (~-12px x / -10px y offset); this centers the glyph on all four mini buttons consistently. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  font-size: 14px;
+  color: var(--vd-green);
+  background: var(--vd-note-bg-soft);
+  border: 1px solid var(--vd-green-24);
+  border-radius: 6px;
+  cursor: default;
+}
+
+.mini-button:hover {
+  border-color: var(--vd-green-70);
+  box-shadow: 0 0 10px var(--vd-green-24);
+}
+
+#mini-info {
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* L6 — the mini half of the one worded control (see #mini-enter). Same rule, same reason: the width is on the
+   ID because .mini-button is a fixed 28x28 single-glyph box shared with #mini-copy, #mini-copy-assets and
+   #mini-info, all of which are still marks and must not grow. */
+#mini-toggle {
+  width: auto;
+  min-width: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+/* The overlay's copy-assets button shows only when the active note has attachments (mirrors the full-view tray
+   gate, body.tray-mode); the "i" cheat-sheet button shows only when the cheat-sheet setting is enabled
+   (body.cheatsheet-enabled). Both default hidden and are revealed by their gate class. */
+#mini-copy-assets,
+#mini-info {
+  display: none;
+}
+
+body.tray-mode #mini-overlay #mini-copy-assets {
+  display: inline-flex;
+}
+
+body.cheatsheet-enabled #mini-overlay #mini-info {
+  display: inline-flex;
+}
+
+/* The shared cheat-sheet popover is hidden in mini by the rule above; while hovering (overlay up) an OPENED
+   cheat sheet may show. A closed sheet stays hidden via [hidden]'s !important. */
+body.mini-mode.mini-hover #md-cheatsheet {
+  display: block;
+}
+
+/* ------------------------------------------------------------------------------------------------------
+   Mini hover reveals the tab strip (UX-consolidation L8). In mini a multi-tab note showed NO tabs at all, so
+   the window's other notes were unreachable without expanding it. The strip now rides the SAME hover latch
+   that already reveals the overlay, the grab handle and the tray (body.mini-mode.mini-hover) instead of a
+   competing lifecycle: no new element, no new state, no new bridge message — it is the real #tabbar rendered
+   by the same renderTabs(), floated over the editor's top edge.
+
+   Absolute, exactly like the 7a tray band at the bottom, so revealing it OVERLAYS the editor rather than
+   reflowing it or growing the window. #app's mini grid stays one 1fr row either way: an absolutely positioned
+   #tabbar is not a grid item, and off-hover it is display:none. #tabs keeps its own overflow-x:auto plus the
+   wheel handler, so at the 280pt mini floor the tabs scroll horizontally instead of overflowing the window.
+
+   z-index 5 matches the tray band and sits below #mini-overlay (6), so the overlay buttons still win an
+   overlap. ------------------------------------------------------------------------------------------- */
+body.mini-mode {
+  --mini-strip-h: 30px;
+}
+
+/* The full-view control cluster never returns in mini: the overlay already owns the way back to full, and
+   history belongs to the full window. The + is NOT in this cluster — it is the strip's own
+   flex item, so it rides the strip's visibility for free: #tabbar itself is display:none in mini and returns
+   only on `mini-hover:not(.blank-mode)`, which is exactly when a mini window can usefully make a note. That
+   is one fewer rule saying the same thing, and it cannot drift out of step with the strip it sits in. */
+body.mini-mode #tab-controls {
+  display: none;
+}
+
+body.mini-mode #history-button {
+  display: none;
+}
+
+body.mini-mode #mini-enter {
+  display: none;
+}
+
+/* The mini band's square: 26x26, matching the band's compact tab height exactly.
+   `margin-bottom: 0` is the fix for "the + looks cut off". The 5px bottom margin on .icon-button
+   lifts the control off the FULL strip's 42px bottom border; the mini band is 30px tall with 4px of top
+   padding and a 1px bottom border, so only 25px is usable and a 26px button plus a 5px margin overflowed the
+   band by 2px — measured, the button's top edge sat at y=-2, off the top of the window. Zeroing the margin
+   drops it back onto the band's baseline (y=3..29), which is where the tabs already sit, so the + lines up
+   with its neighbours instead of floating above them. */
+body.mini-mode.mini-hover:not(.blank-mode) #new-tab {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 0;
+}
+
+/* The same pinned-lane surface, re-seated in the mini band. The band is 30px with 4px of top
+   padding and no bottom padding against the full strip's 42px / 7px / 5px-margin, so the lane's own offsets
+   have to move with it or it floats off the band's edges. In mini the cluster is display:none, so the lane is
+   just the + and the 100vw run reaches the window edge with nothing in it - and the band is drawn on the note
+   background rather than the panel gradient, so the lane matches the band it sits in. Its 14px fade (below)
+   is proportionally the same bite out of the mini band's 78px minimum tab as 26px is out of the full 116px. */
+body.mini-mode.mini-hover:not(.blank-mode).tabs-overflow #new-tab::before {
+  top: -3px;
+  bottom: -1px;
+}
+
+body.mini-mode.mini-hover.tabs-clipped #tabs {
+  -webkit-mask-image: linear-gradient(to left, transparent 0, #000 18px);
+  mask-image: linear-gradient(to left, transparent 0, #000 18px);
+}
+
+body.mini-mode.mini-hover:not(.blank-mode) #tabbar {
+  display: flex;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: var(--mini-strip-h);
+  padding: 4px 6px 0;
+  background: var(--vd-note-bg-soft);
+}
+
+/* Compact metrics for the mini band: the full-view 116px tab floor fits barely two tabs at the 280pt mini
+   window floor, which defeats the point of the strip. */
+body.mini-mode.mini-hover .tab {
+  height: 26px;
+  min-width: 78px;
+  max-width: 128px;
+  padding: 0 5px 0 8px;
+  border-radius: 6px 6px 0 0;
+}
+
+body.mini-mode.mini-hover .tab-title {
+  font-size: 11px;
+}
+
+/* The strip claims the top edge, so the two chrome pieces that used to live there move below it. Both shifts
+   carry the SAME :not(.blank-mode) guard as the strip itself, so a note-less mini window — which reveals no
+   strip because there is nothing to reach — leaves the grab pill and the overlay exactly where they were. */
+body.mini-mode.mini-hover:not(.blank-mode) #mini-grab {
+  top: calc(var(--mini-strip-h) + 3px);
+}
+
+body.mini-mode.mini-hover:not(.blank-mode) #mini-overlay {
+  top: calc(var(--mini-strip-h) + 6px);
+}

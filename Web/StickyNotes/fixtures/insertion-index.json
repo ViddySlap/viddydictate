@@ -1,0 +1,133 @@
+{
+  "cases": [
+    {
+      "name": "empty strip",
+      "tabs": [],
+      "x": 100,
+      "expected": 0
+    },
+    {
+      "name": "cursor left of all tabs",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 10,
+      "expected": 0
+    },
+    {
+      "name": "cursor exactly on the first midpoint",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 50,
+      "expected": 0
+    },
+    {
+      "name": "cursor between the first and second midpoint",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 100,
+      "expected": 1
+    },
+    {
+      "name": "cursor exactly on the second midpoint",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 150,
+      "expected": 1
+    },
+    {
+      "name": "cursor past the last midpoint",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 999,
+      "expected": 3
+    },
+    {
+      "name": "uneven tab widths",
+      "tabs": [
+        { "left": 4, "width": 17 },
+        { "left": 30.5, "width": 23.5 },
+        { "left": 75, "width": 11.5 }
+      ],
+      "x": 42.3,
+      "expected": 2
+    },
+    {
+      "name": "negative strip coordinate",
+      "tabs": [
+        { "left": -30, "width": 20 },
+        { "left": 10, "width": 20 }
+      ],
+      "x": -19.99,
+      "expected": 1
+    },
+    {
+      "name": "scrolled strip: scroll folds into the index (parity Swift/JS)",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 40,
+      "scrollOffset": 120,
+      "expected": 2
+    },
+    {
+      "name": "unscrolled control: same cursor, scroll moves the answer",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 40,
+      "scrollOffset": 0,
+      "expected": 0
+    },
+    {
+      "name": "scrolled strip: drop beyond the last visible tab -> forgiving last-tab (count)",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 },
+        { "left": 200, "width": 100 }
+      ],
+      "x": 200,
+      "scrollOffset": 150,
+      "expected": 3
+    },
+    {
+      "name": "scrolled strip: boundary — content mid lands exactly on the cursor (strict <, not counted)",
+      "tabs": [
+        { "left": 0, "width": 100 },
+        { "left": 100, "width": 100 }
+      ],
+      "x": 50,
+      "scrollOffset": 100,
+      "expected": 1
+    },
+    {
+      "name": "scrolled strip: uneven widths under a fractional scroll (parity)",
+      "tabs": [
+        { "left": 4, "width": 17 },
+        { "left": 30.5, "width": 23.5 },
+        { "left": 75, "width": 11.5 }
+      ],
+      "x": 30,
+      "scrollOffset": 20,
+      "expected": 2
+    }
+  ]
+}

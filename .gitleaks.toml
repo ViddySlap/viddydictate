@@ -1,0 +1,11 @@
+title = "ViddyDictate gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# These strings are LM Studio model identifiers in a self-test JSON fixture, not credentials.
+# Targeting both the default rule and this exact path keeps every other generic-api-key finding active.
+[[allowlists]]
+description = "LM Studio model identifiers in the model-catalog self-test fixture"
+targetRules = ["generic-api-key"]
+paths = ['''^Sources/SelfTest/LMStudioModelCatalogSelfTest\.swift$''']

@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"synthetic-thread-with-deprecation-errors"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"SYNTHETIC_DEPRECATION_WARNING_ONE"}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"SYNTHETIC_DEPRECATION_WARNING_TWO"}}
+{"type":"item.completed","item":{"id":"item_2","type":"error","message":"SYNTHETIC_DEPRECATION_WARNING_THREE"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"result\":\"SYNTHETIC_RESULT_AFTER_DEPRECATION_ERRORS\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":7177,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":73,"reasoning_output_tokens":52}}

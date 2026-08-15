@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.viddydictate.whisperd</string>
+  <!-- Both paths are created by install-daemon.sh: the venv is ViddyDictate's own (never a venv
+       shared with another project), and the daemon is the repo copy staged out of any
+       TCC-protected location. __HOME__ is substituted at install time. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Library/Application Support/ViddyDictate/stt-venv/bin/python</string>
+    <string>__HOME__/Library/Application Support/ViddyDictate/viddydictate_whisperd.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VIDDYDICTATE_WHISPER_PORT</key>
+    <string>8765</string>
+    <!-- launchd's default PATH omits Homebrew; mlx-whisper shells out to ffmpeg by name. Both
+         Homebrew prefixes are listed so a hand-installed /usr/local/bin/ffmpeg also resolves. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/viddydictate-whisperd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/viddydictate-whisperd.err.log</string>
+</dict>
+</plist>

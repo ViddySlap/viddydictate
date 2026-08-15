@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sticky Notes</title>
+    <link rel="stylesheet" href="theme.css">
+    <link rel="stylesheet" href="app.css">
+  </head>
+  <body>
+    <div id="app">
+      <div id="tabbar">
+        <div id="tabs"></div>
+        <button id="new-tab" class="icon-button" title="New sticky note" aria-label="New sticky note"><svg class="plus-svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 1.35V10.65M1.35 6H10.65"/></svg></button>
+        <div id="tab-controls">
+          <button id="history-button" class="icon-button" title="Notes history">☰</button>
+          <button id="mini-enter" class="icon-button" title="Collapse to mini view" aria-label="Collapse to mini view">Mini</button>
+        </div>
+        <div id="drag-indicator" hidden></div>
+      </div>
+      <div id="main">
+        <button id="copy-button" class="floating-button" title="Copy active note">⧉</button>
+        <button id="copy-assets-button" class="floating-button" title="Copy attached assets" aria-label="Copy attached assets" hidden><svg class="glyph-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 4.1h6l1 2.2H8z" fill="currentColor" stroke="none"/><rect x="2.2" y="6.3" width="19.6" height="13.2" rx="2.4"/><circle cx="12" cy="12.9" r="3.5"/><rect x="4.4" y="9.2" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="4.4" y="14" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="17.9" y="9.2" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="17.9" y="14" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/></svg></button>
+        <button id="info-button" class="floating-button" title="Markdown cheat sheet">i</button>
+        <div id="mini-overlay" aria-label="Mini view controls">
+          <button id="mini-copy" class="mini-button" title="Copy active note" aria-label="Copy active note">⧉</button>
+          <button id="mini-copy-assets" class="mini-button" title="Copy attached assets" aria-label="Copy attached assets"><svg class="glyph-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 4.1h6l1 2.2H8z" fill="currentColor" stroke="none"/><rect x="2.2" y="6.3" width="19.6" height="13.2" rx="2.4"/><circle cx="12" cy="12.9" r="3.5"/><rect x="4.4" y="9.2" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="4.4" y="14" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="17.9" y="9.2" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/><rect x="17.9" y="14" width="1.7" height="2.6" rx="0.5" fill="currentColor" stroke="none"/></svg></button>
+          <button id="mini-info" class="mini-button" title="Markdown cheat sheet" aria-label="Markdown cheat sheet">i</button>
+          <button id="mini-toggle" class="mini-button" title="Back to full view" aria-label="Back to full view">Full</button>
+        </div>
+        <div id="mini-grab" title="Drag note out" aria-label="Drag note out to another or a new window"></div>
+        <div id="blank">
+          <button id="blank-new">+</button>
+        </div>
+        <div id="editor"></div>
+        <div id="attachment-tray" hidden></div>
+        <div id="drop-overlay" hidden><div class="drop-overlay-label">Drop images or videos to attach</div></div>
+        <div id="history"></div>
+        <div id="settings-strip">
+          <button id="notes-back" class="strip-back" type="button" title="Back to notes">&#8592; Back</button>
+          <label id="cheatsheet-toggle-label" class="strip-toggle">
+            <input id="cheatsheet-toggle" type="checkbox">
+            <span>Markdown cheat sheet</span>
+          </label>
+          <label id="retention-label" class="strip-retention">
+            <span>Keep closed notes</span>
+            <select id="retention-select">
+              <option value="oneDay">24 hours</option>
+              <option value="oneWeek">1 week</option>
+              <option value="forever">Indefinitely</option>
+            </select>
+          </label>
+        </div>
+        <div id="md-cheatsheet" class="cheatsheet" hidden>
+          <div class="cheatsheet-title">Markdown cheat sheet</div>
+          <div class="cheatsheet-rows">
+            <code>#</code><span>through <code>######</code> — Heading 1–6</span>
+            <code>**bold**</code><span><b>bold</b></span>
+            <code>*italic*</code><span><i>italic</i></span>
+            <code>***both***</code><span><b><i>bold italic</i></b></span>
+            <code>~~strike~~</code><span><s>strikethrough</s></span>
+            <code>`code`</code><span>inline code</span>
+            <code>[text](url)</code><span>link</span>
+            <code>- item</code><span>bullet list</span>
+            <code>1. item</code><span>numbered list</span>
+          </div>
+          <div class="cheatsheet-foot">Click into a line to edit its markers; click away and it renders.</div>
+        </div>
+      </div>
+      <div id="toast"></div>
+      <div id="tab-menu" class="context-menu" hidden>
+        <button type="button" data-action="rename">Rename</button>
+        <button type="button" data-action="selectAll">Select all</button>
+        <button type="button" data-action="duplicate">Duplicate note</button>
+        <button type="button" data-action="copy">Copy</button>
+        <button type="button" data-action="saveAs">Save As...</button>
+        <button type="button" data-action="openInFinder">Open in Finder</button>
+        <button type="button" data-action="close">Close</button>
+        <div id="sticky-skills-menu-separator" class="context-menu-separator" role="separator" hidden></div>
+        <div id="sticky-skills-menu-section" hidden>
+          <div class="context-menu-heading">Sticky Skills</div>
+          <div id="sticky-skills-menu-items"></div>
+        </div>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

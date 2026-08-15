@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "build:web": "./build-web.sh",
+    "build:notes": "esbuild Web/StickyNotes/src/main.js --bundle --format=iife --outfile=Web/StickyNotes/dist/app.js --minify"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.0",
+    "esbuild": "^0.25.5"
+  },
+  "devDependencies": {}
+}

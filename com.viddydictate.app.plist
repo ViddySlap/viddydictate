@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.viddydictate.app</string>
+  <!-- Point at the executable INSIDE the bundle (not `open`) so launchd tracks the real PID and
+       KeepAlive can relaunch it. LimitLoadToSessionType is omitted -> defaults to Aqua (the GUI
+       login session), which is required for a menu-bar / LSUIElement app. -->
+  <!-- 2026-07-13: the live app runs from the STABLE deploy path ~/Applications, NOT the workspace
+       build/ dir. Agent/chain rebuilds of build/ must never replace (and TCC-void) the running app;
+       deploys are an explicit copy via install-app-agent.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Applications/ViddyDictate.app/Contents/MacOS/ViddyDictate</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Relaunch on crash (incl. a crash during/after wake) but NOT after a deliberate Quit. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/viddydictate.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/viddydictate.err.log</string>
+</dict>
+</plist>

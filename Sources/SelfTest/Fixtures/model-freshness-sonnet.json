@@ -1,0 +1,16 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "OK",
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 8,
+      "outputTokens": 4
+    },
+    "claude-sonnet-6-20260715": {
+      "inputTokens": 1,
+      "outputTokens": 1
+    }
+  }
+}

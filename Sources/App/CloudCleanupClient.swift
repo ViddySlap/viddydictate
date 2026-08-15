@@ -1,0 +1,556 @@
+import Foundation
+import Darwin
+
+/// The Claude subscription transform adapter: a headless `claude -p` one-shot that runs a mode's
+/// transform on the configured Claude Max subscription (never the paid API), using the proven
+/// subscription environment (`subscriptionEnv()` + `runHeadlessClaude`) and argument shape. It is the
+/// Claude counterpart of `CleanupClient` / `EmailClient`: same `CleanupClient.Result`
+/// contract, same plain-ASCII choke point, same "failure never pastes empty" invariant — so every mode's
+/// land/raw-fallback wiring in `OneShotRegistry` is identical for Local, Claude, and Codex.
+///
+/// Why shell the CLI instead of the paid API: with the claude.ai Max OAuth creds present on disk
+/// (`~/.claude/.credentials.json`, subscriptionType=max), a headless `claude -p` authenticates from that
+/// file and the turn counts against the plan's rate limits, NOT per-token API billing. The auth is
+/// FRAGILE in three verified ways (memory `project-headless-claude-auth`), all defended here in one place:
+///   - a minimal ALLOWLIST env (`HOME PATH TMPDIR LANG LC_ALL TERM`) -- inherited `ANTHROPIC_BASE_URL` /
+///     `USE_*_OAUTH` / `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` would silently point auth elsewhere
+///     (401, or a billed API call). USER/LOGNAME are now added explicitly. This reverses the 2026-07-01
+///     trap fix, when stripping USER forced deterministic credentials-file auth and avoided a stale or
+///     unreadable Keychain lookup. Claude CLI >= 2.1.214 now fails instantly with "OAuth session expired
+///     and could not be refreshed" without USER, even with a fresh valid creds file (A/B-verified on this
+///     exact argv 2026-07-19). This matches the proven `subscriptionEnv()` behavior;
+///   - the explicit model id `claude-sonnet-5` (the `sonnet` ALIAS lags the binary's registry, resolving
+///     to an older model — memory `reference-claude-headless-model-effort`);
+///   - `--tools ""` strips every built-in tool (no Read/Bash/WebSearch) and no MCP roster is attached. L11
+///     may add app-owned attachment frames to the same user turn, but never adds a tool surface.
+///
+/// Privacy: only the dictation or selected text for the requested transform is sent to Anthropic.
+/// No workspace context or tool surface is attached. The transcript is never logged to a new place;
+/// only character counts and timings ride the app log, exactly like the local clients.
+///
+/// The pure pieces (`buildArgs` / `buildEnv` / `parseResult`) are factored out so the headless selftest
+/// proves arg construction + env scrubbing + result mapping WITHOUT a real provider call; `spawnSync` does
+/// the one real subscription smoke. User text is delivered on stdin and the effective system prompt is
+/// held only in a mode-0600 ephemeral file whose path (never contents) rides argv.
+///
+/// Compatibility type name retained because the sealed bakeoff source inventory references this file;
+/// all behavior and diagnostics below are explicitly Claude-specific.
+enum CloudCleanupClient {
+
+    /// The generous safety ceiling for a Claude one-shot: CLI boot (~2-5s) + a long-selection transform on
+    /// the subscription. Well above the >= 60s the spec floors, and far above any local timeout.
+    static let defaultTimeout: TimeInterval = 90
+
+    /// The minimal env the child inherits. Everything else is dropped by construction -- this allowlist,
+    /// plus derived USER/LOGNAME, is the fix for the auth traps (no `ANTHROPIC_*`, no `USE_*_OAUTH`).
+    /// Mirrors the proven `subscriptionEnv()` behavior.
+    static let envAllowlist = ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "TERM"]
+
+    // MARK: - availability
+
+    /// The file-backed Claude Code credential location. Direct catalog transport still needs this path;
+    /// connection state itself is owned by `LLMProviderDetection` through `claude auth status --json`,
+    /// because Claude Code may instead keep the credential in the login Keychain.
+    static var credentialsPath: String { "\(NSHomeDirectory())/.claude/.credentials.json" }
+
+    /// Locate the `claude` CLI. A LaunchAgent-run app has a minimal PATH, so we probe the known install
+    /// locations by absolute path (native installer, Homebrew, /usr/local, the managed local install)
+    /// rather than trusting PATH. nil = not installed.
+    static func resolveBinary() -> String? {
+        let home = NSHomeDirectory()
+        let candidates = [
+            "\(home)/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "\(home)/.claude/local/claude",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// True when a Claude subscription transform can be attempted. The CLI owns the credential stores
+    /// and method vocabulary, so this consumes the same status authority as preflight and Settings.
+    static var isAvailable: Bool {
+        LLMProviderDetection.observeClaude().state.canRun
+    }
+
+    // MARK: - pure pieces (unit-testable without a Claude call)
+
+    /// The `claude -p` args for a one-shot transform. `-p` reads the already-wrapped user content from
+    /// stdin (`--input-format text`). The transform instruction is read through the installed CLI's
+    /// supported `--system-prompt-file` option, so neither data class appears in the process argv.
+    ///
+    /// THE OUTPUT FORMAT IS NOT INDEPENDENT OF THE INPUT FORMAT, and this is the fix for the reported defect:
+    /// reproduced on 2026-08-12. A note carrying an attachment makes `runTransformProcess` switch the input
+    /// to `stream-json` so the frames and the wrapped text can ride one user turn; the output format stayed
+    /// `json`, and the CLI rejects that pair while PARSING ARGV, before any model work:
+    ///
+    ///     Error: --input-format=stream-json requires output-format=stream-json.
+    ///
+    /// That is exactly 70 bytes on stderr with exit 1 in well under a second, which is the
+    /// `claude: no parseable JSON (exit 1, stderrBytes=70)` line every cloud sticky-skill run on a note with
+    /// an attachment produced. It never reached Anthropic, which is why the same route, model and note
+    /// succeeded from the selection hotkey (that path never carries images, so it never left `text`).
+    /// `--verbose` is the CLI's own second requirement for `-p` plus `stream-json` output, and omitting it
+    /// fails the same way (74 bytes) rather than degrading.
+    ///
+    /// `model` defaults to the compatibility Claude pin (`claude-sonnet-5`) so existing callers remain
+    /// byte-identical. Explicit route bundles may pass their own hard-pinned
+    /// Claude id (e.g. `claude-haiku-4-5-20251001`) here instead. `effort` is the headless CLI's `--effort`
+    /// (`low`/`medium`/`high`/...); it is OMITTED when nil or empty, so the default (no `--effort`) preserves
+    /// the prior behavior exactly and only the policy paths pass a level. Always an EXPLICIT model id, never
+    /// an alias (the `sonnet`/`haiku` aliases lag the binary's registry — see file header).
+    static func buildArgs(systemPromptFilePath: String,
+                          model: String = ModeModelCatalog.claudeId, effort: String? = nil,
+                          inputFormat: String = "text") -> [String] {
+        let streaming = inputFormat == streamingInputFormat
+        var args = [
+            "-p",
+            "--input-format", inputFormat,   // wrapped user content arrives on stdin
+            // buffered JSON for text; the CLI-mandated matching pair when frames ride stdin
+            "--output-format", streaming ? streamingInputFormat : "json",
+        ]
+        if streaming { args.append("--verbose") }  // the CLI's own requirement for -p + stream-json output
+        args += [
+            "--no-session-persistence",      // stateless, no saved session
+            "--tools", "",                   // strip EVERY built-in tool: pure text transform, no tool loop
+            "--system-prompt-file", systemPromptFilePath,
+            "--model", model,                // explicit id (the `sonnet`/`haiku` aliases lag — see file header)
+        ]
+        if let effort = effort, !effort.isEmpty { args += ["--effort", effort] }
+        return args
+    }
+
+    /// The one input format that carries attachment frames, and the only one whose name must also appear as
+    /// the output format. Named once so the two cannot drift apart again.
+    static let streamingInputFormat = "stream-json"
+
+    /// Claude Code's streaming-input envelope allows labeled image blocks and the already-wrapped text
+    /// to enter one user turn. This is used only when L11 has extracted attachment frames.
+    static func multimodalInputData(userMessage: String,
+                                    images: [TextTransformImage]) -> Data? {
+        var content: [[String: Any]] = [["type": "text", "text": userMessage]]
+        for image in images {
+            content.append(["type": "text", "text": "ATTACHMENT FRAME: \(image.label)"])
+            content.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": image.mediaType,
+                    "data": image.data.base64EncodedString(),
+                ],
+            ])
+        }
+        let envelope: [String: Any] = [
+            "type": "user",
+            "session_id": "",
+            "message": ["role": "user", "content": content],
+            "parent_tool_use_id": NSNull(),
+        ]
+        guard var data = try? JSONSerialization.data(withJSONObject: envelope) else { return nil }
+        data.append(0x0A)
+        return data
+    }
+
+    /// Build the child env from a parent env by ALLOWLIST -- the auth fix. USER and LOGNAME are derived
+    /// explicitly; poison vars (`SHELL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `USE_*_OAUTH`,
+    /// `CLAUDE_CODE_OAUTH_TOKEN`) are excluded by construction. PATH is additionally ensured to carry the
+    /// standard user bin dirs (a LaunchAgent-run app may have a bare PATH) so any helper the CLI spawns
+    /// resolves; the binary itself is always invoked by absolute path. Pure (parent env in -> env out) so
+    /// the selftest asserts it.
+    static func buildEnv(from parent: [String: String]) -> [String: String] {
+        var env: [String: String] = [:]
+        for k in envAllowlist where parent[k] != nil { env[k] = parent[k] }
+        let user = parent["USER"] ?? parent["LOGNAME"] ?? NSUserName()
+        if !user.isEmpty {
+            env["USER"] = user
+            env["LOGNAME"] = user
+        }
+        let home = parent["HOME"] ?? NSHomeDirectory()
+        let needed = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        var path = env["PATH"].map { $0.split(separator: ":").map(String.init) } ?? []
+        for dir in needed where !path.contains(dir) { path.append(dir) }
+        env["PATH"] = path.joined(separator: ":")
+        return env
+    }
+
+    /// Map a headless `claude -p --output-format json` stdout into a `CleanupClient.Result`. Mirrors
+    /// `escalate.mjs` `parseResult`: `is_error:true` and no/empty `result` both become non-`.ok` outcomes
+    /// (which the registry lands as "leave the text untouched + toast" — the house invariant). Claude output
+    /// is run through the SAME `CleanupClient.asciiPunctuationNormalized` plain-ASCII choke point as every
+    /// local client. Pure.
+    /// The one place Claude stderr content reaches the log. The shared renderer selects only a
+    /// diagnostic-looking line, redacts request-shaped content, and caps the ASCII output.
+    static func diagnosticStderrHead(_ stderrText: String,
+                                     sensitiveValues: [String] = []) -> String {
+        let head = ProviderStderrDiagnostic.render(stderrText, sensitiveValues: sensitiveValues)
+        return head.isEmpty ? "" : " stderrHead=\(head)"
+    }
+
+    static func parseResult(stdout: String, exitCode: Int32 = 0, stderrText: String = "",
+                            sensitiveValues: [String] = []) -> CleanupClient.Result {
+        guard let json = resultObject(stdout) else {
+            Log.write("claude: no parseable JSON (exit \(exitCode), "
+                + "stderrBytes=\(stderrText.utf8.count))"
+                + diagnosticStderrHead(stderrText, sensitiveValues: sensitiveValues))
+            return .unavailable(exitCode != 0 ? "claude exited \(exitCode)" : "no result from Claude")
+        }
+        if (json["is_error"] as? Bool) == true {
+            let why = (json["result"] as? String) ?? (json["subtype"] as? String) ?? "unknown"
+            // Provider error text can echo the request. Keep it out of both this log and the Result
+            // reason, because existing landing sites log that reason again.
+            Log.write("claude: provider error payload chars=\(why.count)")
+            return .unavailable("Claude returned an error")
+        }
+        let raw = (json["result"] as? String) ?? ""
+        let cleaned = CleanupClient.asciiPunctuationNormalized(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty {
+            Log.write("claude: produced empty output")
+            return .badOutput("empty output")
+        }
+        return .ok(cleaned)
+    }
+
+    /// The object a headless run reports its OUTCOME in, whichever output format produced `stdout`.
+    ///
+    /// `--output-format json` prints exactly one object, so the whole string parses. The streaming pair a
+    /// frame-carrying run is now required to use prints one object PER LINE - a session banner, a rate-limit
+    /// event, each assistant message, and finally the same `is_error`/`result` object under
+    /// `type: "result"`. Taking the FIRST object there would read the banner, find no `result` key, and
+    /// report a blank transform on a run that actually succeeded; taking the whole string parses nothing at
+    /// all. So the outcome is selected by name from the last line that carries it, and only then do the two
+    /// legacy shapes apply. Pure.
+    private static func resultObject(_ s: String) -> [String: Any]? {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let obj = (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any] { return obj }
+        for line in trimmed.split(separator: "\n").reversed() {
+            guard let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                  obj["type"] as? String == "result" else { continue }
+            return obj
+        }
+        // A leading warning line before a single buffered object.
+        guard let brace = trimmed.firstIndex(of: "{") else { return nil }
+        let tail = String(trimmed[brace...])
+        return (try? JSONSerialization.jsonObject(with: Data(tail.utf8))) as? [String: Any]
+    }
+
+    // MARK: - the spawn
+
+    struct ProcessRunResult {
+        let exitCode: Int32
+        let stdout: Data
+        let stderr: Data
+        let timedOut: Bool
+        let terminatedBySignal: Bool
+        let leaderReaped: Bool
+        let escalatedToSIGKILL: Bool
+        let hadResidualProcessGroup: Bool
+        let residualProcessGroup: Bool
+    }
+
+    private enum SpawnError: Error {
+        case promptFile
+        case process(String)
+    }
+
+    /// Run one Claude transform synchronously (blocks the calling thread — call OFF the main thread). Fails
+    /// closed to a non-`.ok` `Result` on every error path (CLI missing, creds absent, launch failure,
+    /// timeout, error JSON, empty output), so the registry never pastes empty. Both pipes are drained
+    /// concurrently to avoid a stderr-buffer deadlock.
+    static func spawnSync(systemPrompt: String, userMessage: String,
+                          images: [TextTransformImage] = [],
+                          model: String = ModeModelCatalog.claudeId, effort: String? = nil,
+                          timeout: TimeInterval) -> CleanupClient.Result {
+        guard let bin = resolveBinary() else {
+            Log.write("claude: CLI not found (~/.local/bin, homebrew, /usr/local/bin, ~/.claude/local)")
+            return .unavailable("claude CLI not found")
+        }
+        let connection = LLMProviderDetection.observeClaude(binary: bin).state
+        guard connection.canRun else {
+            Log.write("claude: auth status does not permit a subscription transform")
+            switch connection {
+            case .available:
+                return .unavailable("Claude auth status was inconsistent")
+            case .disconnected:
+                return .unavailable("not signed in to the Claude subscription")
+            case .unavailable(let reason):
+                return .unavailable(reason)
+            }
+        }
+
+        let t0 = Date()
+        let run: ProcessRunResult
+        do {
+            run = try runTransformProcess(executable: bin, systemPrompt: systemPrompt,
+                                          userMessage: userMessage, images: images,
+                                          model: model, effort: effort,
+                                          timeout: timeout,
+                                          environment: buildEnv(from: ProcessInfo.processInfo.environment))
+        } catch {
+            Log.write("claude: launch failed (classified process setup error)")
+            return .unavailable("launch failed")
+        }
+
+        // A watchdog group kill is a timeout however the CLI exits. Preserve the existing `.timedOut`
+        // mapping for an abnormal signal, while treating a residual descendant as a fail-closed error.
+        if run.timedOut || run.terminatedBySignal {
+            Log.write("claude: timed out / killed after \(Int(timeout))s")
+            return .timedOut
+        }
+        guard processGroupExitWasClean(leaderReaped: run.leaderReaped,
+                                       residualProcessGroup: run.residualProcessGroup) else {
+            Log.write("claude: process group did not exit cleanly "
+                + "(leaderReaped=\(run.leaderReaped), residual=\(run.residualProcessGroup))")
+            return .unavailable("Claude process did not exit cleanly")
+        }
+        if run.hadResidualProcessGroup {
+            Log.write("claude: cleaned transient process-group helper after leader exit")
+        }
+        let stdout = String(decoding: run.stdout, as: UTF8.self)
+        // The whole stderr keeps the byte count exact and lets the safe renderer inspect the head.
+        let stderrText = String(decoding: run.stderr, as: UTF8.self)
+        let dt = Date().timeIntervalSince(t0)
+        let result = parseResult(
+            stdout: stdout, exitCode: run.exitCode, stderrText: stderrText,
+            sensitiveValues: [systemPrompt, userMessage])
+        if case .ok(let out) = result {
+            let eff = (effort?.isEmpty == false) ? " effort=\(effort!)" : ""
+            Log.write("claude OK [\(model)\(eff)] \(userMessage.count)->\(out.count) chars in \(String(format: "%.2f", dt))s")
+        }
+        return result
+    }
+
+    /// Deterministic test seam: exercise the exact prompt-file/stdin/process-group transport against a
+    /// synthetic executable, without probing credentials or making a provider call.
+    static func spawnSyncForTest(executable: String, systemPrompt: String, userMessage: String,
+                                 model: String = ModeModelCatalog.claudeId, effort: String? = nil,
+                                 timeout: TimeInterval = 5,
+                                 environment: [String: String] = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"]) -> CleanupClient.Result {
+        do {
+            let run = try runTransformProcess(executable: executable, systemPrompt: systemPrompt,
+                                              userMessage: userMessage, model: model, effort: effort,
+                                              timeout: timeout, environment: environment)
+            if run.timedOut || run.terminatedBySignal { return .timedOut }
+            guard processGroupExitWasClean(leaderReaped: run.leaderReaped,
+                                           residualProcessGroup: run.residualProcessGroup) else {
+                return .unavailable("test process did not exit cleanly")
+            }
+            return parseResult(stdout: String(decoding: run.stdout, as: UTF8.self),
+                               exitCode: run.exitCode,
+                               stderrText: String(decoding: run.stderr, as: UTF8.self),
+                               sensitiveValues: [systemPrompt, userMessage])
+        } catch {
+            return .unavailable("test launch failed")
+        }
+    }
+
+    /// Deterministic watchdog seam used by the focused A2 process-group fixture.
+    static func runProcessForTest(executable: String, arguments: [String], timeout: TimeInterval,
+                                  grace: TimeInterval = 0.25) -> ProcessRunResult? {
+        try? runProcess(executable: executable, arguments: arguments, stdin: Data(),
+                        environment: ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"],
+                        timeout: timeout, grace: grace)
+    }
+
+    /// A short-lived helper observed after the leader exits is acceptable only when the bounded cleanup
+    /// actually clears the group. An unreaped leader or a final surviving descendant still fails closed.
+    static func processGroupExitWasClean(leaderReaped: Bool, residualProcessGroup: Bool) -> Bool {
+        leaderReaped && !residualProcessGroup
+    }
+
+    private static func runTransformProcess(executable: String, systemPrompt: String,
+                                            userMessage: String,
+                                            images: [TextTransformImage] = [],
+                                            model: String, effort: String?,
+                                            timeout: TimeInterval,
+                                            environment: [String: String]) throws -> ProcessRunResult {
+        let promptDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("viddydictate-claude-\(UUID().uuidString)", isDirectory: true)
+        let promptFile = promptDir.appendingPathComponent("system-prompt.txt")
+        do {
+            try FileManager.default.createDirectory(at: promptDir, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            _ = chmod(promptDir.path, 0o700)
+            guard FileManager.default.createFile(atPath: promptFile.path,
+                                                 contents: Data(systemPrompt.utf8),
+                                                 attributes: [.posixPermissions: 0o600]) else {
+                throw SpawnError.promptFile
+            }
+            _ = chmod(promptFile.path, 0o600)
+        } catch {
+            try? FileManager.default.removeItem(at: promptDir)
+            throw SpawnError.promptFile
+        }
+        defer { try? FileManager.default.removeItem(at: promptDir) }
+
+        let inputFormat = images.isEmpty ? "text" : "stream-json"
+        guard let stdin = images.isEmpty
+                ? Data(userMessage.utf8)
+                : multimodalInputData(userMessage: userMessage, images: images) else {
+            throw SpawnError.process("multimodal input")
+        }
+        let args = buildArgs(systemPromptFilePath: promptFile.path, model: model, effort: effort,
+                             inputFormat: inputFormat)
+        return try runProcess(executable: executable, arguments: args, stdin: stdin,
+                              environment: environment, timeout: timeout, grace: 2)
+    }
+
+    private static func runProcess(executable: String, arguments: [String], stdin: Data,
+                                   environment: [String: String], timeout: TimeInterval,
+                                   grace: TimeInterval) throws -> ProcessRunResult {
+        let input = Pipe(), output = Pipe(), error = Pipe()
+        let inputRead = input.fileHandleForReading.fileDescriptor
+        let inputWrite = input.fileHandleForWriting.fileDescriptor
+        let outputRead = output.fileHandleForReading.fileDescriptor
+        let outputWrite = output.fileHandleForWriting.fileDescriptor
+        let errorRead = error.fileHandleForReading.fileDescriptor
+        let errorWrite = error.fileHandleForWriting.fileDescriptor
+        _ = fcntl(inputWrite, F_SETNOSIGPIPE, 1)
+
+        var attributes: posix_spawnattr_t?
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawnattr_init(&attributes) == 0,
+              posix_spawn_file_actions_init(&actions) == 0 else {
+            throw SpawnError.process("spawn init")
+        }
+        defer {
+            posix_spawnattr_destroy(&attributes)
+            posix_spawn_file_actions_destroy(&actions)
+        }
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)) == 0,
+              posix_spawnattr_setpgroup(&attributes, 0) == 0,
+              posix_spawn_file_actions_adddup2(&actions, inputRead, STDIN_FILENO) == 0,
+              posix_spawn_file_actions_adddup2(&actions, outputWrite, STDOUT_FILENO) == 0,
+              posix_spawn_file_actions_adddup2(&actions, errorWrite, STDERR_FILENO) == 0,
+              posix_spawn_file_actions_addclose(&actions, inputWrite) == 0,
+              posix_spawn_file_actions_addclose(&actions, outputRead) == 0,
+              posix_spawn_file_actions_addclose(&actions, errorRead) == 0 else {
+            throw SpawnError.process("spawn config")
+        }
+
+        var pid: pid_t = 0
+        let argv = [executable] + arguments
+        let envp = environment.map { "\($0.key)=\($0.value)" }.sorted()
+        let spawnStatus = withCStringArray(argv) { argvPointers in
+            withCStringArray(envp) { envPointers in
+                posix_spawn(&pid, executable, &actions, &attributes, argvPointers, envPointers)
+            }
+        }
+        guard spawnStatus == 0 else { throw SpawnError.process("spawn \(spawnStatus)") }
+        _ = setpgid(pid, pid) // harmless if the atomic spawn attribute already won the race
+
+        input.fileHandleForReading.closeFile()
+        output.fileHandleForWriting.closeFile()
+        error.fileHandleForWriting.closeFile()
+
+        let writerDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? input.fileHandleForWriting.write(contentsOf: stdin)
+            try? input.fileHandleForWriting.close()
+            writerDone.signal()
+        }
+        var stdout = Data(), stderr = Data()
+        let outputDone = DispatchSemaphore(value: 0), errorDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            stdout = output.fileHandleForReading.readDataToEndOfFile()
+            outputDone.signal()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            stderr = error.fileHandleForReading.readDataToEndOfFile()
+            errorDone.signal()
+        }
+
+        var status: Int32 = 0
+        var reaped = false
+        var timedOut = false
+        var escalatedToSIGKILL = false
+        let deadline = Date().addingTimeInterval(max(0.01, timeout))
+        while Date() < deadline {
+            let waited = waitpid(pid, &status, WNOHANG)
+            if waited == pid { reaped = true; break }
+            if waited < 0 && errno != EINTR { break }
+            usleep(20_000)
+        }
+
+        if !reaped {
+            timedOut = true
+            _ = kill(-pid, SIGTERM)
+            let graceDeadline = Date().addingTimeInterval(max(0, grace))
+            while Date() < graceDeadline {
+                let waited = waitpid(pid, &status, WNOHANG)
+                if waited == pid { reaped = true }
+                if processGroupIsEmpty(pid) && reaped { break }
+                usleep(20_000)
+            }
+            if !processGroupIsEmpty(pid) {
+                escalatedToSIGKILL = true
+                _ = kill(-pid, SIGKILL)
+            }
+            if !reaped {
+                while true {
+                    let waited = waitpid(pid, &status, 0)
+                    if waited == pid { reaped = true; break }
+                    if waited < 0 && errno != EINTR { break }
+                }
+            }
+        }
+
+        // A CLI may briefly leave a same-group helper behind after its leader exits. Clean the group so
+        // pipe drains finish and the next transform never inherits an orphan. `hadResidual` records that
+        // first observation for diagnostics; `residual` is the fail-closed post-cleanup invariant.
+        let hadResidual = !processGroupIsEmpty(pid)
+        var residual = hadResidual
+        if residual {
+            _ = kill(-pid, SIGTERM)
+            usleep(50_000)
+            if !processGroupIsEmpty(pid) {
+                escalatedToSIGKILL = true
+                _ = kill(-pid, SIGKILL)
+            }
+            for _ in 0..<25 where !processGroupIsEmpty(pid) { usleep(20_000) }
+            residual = !processGroupIsEmpty(pid)
+        }
+
+        writerDone.wait()
+        outputDone.wait()
+        errorDone.wait()
+        let signal = status & 0x7f
+        let exitCode = signal == 0 ? (status >> 8) & 0xff : 128 + signal
+        return ProcessRunResult(exitCode: exitCode, stdout: stdout, stderr: stderr,
+                                timedOut: timedOut, terminatedBySignal: signal != 0,
+                                leaderReaped: reaped, escalatedToSIGKILL: escalatedToSIGKILL,
+                                hadResidualProcessGroup: hadResidual,
+                                residualProcessGroup: residual)
+    }
+
+    private static func processGroupIsEmpty(_ pid: pid_t) -> Bool {
+        errno = 0
+        return kill(-pid, 0) != 0 && errno == ESRCH
+    }
+
+    private static func withCStringArray<R>(_ strings: [String],
+                                            _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
+        var pointers: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
+        pointers.append(nil)
+        defer { for pointer in pointers where pointer != nil { free(pointer) } }
+        return pointers.withUnsafeMutableBufferPointer { body($0.baseAddress!) }
+    }
+
+    // MARK: - async entry (mirrors CleanupClient.cleanup / EmailClient.email)
+
+    /// Run a Claude transform, calling back with a `CleanupClient.Result` on a background queue (the
+    /// registry hops to main before landing). The caller supplies the augmented system prompt and the
+    /// mode-appropriately-wrapped user message, exactly as it would for the local clients. `model`/`effort`
+    /// default to the per-mode Sonnet 5 pin (existing callers unchanged); explicit route bundles pass their
+    /// own hard-pinned Claude arm.
+    static func transform(systemPrompt: String, userMessage: String,
+                          images: [TextTransformImage] = [],
+                          model: String = ModeModelCatalog.claudeId, effort: String? = nil,
+                          timeout: TimeInterval = defaultTimeout,
+                          completion: @escaping (CleanupClient.Result) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(spawnSync(systemPrompt: systemPrompt, userMessage: userMessage,
+                                 images: images,
+                                 model: model, effort: effort, timeout: timeout))
+        }
+    }
+}
