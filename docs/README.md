@@ -16,6 +16,8 @@ troubleshooting.
 
 ## Contributor and maintainer reference
 
+- [Releasing](releasing.md): producing a notarized, stapled `.dmg` with a Developer ID, and the
+  one-time certificate and notarization setup it needs.
 - [Verification rail](verification.md): deterministic, services, GUI, and full verification tiers.
 - [Codex isolation](codex-isolation.md): the security boundary for Codex transforms.
 - [Model residency](model-residency.md): LM Studio loading, eviction, and residency verification.

@@ -163,24 +163,61 @@ cp "$WEB_DIST/index.html" "$WEB_DIST/app.js" "$WEB_DIST/app.css" "$RES/StickyNot
 echo "[build] writing Info.plist"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
-echo "[build] codesign"
-if [ -f "$KC" ]; then
-  prepare_signing_keychain
-  if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
-       -o runtime --entitlements "$ENTITLEMENTS" "$APP"; then
-    echo "[build] signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
-  else
-    echo "[build] ERROR: signing keychain present but stable-identity signing FAILED."
-    echo "[build]        Aborting instead of ad-hoc signing, which would silently void the app's"
-    echo "[build]        Accessibility / Input-Monitoring grants. Fix the keychain and rebuild."
-    echo "[build]        Do NOT re-run setup-signing.sh — that mints a NEW identity and also"
-    echo "[build]        resets the grants."
+# release.sh stamps a version here rather than committing one, so the source Info.plist stays the
+# single development value and a release is not a dirty tree. Stamped BEFORE signing, because the
+# plist is part of what the signature covers.
+if [ -n "${VD_APP_VERSION:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VD_APP_VERSION" "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VD_APP_VERSION" "$APP/Contents/Info.plist"
+  echo "[build] stamped version $VD_APP_VERSION"
+fi
+
+# Sign one bundle. Three paths, highest priority first:
+#
+#   1. VD_SIGN_IDENTITY is set  -> RELEASE signing. release.sh sets this to a Developer ID cert's
+#      SHA-1 hash. It passes a HASH and not a name deliberately: two certs can share a common name,
+#      and `--keychain` does NOT disambiguate them. Proven 2026-08-16 - a sign explicitly scoped to
+#      one keychain used a same-named cert from the search list instead, and the only tell was the
+#      leaf hash in the designated requirement. A hash cannot be ambiguous.
+#      Adds `--timestamp`, which notarization requires and the local path does not need.
+#   2. the self-signed keychain exists -> the stable LOCAL identity (TCC grants survive rebuilds).
+#   3. neither -> ad-hoc, and the grants reset every build.
+sign_bundle() {
+  bundle="$1"; tag="$2"
+
+  if [ -n "${VD_SIGN_IDENTITY:-}" ]; then
+    if codesign --force --sign "$VD_SIGN_IDENTITY" --timestamp \
+         -o runtime --entitlements "$ENTITLEMENTS" "$bundle"; then
+      echo "$tag signed for RELEASE ($VD_SIGN_IDENTITY), hardened runtime + secure timestamp"
+      return 0
+    fi
+    echo "$tag ERROR: VD_SIGN_IDENTITY is set but release signing FAILED."
+    echo "$tag        Refusing to fall back to a local or ad-hoc identity, which would produce a"
+    echo "$tag        bundle that cannot be notarized and would not be obvious downstream."
     exit 1
   fi
-else
-  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$APP"
-  echo "[build] ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
-fi
+
+  if [ -f "$KC" ]; then
+    prepare_signing_keychain
+    if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
+         -o runtime --entitlements "$ENTITLEMENTS" "$bundle"; then
+      echo "$tag signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
+      return 0
+    fi
+    echo "$tag ERROR: signing keychain present but stable-identity signing FAILED."
+    echo "$tag        Aborting instead of ad-hoc signing, which would silently void the app's"
+    echo "$tag        Accessibility / Input-Monitoring grants. Fix the keychain and rebuild."
+    echo "$tag        Do NOT re-run setup-signing.sh — that mints a NEW identity and also"
+    echo "$tag        resets the grants."
+    exit 1
+  fi
+
+  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$bundle"
+  echo "$tag ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
+}
+
+echo "[build] codesign"
+sign_bundle "$APP" "[build]"
 
 echo "[build] OK -> $APP"
 echo "[build] run (GUI):     open \"$APP\""
@@ -220,22 +257,6 @@ echo "[build][tests] writing Info.plist"
 cp "$ROOT/Info-Tests.plist" "$TEST_APP/Contents/Info.plist"
 
 echo "[build][tests] codesign"
-if [ -f "$KC" ]; then
-  prepare_signing_keychain
-  if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
-       -o runtime --entitlements "$ENTITLEMENTS" "$TEST_APP"; then
-    echo "[build][tests] signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
-  else
-    echo "[build][tests] ERROR: signing keychain present but stable-identity signing FAILED."
-    echo "[build][tests]        Aborting instead of ad-hoc signing, which would silently void the"
-    echo "[build][tests]        test bundle's microphone grant. Fix the keychain and rebuild."
-    echo "[build][tests]        Do NOT re-run setup-signing.sh — that mints a NEW identity and also"
-    echo "[build][tests]        resets the grants."
-    exit 1
-  fi
-else
-  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$TEST_APP"
-  echo "[build][tests] ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
-fi
+sign_bundle "$TEST_APP" "[build][tests]"
 
 echo "[build][tests] OK -> $TEST_APP"

@@ -126,10 +126,16 @@ one you want to make. It is a supported way to run the app, not a broken state.
 ## Where this is going
 
 The fix that closes the class is a Developer ID certificate with notarization and the hardened
-runtime. The designated requirement would then anchor to Apple rather than to a local certificate,
-the private key would stay with the maintainer instead of being generated on every user's machine,
-and `setup-signing.sh`, the remaining trust plumbing in `SigningTrustGuard.swift`, and this whole
-tradeoff would be deleted rather than documented. It is planned, not done.
+runtime. The designated requirement then anchors to Apple rather than to a local certificate, the
+private key stays with the maintainer instead of being generated on every user's machine, and
+`setup-signing.sh`, the remaining trust plumbing in `SigningTrustGuard.swift`, and this whole
+tradeoff stop applying to anyone who is not building from source.
+
+**The tooling for that now exists**: `release.sh` plus [releasing.md](releasing.md) produce a
+notarized, stapled `.dmg`. What is still missing is the certificate itself, which is a paid, human
+enrollment step. Until a release is published, building from source remains the only way in, so
+everything above still applies. Once it is, most users should download the release and never create
+a signing identity at all.
 
 ## Reporting
 
