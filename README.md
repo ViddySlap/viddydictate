@@ -88,6 +88,13 @@ identity lets macOS preserve Accessibility and Input Monitoring grants across re
 [docs/signing-and-tcc.md](docs/signing-and-tcc.md) for what that identity is, what it is trusted for,
 and its security tradeoff.
 
+`setup-signing.sh` asks you to choose a keychain password. It is not stored anywhere, so save it in
+your password manager; four unrelated words is the right shape. `build.sh` will ask for it whenever
+the keychain has locked, which it does after every build and after 15 minutes idle. That prompt is
+the point rather than friction: a locked keychain cannot sign, which is what stops another process
+on your Mac from signing a binary that would inherit ViddyDictate's Accessibility and Input
+Monitoring. Never put that password in a file or a script to avoid the prompt.
+
 ```sh
 ./setup-signing.sh
 ./build.sh

@@ -10,6 +10,7 @@ APP="$BUILD/$APP_NAME.app"
 MACOS="$APP/Contents/MacOS"
 HELPERS="$APP/Contents/Helpers"
 RES="$APP/Contents/Resources"
+ENTITLEMENTS="$ROOT/ViddyDictate.entitlements"
 
 # ---- Pre-existing-install guard ---------------------------------------------------------------
 # The live app must run from ~/Applications (see install-app-agent.sh). An earlier ViddyDictate
@@ -70,6 +71,41 @@ if pgrep -f "^${BUILD}/.*\.app/Contents/MacOS/" >/dev/null 2>&1; then
   sleep 1
 fi
 
+KC="$HOME/Library/Keychains/vd-signing.keychain-db"
+SIGN_ID="ViddyDictate Self-Signed"
+
+# Make the signing keychain usable, prompting only when it is actually necessary.
+#
+# Order matters. A LOCKED keychain resolves to zero identities, indistinguishable from the
+# 2026-07-13 trust-settings wipe, so check first, unlock only if the identity is not already
+# resolvable, and re-check before concluding trust is broken. Without that, a hardened (lockable)
+# keychain would trigger the trust heal on every single build.
+prepare_signing_keychain() {
+  # Explicit ifs, not && chains: under `set -e` a failing && list is a foot-gun here.
+  if security find-identity -v -p codesigning "$KC" 2>/dev/null | grep -q "$SIGN_ID"; then
+    return 0
+  fi
+
+  # Legacy keychains (pre-hardening) carry a password published in this repo's history, so try it
+  # and keep those installs building unattended. A hardened keychain rejects it, and macOS then asks
+  # the user for the password they chose at setup.
+  if ! security unlock-keychain -p "vd-signing-local" "$KC" 2>/dev/null; then
+    security unlock-keychain "$KC"
+  fi
+
+  if security find-identity -v -p codesigning "$KC" 2>/dev/null | grep -q "$SIGN_ID"; then
+    return 0
+  fi
+
+  # Still unresolvable with the keychain unlocked, so this is the trust-settings wipe. Re-bless the
+  # existing cert. NEVER mint a new one; that resets the TCC grants.
+  echo "[build] stable identity not trusted (trust-settings wipe?) — restoring trust"
+  HEAL_PEM="$(mktemp)"
+  security find-certificate -c "$SIGN_ID" -p "$KC" > "$HEAL_PEM"
+  security add-trusted-cert -p codeSign -k "$KC" "$HEAL_PEM" || true
+  rm -f "$HEAL_PEM"
+}
+
 echo "[build] cleaning"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$HELPERS" "$RES"
@@ -128,21 +164,10 @@ echo "[build] writing Info.plist"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
 echo "[build] codesign"
-KC="$HOME/Library/Keychains/vd-signing.keychain-db"
-SIGN_ID="ViddyDictate Self-Signed"
 if [ -f "$KC" ]; then
-  # Self-heal (2026-07-13 incident): a macOS update can wipe the user trust-settings store, which
-  # flips the stable identity to CSSMERR_TP_NOT_TRUSTED and would make signing fail. Re-bless the
-  # existing cert (NEVER mint a new one — that resets the TCC grants) before signing.
-  if ! security find-identity -v -p codesigning "$KC" | grep -q "$SIGN_ID"; then
-    echo "[build] stable identity not trusted (trust-settings wipe?) — restoring trust"
-    HEAL_PEM="$(mktemp)"
-    security find-certificate -c "$SIGN_ID" -p "$KC" > "$HEAL_PEM"
-    security add-trusted-cert -p codeSign -k "$KC" "$HEAL_PEM" || true
-    rm -f "$HEAL_PEM"
-  fi
-  security unlock-keychain -p "vd-signing-local" "$KC"
-  if codesign --force --sign "$SIGN_ID" --keychain "$KC" "$APP"; then
+  prepare_signing_keychain
+  if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
+       -o runtime --entitlements "$ENTITLEMENTS" "$APP"; then
     echo "[build] signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
   else
     echo "[build] ERROR: signing keychain present but stable-identity signing FAILED."
@@ -153,7 +178,7 @@ if [ -f "$KC" ]; then
     exit 1
   fi
 else
-  codesign --force --sign - "$APP"
+  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$APP"
   echo "[build] ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
 fi
 
@@ -196,17 +221,9 @@ cp "$ROOT/Info-Tests.plist" "$TEST_APP/Contents/Info.plist"
 
 echo "[build][tests] codesign"
 if [ -f "$KC" ]; then
-  # Apply the same stable-identity self-heal used by the shipped app so this bundle's own TCC
-  # grants survive rebuilds. Never mint a replacement identity here.
-  if ! security find-identity -v -p codesigning "$KC" | grep -q "$SIGN_ID"; then
-    echo "[build][tests] stable identity not trusted (trust-settings wipe?) — restoring trust"
-    HEAL_PEM="$(mktemp)"
-    security find-certificate -c "$SIGN_ID" -p "$KC" > "$HEAL_PEM"
-    security add-trusted-cert -p codeSign -k "$KC" "$HEAL_PEM" || true
-    rm -f "$HEAL_PEM"
-  fi
-  security unlock-keychain -p "vd-signing-local" "$KC"
-  if codesign --force --sign "$SIGN_ID" --keychain "$KC" "$TEST_APP"; then
+  prepare_signing_keychain
+  if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
+       -o runtime --entitlements "$ENTITLEMENTS" "$TEST_APP"; then
     echo "[build][tests] signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
   else
     echo "[build][tests] ERROR: signing keychain present but stable-identity signing FAILED."
@@ -217,7 +234,7 @@ if [ -f "$KC" ]; then
     exit 1
   fi
 else
-  codesign --force --sign - "$TEST_APP"
+  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$TEST_APP"
   echo "[build][tests] ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
 fi
 

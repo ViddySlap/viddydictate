@@ -93,25 +93,42 @@ run the normal signed build later, after stable signing is ready, before calling
 
 ## 4. Create stable signing and build
 
-Run:
+**`setup-signing.sh` is interactive and is a human-only step. Do not run it yourself.** It asks
+macOS to prompt for a keychain password that the user chooses and that is never stored. Running it
+from an agent shell hangs on a prompt you cannot see and cannot answer.
+
+Hand the user this command and wait for them to tell you it finished:
 
 ```sh
 ./setup-signing.sh
+```
+
+Tell them what they are choosing, because the script's own guidance scrolls past quickly: the
+password is not saved anywhere, they should put it in their password manager, and four unrelated
+words is the shape to aim for. If they lose it nothing is bricked; the recovery is in
+[docs/signing-and-tcc.md](docs/signing-and-tcc.md) and costs one permission re-grant.
+
+Then build:
+
+```sh
 ./build.sh
 ```
 
-`setup-signing.sh` creates a local self-signed code-signing identity. Reusing that identity is what
-keeps Accessibility and Input Monitoring grants attached to the app across rebuilds. `build.sh`
-creates both `build/ViddyDictate.app` and the verification-only `build/ViddyDictateTests.app`.
+`build.sh` creates both `build/ViddyDictate.app` and the verification-only
+`build/ViddyDictateTests.app`, signs them with the hardened runtime, and reuses the stable identity
+so Accessibility and Input Monitoring survive rebuilds.
 
-If your review flags this script, the flag is correct and the tradeoff is documented in
-[docs/signing-and-tcc.md](docs/signing-and-tcc.md): the keychain password is published in the repo,
-auto-lock is disabled, and the TCC grants are pinned to the certificate and bundle identifier rather
-than the binary hash, so a same-user process can reach those grants. Surface that page to the user
-and let them decide. Do not silently harden the script, and do not halt the install over it without
-telling them the supported alternative, which is skipping `setup-signing.sh` and running the ad-hoc
-build from `build/` at the cost of re-granting permissions after every rebuild and losing the
-`~/Applications` install and auto-start.
+**`build.sh` may stop and ask for that keychain password**, because the keychain locks when idle and
+after each build. On a fresh install it usually will. Hand the prompt to the user; do not try to
+supply the password yourself, and never write it into a script, a dotfile, or an environment
+variable to avoid the prompt. Doing so undoes the only thing protecting the signing key.
+
+If your security review flags this design, read
+[docs/signing-and-tcc.md](docs/signing-and-tcc.md) before escalating. It states the residual risk
+plainly, including what the password gate does not cover. Do not silently harden these scripts. If the
+user prefers to avoid the local certificate entirely, the supported alternative is skipping
+`setup-signing.sh` and running the ad-hoc build from `build/`, at the cost of re-granting
+permissions after every rebuild and losing the `~/Applications` install and auto-start.
 
 Confirm the shipping bundle exists and is not ad-hoc signed:
 
