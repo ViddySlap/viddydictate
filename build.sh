@@ -11,6 +11,65 @@ MACOS="$APP/Contents/MacOS"
 HELPERS="$APP/Contents/Helpers"
 RES="$APP/Contents/Resources"
 
+# ---- Pre-existing-install guard ---------------------------------------------------------------
+# The live app must run from ~/Applications (see install-app-agent.sh). An earlier ViddyDictate
+# topology ran it straight out of build/, and on such a machine the `rm -rf` below deletes the
+# RUNNING app: launchd loses its target and the CGEventTap dies without tearing down, which can
+# strand a held modifier and leave the keyboard unresponsive. That is a real report, not a
+# hypothetical (external installer, 2026-08-15), and it lands before anyone reads a warning because
+# ./scripts/verify.sh calls this script. Refuse before touching anything and hand back the fix.
+CANONICAL_LIVE="$HOME/Applications/$APP_NAME.app"
+LEGACY_LABELS=()
+LEGACY_TARGETS=()
+if [ -d "$HOME/Library/LaunchAgents" ]; then
+  for plist in "$HOME"/Library/LaunchAgents/*.plist; do
+    [ -f "$plist" ] || continue
+    # Convert first so binary plists are covered, then look for any ViddyDictate executable path
+    # regardless of which key holds it (Program, ProgramArguments, or a shell wrapper).
+    target="$(plutil -convert xml1 -o - "$plist" 2>/dev/null \
+      | grep -oE "/[^<>[:space:]]*${APP_NAME}\.app/Contents/MacOS/${APP_NAME}" \
+      | head -n 1 || true)"
+    [ -n "$target" ] || continue
+    case "$target" in
+      "$CANONICAL_LIVE"/*) continue ;;   # correct topology, nothing to migrate
+    esac
+    LEGACY_LABELS+=("$(basename "$plist" .plist)")
+    LEGACY_TARGETS+=("$target")
+  done
+fi
+
+if [ "${#LEGACY_LABELS[@]}" -gt 0 ]; then
+  echo "[build] ERROR: an existing ViddyDictate install runs from a non-standard path."
+  echo "[build]"
+  echo "[build] These LaunchAgents point outside $CANONICAL_LIVE:"
+  for i in "${!LEGACY_LABELS[@]}"; do
+    echo "[build]     ${LEGACY_LABELS[$i]} -> ${LEGACY_TARGETS[$i]}"
+  done
+  echo "[build]"
+  echo "[build] Building now would delete a live app out from under launchd. If that app holds the"
+  echo "[build] keyboard event tap, the keyboard can stop responding until you log out."
+  echo "[build]"
+  echo "[build] Retire the old install first, then rerun this script:"
+  echo "[build]"
+  for lbl in "${LEGACY_LABELS[@]}"; do
+    echo "[build]     launchctl bootout \"gui/\$(id -u)/$lbl\" 2>/dev/null || true"
+    echo "[build]     rm -f \"\$HOME/Library/LaunchAgents/$lbl.plist\""
+  done
+  echo "[build]"
+  echo "[build] Then: ./build.sh && ./install-app-agent.sh"
+  echo "[build] The new topology installs to $CANONICAL_LIVE and survives rebuilds."
+  echo "[build] See \"Upgrading from an earlier install\" in README.md."
+  exit 1
+fi
+
+# A hand-launched instance from build/ (the README's `open build/ViddyDictate.app`) would also be
+# destroyed by the rm -rf below. SIGTERM lets it tear the event tap down; yanking the bundle does not.
+if pgrep -f "^${BUILD}/.*\.app/Contents/MacOS/" >/dev/null 2>&1; then
+  echo "[build] stopping instance running from build/ (clean shutdown before rebuild)"
+  pkill -TERM -f "^${BUILD}/.*\.app/Contents/MacOS/" 2>/dev/null || true
+  sleep 1
+fi
+
 echo "[build] cleaning"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$HELPERS" "$RES"

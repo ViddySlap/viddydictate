@@ -43,23 +43,71 @@ open build/ViddyDictate.app
 `build/ViddyDictateTests.app`. If the committed Sticky Notes bundle is missing, run
 `./build-web.sh` first.
 
+## Upgrading from an earlier install
+
+Skip this section on a machine that has never run ViddyDictate.
+
+Do this **before** `./scripts/verify.sh` or `./build.sh`. Verification calls the build, the build
+clears `build/`, and an earlier ViddyDictate topology ran the live app straight out of `build/`.
+Rebuilding on such a machine deletes the running app: launchd loses its target, and because the app
+holds the keyboard event tap, the keyboard can stop responding until you log out. `build.sh` now
+refuses when it detects this, but check first so the refusal is never a surprise.
+
+Find any ViddyDictate LaunchAgent and see where it points:
+
+```sh
+for p in "$HOME"/Library/LaunchAgents/*.plist; do
+  t=$(plutil -convert xml1 -o - "$p" 2>/dev/null | grep -oE '/[^<>[:space:]]*ViddyDictate\.app/Contents/MacOS/ViddyDictate' | head -n1)
+  [ -n "$t" ] && echo "$(basename "$p" .plist) -> $t"
+done
+```
+
+If the only result points at `~/Applications/ViddyDictate.app`, you are already on the current
+topology. Pull, rebuild, and rerun the installers as usual.
+
+If a result points anywhere else, retire that install first. Substitute the label the command above
+printed:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.viddyslap.viddydictate" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/com.viddyslap.viddydictate.plist"
+```
+
+Then follow the normal install below. Nothing else needs to be removed by hand: settings, sticky
+notes, dictation history, and the speech-to-text environment live outside the app bundle and are
+carried forward. The installers update the daemon and its LaunchAgent in place.
+
+Because the current bundle identifier is `com.viddydictate.app`, macOS treats the migrated app as a
+new client. Grant Microphone, Accessibility, and Input Monitoring again after installing, and remove
+any stale ViddyDictate entry from System Settings > Privacy & Security so the list stays unambiguous.
+
 ## Install
 
 For a first install, create a stable local signing identity before the final build. The stable
-identity lets macOS preserve Accessibility and Input Monitoring grants across rebuilds.
+identity lets macOS preserve Accessibility and Input Monitoring grants across rebuilds. See
+[docs/signing-and-tcc.md](docs/signing-and-tcc.md) for what that identity is, what it is trusted for,
+and its security tradeoff.
 
 ```sh
 ./setup-signing.sh
 ./build.sh
 ./install-daemon.sh
-./install-websearch-helper.sh
 ./install-app-agent.sh
 ```
 
-The web-search helper is optional, but without it local web search on right Option+L is unavailable.
-The app installer is not optional for a normal installation: it copies the signed app to
+`install-app-agent.sh` is required for a normal installation: it copies the signed app to
 `~/Applications/ViddyDictate.app` and installs its login LaunchAgent. It intentionally refuses an
 ad-hoc-signed build.
+
+The web-search helper is genuinely optional and is deliberately not part of the sequence above:
+
+```sh
+./install-websearch-helper.sh
+```
+
+It installs a private Python environment with the `ddgs` DuckDuckGo client, used only by local web
+search on right Option+L. Skipping it leaves that one hotkey unavailable and changes nothing else.
+Privacy-conscious users may skip it; nothing else in the app queries DuckDuckGo.
 
 The speech-to-text installer creates a private Python environment under
 `~/Library/Application Support/ViddyDictate`, installs `mlx-whisper`, copies the vendored daemon,
@@ -139,6 +187,10 @@ tail -n 100 /tmp/viddydictate.err.log
 - If health says the model is not ready, allow the first model download and warmup to finish.
 - If every transcribe fails while health still answers, confirm `ffmpeg` is on the daemon's PATH.
 - If global hotkeys do nothing, recheck Accessibility and Input Monitoring, then relaunch the app.
+- If the keyboard itself becomes unresponsive, a ViddyDictate process holding the event tap was
+  destroyed rather than stopped, usually by rebuilding over a live install. Log out and back in to
+  clear the tap, then see "Upgrading from an earlier install" above. `build.sh` now stops a running
+  build instance cleanly and refuses to rebuild over a live install elsewhere.
 - If a text transform is unavailable, reconnect one provider in Settings > Setup. Claude Code can
   also be checked with `claude auth status --json`; Codex connection state is checked inside the app
   because ViddyDictate uses its own dedicated login.

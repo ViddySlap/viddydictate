@@ -5,6 +5,8 @@ troubleshooting.
 
 ## User and operator reference
 
+- [Code signing and TCC permissions](signing-and-tcc.md): what `setup-signing.sh` creates, why
+  permissions survive rebuilds, the security tradeoff that buys, and how to install without it.
 - [Local STT daemon](stt-daemon.md): how local transcription is installed, started, and checked.
 - [Dictation history](dictation-history.md): the optional append-only history format and location.
 - [Sticky notes open-notes aggregate](sticky-notes-open-notes.md): the read-only integration contract
