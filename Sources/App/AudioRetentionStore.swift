@@ -53,13 +53,17 @@ final class AudioRetentionStore {
         }
     }
 
-    /// Read a retained take back through the store's serial queue. Recovery deliberately uses these
-    /// on-disk bytes rather than the recorder's old in-memory snapshot: the retained clip is the durable
-    /// source of truth, and queue ordering means a just-enqueued retain finishes before this read begins.
+    /// Read a retained take back through the store's serial queue, then deliver the result off that queue.
+    /// Recovery deliberately uses these on-disk bytes rather than the recorder's old in-memory snapshot:
+    /// the retained clip is the durable source of truth. The ordering guarantee comes from enqueueing the
+    /// read on the serial queue, so a just-enqueued retain finishes before the read begins; the completion
+    /// hop does not participate in that ordering, and no caller-supplied code runs while the queue is held.
     func loadRecording(id: UUID, completion: @escaping (Data?) -> Void) {
         queue.async {
             let data = try? Data(contentsOf: self.url(for: id))
-            completion(data)
+            DispatchQueue.global(qos: .utility).async {
+                completion(data)
+            }
         }
     }
 
