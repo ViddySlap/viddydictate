@@ -224,6 +224,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         ModelResidencySelfTest.run() ? 0 : 1
     },
     .historySelftest: .init(tier: .deterministic) { arguments in
+        if let deadlockExit = AudioRetentionSelfTest.deadlockReproExit(arguments: arguments) {
+            return deadlockExit
+        }
         var samplesDirectory: URL?
         if let i = arguments.firstIndex(of: "--encoder-samples") {
             guard i + 1 < arguments.count else {

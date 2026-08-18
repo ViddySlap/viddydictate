@@ -69,6 +69,16 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case recorderTest = "--recorder-test"
 }
 
+// Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
+// is opt-in so the ordinary deterministic gate stays green rather than red-by-design. They still need
+// naming here because an unrecognized flag falls through to app.run() below, and a stray second
+// instance of this app is not a harmless no-op: one deleted live sticky notes on 2026-08-03.
+enum AudioRetentionDeadlockFlag: String, CaseIterable {
+    case repro = "--audio-retention-deadlock-repro"
+    case child = "--audio-retention-deadlock-child"
+    case scratchRoot = "--audio-retention-deadlock-scratch-root"
+}
+
 // Log any uncaught exception (helps catch a silent AppKit-swallowed throw).
 NSSetUncaughtExceptionHandler { ex in
     Log.write("FATAL \(ex.name.rawValue): \(ex.reason ?? "?") :: \(ex.callStackSymbols.prefix(6).joined(separator: " | "))")
@@ -111,6 +121,14 @@ if CommandLine.arguments.contains("--list-selftest-flags") {
     exit(0)
 }
 
+if !CommandLine.arguments.contains(SelfTestManifestFlag.historySelftest.rawValue),
+   let stray = CommandLine.arguments.first(where: {
+       AudioRetentionDeadlockFlag(rawValue: $0) != nil
+   }) {
+    FileHandle.standardError.write(Data("[viddydictate] \(stray) is a --history-selftest sub-flag; run it as: --history-selftest \(stray)\n".utf8))
+    exit(2)
+}
+
 if let entry = selfTestManifest.first(where: { CommandLine.arguments.contains($0.flag) }) {
     exit(entry.handler(CommandLine.arguments))
 }
@@ -118,6 +136,7 @@ if let entry = selfTestManifest.first(where: { CommandLine.arguments.contains($0
 // Risk 2: the shipped app no longer answers these; a stale flag must fail fast, NOT fall through to app.run().
 let flagsMovedToTestBundle = ["--list-selftest-flags"]
     + SelfTestManifestFlag.allCases.map(\.rawValue)
+    + AudioRetentionDeadlockFlag.allCases.map(\.rawValue)
 if let bad = CommandLine.arguments.first(where: { flagsMovedToTestBundle.contains($0) }) {
     FileHandle.standardError.write(Data("[viddydictate] \(bad): this test/probe flag moved to build/ViddyDictateTests.app — run it there, not the shipped app\n".utf8))
     exit(2)
