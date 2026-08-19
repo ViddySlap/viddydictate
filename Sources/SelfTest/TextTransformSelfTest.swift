@@ -28,6 +28,7 @@ enum TextTransformSelfTest {
         checkClaudePrivateTransport(reporter.record, okText: okText)
         checkTransientExitHelperCleanup(reporter.record)
         checkProcessGroupTimeout(reporter.record)
+        checkTimeoutPathTeardownEvidence(reporter.record, okText: okText)
         checkLogPrivacy(reporter.record)
 
         print("\n=== RESULT ===")
@@ -829,6 +830,103 @@ enum TextTransformSelfTest {
                   descendantGone && run?.residualProcessGroup == false)
         } catch {
             check("process-group timeout fixture setup", false)
+        }
+    }
+
+    /// EVIDENCE ON THE TIMEOUT PATH. `spawnSync` returns `.timedOut` before `processGroupExitWasClean` is
+    /// ever consulted, so an unclean process-group exit on that path -- a real leak -- used to produce no
+    /// log line at all: the comment above that check described an intent the early return made
+    /// unreachable. The fix is evidence, not routing, so this pins BOTH halves -- the log now says what it
+    /// tore down, and every outcome is exactly the one it was before.
+    ///
+    /// The unclean teardown is forced through the ECHILD branch `runProcess` documents: with SIGCHLD set
+    /// to SIG_IGN the kernel auto-reaps, `waitpid` answers ECHILD, and the run is classified
+    /// `timedOut=true, leaderReaped=false` -- an unclean group exit that returns on the TIMEOUT path and
+    /// so never reaches the cleanliness check. That is precisely the shape the hole hid. The lever is
+    /// scoped to the one call and the previous disposition is restored immediately.
+    private static func checkTimeoutPathTeardownEvidence(_ check: (String, Bool) -> Void,
+                                                         okText: (CleanupClient.Result) -> String?) {
+        print("--- timeout-path teardown evidence ---")
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("viddydictate-d3-timeout-evidence-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: root) }
+            let executable = root.appendingPathComponent("evidence-fixture")
+            let script = """
+            #!/bin/sh
+            /bin/cat > /dev/null
+            /usr/bin/printf '%s\n' '{"type":"result","is_error":false,"result":"synthetic-ok"}'
+            """
+            try SelfTestFixtureExecutable.install(script: script, at: executable, mode: 0o700)
+
+            // Only the lines this run appended, so a phrase left in the log by an earlier case can never
+            // stand in for one this call was supposed to emit.
+            func appendedLog(_ body: () -> CleanupClient.Result) -> (CleanupClient.Result, String) {
+                Log.flushForTest()
+                let before = ((try? String(contentsOf: Log.url, encoding: .utf8)) ?? "").count
+                let result = body()
+                Log.flushForTest()
+                let after = (try? String(contentsOf: Log.url, encoding: .utf8)) ?? ""
+                return (result, String(after.dropFirst(before)))
+            }
+            func line(_ log: String, containing needle: String) -> String {
+                log.split(separator: "\n").first { $0.contains(needle) }.map(String.init) ?? ""
+            }
+
+            let (healthy, healthyLog) = appendedLog {
+                CloudCleanupClient.spawnSyncForTest(
+                    executable: executable.path, systemPrompt: "synthetic-prompt",
+                    userMessage: "synthetic-input")
+            }
+            check("a clean teardown keeps its outcome and stays silent -- evidence is not noise",
+                  okText(healthy) == "synthetic-ok"
+                    && !healthyLog.contains("did not exit cleanly")
+                    && !healthyLog.contains("timed out / killed"))
+
+            let previousSIGCHLD = signal(SIGCHLD, SIG_IGN)
+            let (forced, forcedLog) = appendedLog {
+                CloudCleanupClient.spawnSyncForTest(
+                    executable: executable.path, systemPrompt: "synthetic-prompt",
+                    userMessage: "synthetic-input")
+            }
+            _ = signal(SIGCHLD, previousSIGCHLD)
+            var forcedTimedOut = false
+            if case .timedOut = forced { forcedTimedOut = true }
+            let residualLine = line(forcedLog, containing: "did not exit cleanly")
+            let timeoutLine = line(forcedLog, containing: "timed out / killed after")
+
+            check("an unclean process-group exit still returns on the timeout path, outcome unchanged",
+                  forcedTimedOut && !timeoutLine.isEmpty)
+            check("that unclean exit is no longer invisible: the residual line is emitted before the "
+                    + "timeout return, not after the check the return skips",
+                  residualLine.contains("claude: process group did not exit cleanly")
+                    && residualLine.contains("leaderReaped=false"))
+            check("both lines carry reap evidence AND D2's drain evidence, which is the pair that "
+                    + "separates a clean kill from an escaped pipe holder",
+                  [residualLine, timeoutLine].allSatisfy {
+                      $0.contains("leaderReaped=") && $0.contains("residual=")
+                        && $0.contains("drainsComplete=true") && $0.contains("stdinWriter=true")
+                        && $0.contains("stdoutEOF=true") && $0.contains("stderrEOF=true")
+                  })
+
+            // The one shape no fixture can stage -- a descendant that survives the bounded group cleanup.
+            // Rendering is pinned directly so the leak reads as a leak whenever it does happen.
+            let leaked = CloudCleanupClient.ProcessRunResult(
+                exitCode: 137, stdout: Data(), stderr: Data(),
+                timedOut: true, terminatedBySignal: true,
+                leaderReaped: true, escalatedToSIGKILL: true,
+                hadResidualProcessGroup: true, residualProcessGroup: true,
+                drainsComplete: false, stdinWriterComplete: true,
+                stdoutEOF: false, stderrEOF: true)
+            let leakedEvidence = CloudCleanupClient.teardownEvidence(leaked)
+            check("a genuine residual group with an unfinished drain renders as exactly that",
+                  leakedEvidence.contains("residual=true") && leakedEvidence.contains("sigkill=true")
+                    && leakedEvidence.contains("drainsComplete=false")
+                    && leakedEvidence.contains("stdoutEOF=false"))
+        } catch {
+            check("timeout-path evidence fixture setup", false)
         }
     }
 

@@ -323,6 +323,14 @@ enum CloudCleanupClient {
             return .unavailable("launch failed")
         }
 
+        // LEAK EVIDENCE FIRST, OUTCOME AFTER. Every branch of the cascade below returns, and two of them
+        // return before `processGroupExitWasClean` is ever consulted -- so until this line existed, a
+        // genuine residual process group on the timeout path was invisible in the log and the comment
+        // under it described an intent the early return made unreachable. Hoisting the evidence above the
+        // cascade makes it unskippable while leaving the cascade, and every outcome it returns, exactly
+        // as it was: this logs, it does not decide.
+        logResidualProcessGroup(run)
+
         // A drain that hit its deadline means an output stream never closed, so this run produced nothing
         // usable however cleanly the process tree went away. Checked BEFORE the timeout mapping because it
         // is the more specific fact and deserves the log line; both are non-`.ok` and land the same raw
@@ -330,23 +338,23 @@ enum CloudCleanupClient {
         // very likely answered, and only `.unavailable` would bar the user's same-provider retry -- which
         // is exactly the retry that works here, because the next spawn gets a fresh pipe.
         guard run.drainsComplete else {
-            Log.write("claude: output streams never closed within the \(Int(drainDeadline))s drain "
-                + "deadline (stdinWriter=\(run.stdinWriterComplete), stdoutEOF=\(run.stdoutEOF), "
-                + "stderrEOF=\(run.stderrEOF), leaderReaped=\(run.leaderReaped), "
-                + "residual=\(run.residualProcessGroup)) - discarding output and falling back")
+            logTeardown("output streams never closed within the \(Int(drainDeadline))s drain deadline "
+                + "- discarding output and falling back", run)
             return .timedOut
         }
 
         // A watchdog group kill is a timeout however the CLI exits. Preserve the existing `.timedOut`
         // mapping for an abnormal signal, while treating a residual descendant as a fail-closed error.
+        // The evidence rides this line too, because a timeout that tore down cleanly and a timeout that
+        // left a pipe holder behind are the same sentence otherwise -- and the second is the bug.
         if run.timedOut || run.terminatedBySignal {
-            Log.write("claude: timed out / killed after \(Int(timeout))s")
+            logTeardown("timed out / killed after \(Int(timeout))s", run)
             return .timedOut
         }
         guard processGroupExitWasClean(leaderReaped: run.leaderReaped,
                                        residualProcessGroup: run.residualProcessGroup) else {
-            Log.write("claude: process group did not exit cleanly "
-                + "(leaderReaped=\(run.leaderReaped), residual=\(run.residualProcessGroup))")
+            // No log line here: `logResidualProcessGroup` above already emitted it, on this path and on
+            // the two that return before ever reaching this check.
             return .unavailable("Claude process did not exit cleanly")
         }
         if run.hadResidualProcessGroup {
@@ -376,8 +384,19 @@ enum CloudCleanupClient {
             let run = try runTransformProcess(executable: executable, systemPrompt: systemPrompt,
                                               userMessage: userMessage, model: model, effort: effort,
                                               timeout: timeout, environment: environment)
-            guard run.drainsComplete else { return .timedOut }
-            if run.timedOut || run.terminatedBySignal { return .timedOut }
+            // Same three shapes, same evidence, same order as `spawnSync` above -- deliberately, because
+            // this seam is what a deterministic selftest can actually drive, so it is only a proxy for
+            // the production path while it says what the production path says.
+            logResidualProcessGroup(run)
+            guard run.drainsComplete else {
+                logTeardown("output streams never closed within the \(Int(drainDeadline))s drain deadline "
+                    + "- discarding output and falling back", run)
+                return .timedOut
+            }
+            if run.timedOut || run.terminatedBySignal {
+                logTeardown("timed out / killed after \(Int(timeout))s", run)
+                return .timedOut
+            }
             guard processGroupExitWasClean(leaderReaped: run.leaderReaped,
                                            residualProcessGroup: run.residualProcessGroup) else {
                 return .unavailable("test process did not exit cleanly")
@@ -416,6 +435,36 @@ enum CloudCleanupClient {
     /// so any unfinished drain is a hard failure however clean the teardown looked.
     static func drainsWereComplete(stdinWriterComplete: Bool, stdoutEOF: Bool, stderrEOF: Bool) -> Bool {
         stdinWriterComplete && stdoutEOF && stderrEOF
+    }
+
+    /// Every teardown fact this run produced, rendered once, so a non-`.ok` outcome carries the SAME
+    /// evidence whichever branch returned it. Reap evidence and drain evidence together by design: that
+    /// pair is what separates "killed cleanly and drained" from "killed, but something escaped still
+    /// holding a pipe", and in exactly that case either half read on its own looks fine. Pure, and it
+    /// renders flags only -- never a byte of the transform, so it is safe on the privacy-checked log.
+    static func teardownEvidence(_ run: ProcessRunResult) -> String {
+        "leaderReaped=\(run.leaderReaped), residual=\(run.residualProcessGroup), "
+            + "transientHelper=\(run.hadResidualProcessGroup), sigkill=\(run.escalatedToSIGKILL), "
+            + "drainsComplete=\(run.drainsComplete), stdinWriter=\(run.stdinWriterComplete), "
+            + "stdoutEOF=\(run.stdoutEOF), stderrEOF=\(run.stderrEOF)"
+    }
+
+    /// The single place a non-`.ok` teardown is described, shared by `spawnSync` and its deterministic
+    /// seam so a selftest driving the seam pins production's own rendering rather than a copy of it.
+    /// Logs and nothing else: it returns no value and every caller keeps the outcome it already chose.
+    private static func logTeardown(_ reason: String, _ run: ProcessRunResult) {
+        Log.write("claude: \(reason) - \(teardownEvidence(run))")
+    }
+
+    /// A residual process group is a LEAK, and it has to be visible however the run ended. Callers put
+    /// this ABOVE their outcome cascade rather than inside it: two branches of that cascade return before
+    /// `processGroupExitWasClean` is ever consulted, which is precisely how a genuine leak on the timeout
+    /// path used to produce no log line at all. Self-suppressing on the same predicate the cascade uses,
+    /// so a clean teardown still adds nothing.
+    private static func logResidualProcessGroup(_ run: ProcessRunResult) {
+        guard !processGroupExitWasClean(leaderReaped: run.leaderReaped,
+                                        residualProcessGroup: run.residualProcessGroup) else { return }
+        logTeardown("process group did not exit cleanly", run)
     }
 
     private static func runTransformProcess(executable: String, systemPrompt: String,
