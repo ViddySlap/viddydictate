@@ -129,7 +129,20 @@ final class DictationController {
     /// BT5: monotonically-bumped generation for the in-flight take. `cancelTake()` (Esc) bumps it so any pending
     /// transcribe / cleanup completion for the aborted take is dropped instead of landing — the "nothing lands on
     /// abort" contract holds even when Esc fires mid-processing (`.finishing`).
-    private var takeGeneration = 0
+    private let takeGenerationLock = NSLock()
+    private var takeGenerationStorage = 0
+    private var takeGeneration: Int {
+        get {
+            takeGenerationLock.lock()
+            defer { takeGenerationLock.unlock() }
+            return takeGenerationStorage
+        }
+        set {
+            takeGenerationLock.lock()
+            defer { takeGenerationLock.unlock() }
+            takeGenerationStorage = newValue
+        }
+    }
 
     /// The cleanup-suspect A/B picker (prompt-injection backstop). When `CleanupLogic.cleanupSuspect`
     /// flags an output, we show this instead of auto-pasting; `pendingPick` holds the two candidates
@@ -1038,8 +1051,7 @@ final class DictationController {
         }
         let stillCurrent: () -> Bool = { [weak self] in
             guard let self else { return false }
-            if Thread.isMainThread { return generation == self.takeGeneration }
-            return DispatchQueue.main.sync { generation == self.takeGeneration }
+            return generation == self.takeGeneration
         }
         retainedTakeRecovery.recover(
             takeID: takeID, retentionWasEnabled: retentionWasEnabled,
