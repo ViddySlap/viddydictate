@@ -769,6 +769,21 @@ enum TextTransformSelfTest {
                       leaderReaped: true, residualProcessGroup: true)
                     && !CloudCleanupClient.processGroupExitWasClean(
                         leaderReaped: false, residualProcessGroup: false))
+            // The drain half of the same contract. A clean teardown does NOT imply closed pipes: the
+            // escaped-pipe-holder shape reads clean above and unfinished here, which is the whole reason
+            // the drains carry their own deadline and their own evidence.
+            check("a healthy run reports all three drains finished at EOF",
+                  run?.drainsComplete == true && run?.stdinWriterComplete == true
+                    && run?.stdoutEOF == true && run?.stderrEOF == true)
+            check("an unfinished drain on ANY of the three streams is a hard failure",
+                  CloudCleanupClient.drainsWereComplete(
+                      stdinWriterComplete: true, stdoutEOF: true, stderrEOF: true)
+                    && !CloudCleanupClient.drainsWereComplete(
+                        stdinWriterComplete: false, stdoutEOF: true, stderrEOF: true)
+                    && !CloudCleanupClient.drainsWereComplete(
+                        stdinWriterComplete: true, stdoutEOF: false, stderrEOF: true)
+                    && !CloudCleanupClient.drainsWereComplete(
+                        stdinWriterComplete: true, stdoutEOF: true, stderrEOF: false))
         } catch {
             check("transient exit-helper fixture setup", false)
         }

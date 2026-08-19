@@ -403,6 +403,9 @@ tier_deterministic() {
         run_gate deterministic "provider-neutral transform privacy/process selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --text-transform-selftest || true
+        run_gate deterministic "Claude transport escaped-pipe-holder drain deadline repro" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --text-transform-selftest --cloud-drain-deadlock-repro || true
         run_gate deterministic "web-search argv/stdin/log privacy selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --websearch-transport-selftest || true

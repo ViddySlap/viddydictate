@@ -31,16 +31,15 @@ import Foundation
 ///
 ///     ViddyDictateTests --text-transform-selftest --cloud-drain-deadlock-repro
 ///
-/// THE `escaped` CASE IS EXPECTED TO FAIL UNTIL THE DRAINS ARE BOUNDED. That is the entire point of
-/// building it first - a gate that passed against the unfixed transport would prove nothing about
-/// the fix. It is therefore deliberately OUT of every `verify.sh` tier for now, exactly like
+/// THE `escaped` CASE WAS EXPECTED TO FAIL UNTIL THE DRAINS WERE BOUNDED. That was the entire point of
+/// building it first - a gate that passed against the unfixed transport would have proven nothing about
+/// the fix. It was therefore deliberately OUT of every `verify.sh` tier while it was red, exactly like
 /// `--audio-retention-deadlock-repro` was while `vdd-L1` proved the retained-take deadlock red.
-/// Once the drains carry a deadline, wire it in permanently beside the other transport gates in
-/// `tier_deterministic`, immediately after the `--text-transform-selftest` gate:
 ///
-///     run_gate deterministic "Claude transport escaped-pipe-holder drain deadline repro" \
-///         env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
-///         "$TEST_APP" --text-transform-selftest --cloud-drain-deadlock-repro || true
+/// `vdd-D2` bounded the drains with `CloudCleanupClient.drainDeadline`, this gate went green, and it now
+/// runs permanently in `tier_deterministic` immediately after the `--text-transform-selftest` gate. The
+/// `escaped` case costs that tier one drain deadline of wall clock by construction, because proving the
+/// bound means waiting for it. If it ever goes red again, the drains have come unbounded.
 ///
 /// NOTHING HERE MAY WEDGE THE SUITE. `vdd-F2`'s throwaway probe had to be killed externally at
 /// 20-25 s against a 5 s budget, and a test that can do that is not acceptable. So each case runs
@@ -63,8 +62,9 @@ enum CloudDrainDeadlockSelfTest {
     ///
     /// This MUST stay above the production drain deadline, and it is NOT the same clock as the
     /// caller's `timeout`/`grace`. If the bound chosen for the drains ever exceeds this, RAISE this
-    /// number - never trim the production bound to fit this test. Pre-fix nothing bounds the drain
-    /// at all, so this is simply how long the `escaped` case spends proving that.
+    /// number - never trim the production bound to fit this test. It currently sits 5 s above
+    /// `CloudCleanupClient.drainDeadline` (10 s), which is the margin the `escaped` case needs to tell
+    /// "the drain returned at its deadline" apart from "the drain never returned".
     private static let drainObservationBudget: TimeInterval = 15
 
     /// Hard external bound on the whole child: the backstop that makes this safe in a suite.

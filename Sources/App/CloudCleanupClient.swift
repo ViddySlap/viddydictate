@@ -41,6 +41,26 @@ enum CloudCleanupClient {
     /// the subscription. Well above the >= 60s the spec floors, and far above any local timeout.
     static let defaultTimeout: TimeInterval = 90
 
+    /// A SEPARATE, GENEROUS clock bounding the three pipe drains in `runProcess`, deliberately NOT the
+    /// caller's `timeout`/`grace`. Those bound the KILL; this bounds the DRAIN, and the two fail for
+    /// different reasons. It is one shared budget across all three waits, not three of them.
+    ///
+    /// WHY 10s IS GENEROUS, measured 2026-08-19 by `vdd-D2` over 35 real `runProcess` runs across 13
+    /// shapes, timing each wait individually. The drain WAIT is microseconds in every legitimate case,
+    /// because the reader threads start at spawn and run concurrently with the whole wait/TERM/KILL/reap
+    /// sequence -- by the time control reaches the waits, EOF has almost always already arrived. Worst
+    /// legitimate drain observed: 0.000004s. Two REAL `claude` subscription transforms, one of them
+    /// attachment-carrying: 0.000000s and 0.000003s. Output size is irrelevant -- 256 MiB of stdout still
+    /// waits ~0.000001s, because the bytes were consumed while the child was alive. Nor do the hostile
+    /// legitimate shapes cost the drain anything: a 3.6s trickle producer, an 8 MiB stdin the child never
+    /// reads while it lingers 2s, and a SIGTERM-ignoring same-group pipe holder that must be escalated to
+    /// group SIGKILL all wait ~0.000002s, because their cost is charged to the reap loop ABOVE the drains.
+    ///
+    /// So this bound sits ~2.5 million times above the worst measured legitimate drain. It exists only for
+    /// the pathological shape `runProcess`'s doc comment describes -- a descendant that `setsid`s out of
+    /// the group while holding the pipe, which no kill can reach and no EOF will ever end.
+    static let drainDeadline: TimeInterval = 10
+
     /// The minimal env the child inherits. Everything else is dropped by construction -- this allowlist,
     /// plus derived USER/LOGNAME, is the fix for the auth traps (no `ANTHROPIC_*`, no `USE_*_OAUTH`).
     /// Mirrors the proven `subscriptionEnv()` behavior.
@@ -245,6 +265,19 @@ enum CloudCleanupClient {
         let escalatedToSIGKILL: Bool
         let hadResidualProcessGroup: Bool
         let residualProcessGroup: Bool
+        /// Drain evidence, added alongside the reaping evidence above rather than folded into it: the
+        /// two answer different questions. `leaderReaped`/`residualProcessGroup` say whether the process
+        /// TREE went away; these say whether its OUTPUT STREAMS closed. The escaped-pipe-holder shape is
+        /// precisely the case where the first pair reads perfectly clean and this one does not.
+        ///
+        /// Ported from `CodexModelCatalogProcess`, which already reports `drainsComplete`/`stdoutEOF`/
+        /// `stderrEOF` for the same reason. The one addition is `stdinWriterComplete`: that transport
+        /// closes stdin synchronously, while this one writes it from a third background thread, so the
+        /// writer is a drain here and needs its own flag.
+        let drainsComplete: Bool
+        let stdinWriterComplete: Bool
+        let stdoutEOF: Bool
+        let stderrEOF: Bool
     }
 
     private enum SpawnError: Error {
@@ -290,6 +323,20 @@ enum CloudCleanupClient {
             return .unavailable("launch failed")
         }
 
+        // A drain that hit its deadline means an output stream never closed, so this run produced nothing
+        // usable however cleanly the process tree went away. Checked BEFORE the timeout mapping because it
+        // is the more specific fact and deserves the log line; both are non-`.ok` and land the same raw
+        // fallback. `.timedOut` rather than `.unavailable` is deliberate: the provider was reachable and
+        // very likely answered, and only `.unavailable` would bar the user's same-provider retry -- which
+        // is exactly the retry that works here, because the next spawn gets a fresh pipe.
+        guard run.drainsComplete else {
+            Log.write("claude: output streams never closed within the \(Int(drainDeadline))s drain "
+                + "deadline (stdinWriter=\(run.stdinWriterComplete), stdoutEOF=\(run.stdoutEOF), "
+                + "stderrEOF=\(run.stderrEOF), leaderReaped=\(run.leaderReaped), "
+                + "residual=\(run.residualProcessGroup)) - discarding output and falling back")
+            return .timedOut
+        }
+
         // A watchdog group kill is a timeout however the CLI exits. Preserve the existing `.timedOut`
         // mapping for an abnormal signal, while treating a residual descendant as a fail-closed error.
         if run.timedOut || run.terminatedBySignal {
@@ -329,6 +376,7 @@ enum CloudCleanupClient {
             let run = try runTransformProcess(executable: executable, systemPrompt: systemPrompt,
                                               userMessage: userMessage, model: model, effort: effort,
                                               timeout: timeout, environment: environment)
+            guard run.drainsComplete else { return .timedOut }
             if run.timedOut || run.terminatedBySignal { return .timedOut }
             guard processGroupExitWasClean(leaderReaped: run.leaderReaped,
                                            residualProcessGroup: run.residualProcessGroup) else {
@@ -355,6 +403,19 @@ enum CloudCleanupClient {
     /// actually clears the group. An unreaped leader or a final surviving descendant still fails closed.
     static func processGroupExitWasClean(leaderReaped: Bool, residualProcessGroup: Bool) -> Bool {
         leaderReaped && !residualProcessGroup
+    }
+
+    /// The DRAIN half of the same fail-closed contract, deliberately a sibling of the predicate above
+    /// rather than folded into it: they judge different evidence. That one asks whether the process TREE
+    /// went away; this one asks whether its OUTPUT STREAMS closed. The escaped-pipe-holder shape is
+    /// exactly the case where the first reads perfectly clean and this one does not, which is why one
+    /// cannot stand in for the other.
+    ///
+    /// ALL THREE must finish. A stream still open at the deadline has delivered nothing trustworthy, and
+    /// a half-delivered transform landing mid-sentence in a focused document is worse than no transform,
+    /// so any unfinished drain is a hard failure however clean the teardown looked.
+    static func drainsWereComplete(stdinWriterComplete: Bool, stdoutEOF: Bool, stderrEOF: Bool) -> Bool {
+        stdinWriterComplete && stdoutEOF && stderrEOF
     }
 
     private static func runTransformProcess(executable: String, systemPrompt: String,
@@ -410,14 +471,21 @@ enum CloudCleanupClient {
     /// servers, `private-fs`, a `sh -c ps aux | grep` and its children -- every one of them inside the
     /// leader's group, and every one gone afterwards.
     ///
-    /// THE ONE THING THAT DEFEATS IT is a descendant that leaves the process group (`setsid`) while still
-    /// holding stdout or stderr. `kill(-pid, ...)` cannot reach it by construction, `processGroupIsEmpty`
-    /// then reports the group EMPTY and the teardown looks clean -- and the drain waits below never return,
-    /// because the pipe never sees EOF. `timeout` and `grace` bound the KILL; they do not bound the DRAIN.
-    /// Reproduced deterministically and pinned with `sample`: this thread parked in `semaphore_wait_trap`
-    /// under `runProcess`, both reader threads in `read()` under `readDataToEndOfFile`, identical across
-    /// samples 12 s apart at 0% CPU, with the escaped descendant alive at ppid 1. No `claude` invocation
-    /// has been observed doing this, but a user-scope MCP server or hook that daemonises would.
+    /// THE ONE THING THAT DEFEATS THE KILL is a descendant that leaves the process group (`setsid`) while
+    /// still holding stdout or stderr. `kill(-pid, ...)` cannot reach it by construction, and
+    /// `processGroupIsEmpty` then reports the group EMPTY so the teardown reads perfectly clean while the
+    /// pipe is still held. Reproduced deterministically and pinned with `sample`: this thread parked in
+    /// `semaphore_wait_trap` under `runProcess`, both reader threads in `read()` under
+    /// `readDataToEndOfFile`, identical across samples 12 s apart at 0% CPU, with the escaped descendant
+    /// alive at ppid 1. No `claude` invocation has been observed doing this, but a user-scope MCP server
+    /// or hook that daemonises would.
+    ///
+    /// `timeout` and `grace` bound the KILL; they do not bound the DRAIN, so the drain carries its own
+    /// separate `drainDeadline` (see that constant for the measurement behind the number). The kill can
+    /// no longer be defeated into an unbounded park: the drains now expire, the run is reported
+    /// `drainsComplete: false` with nothing usable in `stdout`, and `spawnSync` fails closed to the raw
+    /// fallback. Permanent gate: `--text-transform-selftest --cloud-drain-deadlock-repro`, whose
+    /// `escaped` case is exactly this shape and was red until the drains were bounded.
     ///
     /// THE `ECHILD` BRANCH (`waited < 0` in the loops below leaves `reaped` false) IS NOT REACHABLE HERE.
     /// It needs a competing reaper, and there is none: nothing in this app touches SIGCHLD, launchd hands a
@@ -473,20 +541,25 @@ enum CloudCleanupClient {
         output.fileHandleForWriting.closeFile()
         error.fileHandleForWriting.closeFile()
 
+        // The drains write into a LOCKED capture rather than into captured locals. Once the waits below
+        // can expire, an abandoned reader thread is still parked in `read()` and will assign its result
+        // whenever the pipe finally closes -- possibly never, possibly long after this frame has read it.
+        // Unsynchronised, that is a genuine data race on `Data`, not merely a stale read. Same reason
+        // `CodexModelCatalogProcess` accumulates its drains under `stderrLock`/`outputCondition`.
+        let capture = DrainCapture()
         let writerDone = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
             try? input.fileHandleForWriting.write(contentsOf: stdin)
             try? input.fileHandleForWriting.close()
             writerDone.signal()
         }
-        var stdout = Data(), stderr = Data()
         let outputDone = DispatchSemaphore(value: 0), errorDone = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
-            stdout = output.fileHandleForReading.readDataToEndOfFile()
+            capture.setStdout(output.fileHandleForReading.readDataToEndOfFile())
             outputDone.signal()
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            stderr = error.fileHandleForReading.readDataToEndOfFile()
+            capture.setStderr(error.fileHandleForReading.readDataToEndOfFile())
             errorDone.signal()
         }
 
@@ -541,16 +614,50 @@ enum CloudCleanupClient {
             residual = !processGroupIsEmpty(pid)
         }
 
-        writerDone.wait()
-        outputDone.wait()
-        errorDone.wait()
+        // BOUND THE DRAINS. Everything above bounds the KILL; until now nothing bounded these, so a
+        // descendant holding the pipe outside the group parked this thread permanently. ONE shared
+        // absolute deadline across all three waits, never three independent budgets -- three would let
+        // the worst case reach 3x the bound and would make the number mean something other than what it
+        // says. Each wait records its own EOF, exactly as the Codex transport does, so a partial failure
+        // is diagnosable rather than a single opaque flag.
+        let drainLimit = DispatchTime.now() + drainDeadline
+        let stdinWriterComplete = writerDone.wait(timeout: drainLimit) == .success
+        let stdoutEOF = outputDone.wait(timeout: drainLimit) == .success
+        let stderrEOF = errorDone.wait(timeout: drainLimit) == .success
+        let drainsComplete = drainsWereComplete(stdinWriterComplete: stdinWriterComplete,
+                                                stdoutEOF: stdoutEOF, stderrEOF: stderrEOF)
+
+        // NEVER HAND BACK A PARTIAL STREAM. A truncated transform landing mid-sentence in a focused
+        // document is worse than no transform, so a stream that never reached EOF yields nothing and the
+        // caller fails closed to the raw fallback. With `readDataToEndOfFile` an unfinished read has
+        // produced no bytes at all yet, so today this discards nothing; it is written explicitly so the
+        // guarantee survives any future move to an incremental reader.
         let signal = status & 0x7f
         let exitCode = signal == 0 ? (status >> 8) & 0xff : 128 + signal
-        return ProcessRunResult(exitCode: exitCode, stdout: stdout, stderr: stderr,
+        return ProcessRunResult(exitCode: exitCode,
+                                stdout: stdoutEOF ? capture.stdout : Data(),
+                                stderr: stderrEOF ? capture.stderr : Data(),
                                 timedOut: timedOut, terminatedBySignal: signal != 0,
                                 leaderReaped: reaped, escalatedToSIGKILL: escalatedToSIGKILL,
                                 hadResidualProcessGroup: hadResidual,
-                                residualProcessGroup: residual)
+                                residualProcessGroup: residual,
+                                drainsComplete: drainsComplete,
+                                stdinWriterComplete: stdinWriterComplete,
+                                stdoutEOF: stdoutEOF, stderrEOF: stderrEOF)
+    }
+
+    /// The two reader threads' landing site. A reader abandoned at the drain deadline is still parked in
+    /// `read()` and may assign here at any later time, so every access is locked and the late write simply
+    /// lands somewhere nobody reads again.
+    private final class DrainCapture {
+        private let lock = NSLock()
+        private var capturedStdout = Data()
+        private var capturedStderr = Data()
+
+        func setStdout(_ data: Data) { lock.lock(); capturedStdout = data; lock.unlock() }
+        func setStderr(_ data: Data) { lock.lock(); capturedStderr = data; lock.unlock() }
+        var stdout: Data { lock.lock(); defer { lock.unlock() }; return capturedStdout }
+        var stderr: Data { lock.lock(); defer { lock.unlock() }; return capturedStderr }
     }
 
     private static func processGroupIsEmpty(_ pid: pid_t) -> Bool {
