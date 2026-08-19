@@ -80,6 +80,16 @@ enum AudioRetentionDeadlockFlag: String, CaseIterable {
     case scratchRoot = "--audio-retention-deadlock-scratch-root"
 }
 
+// Sub-flags of --text-transform-selftest, NOT manifest flags of their own: the escaped-pipe-holder
+// drain repro is opt-in because it is RED BY DESIGN until CloudCleanupClient bounds its pipe drains,
+// and a deterministic tier that is red by design teaches nobody anything. Same reason they are named
+// here as the retained-take sub-flags above: an unrecognized flag falls through to app.run().
+enum CloudDrainDeadlockFlag: String, CaseIterable {
+    case repro = "--cloud-drain-deadlock-repro"
+    case child = "--cloud-drain-deadlock-child"
+    case scratchRoot = "--cloud-drain-deadlock-scratch-root"
+}
+
 // Sub-flag of --hang-watchdog-selftest, NOT a manifest flag of its own. It deliberately wedges the
 // main thread and lets the shipped watchdog SIGABRT this process, so it must stay out of every
 // verify.sh tier (it takes the real 45s threshold to fire and leaves a crash report by design) and it
@@ -138,6 +148,14 @@ if !CommandLine.arguments.contains(SelfTestManifestFlag.historySelftest.rawValue
     exit(2)
 }
 
+if !CommandLine.arguments.contains(SelfTestManifestFlag.textTransformSelftest.rawValue),
+   let stray = CommandLine.arguments.first(where: {
+       CloudDrainDeadlockFlag(rawValue: $0) != nil
+   }) {
+    FileHandle.standardError.write(Data("[viddydictate] \(stray) is a --text-transform-selftest sub-flag; run it as: --text-transform-selftest \(stray)\n".utf8))
+    exit(2)
+}
+
 if !CommandLine.arguments.contains(SelfTestManifestFlag.hangWatchdogSelftest.rawValue),
    let stray = CommandLine.arguments.first(where: {
        HangWatchdogFlag(rawValue: $0) != nil
@@ -154,6 +172,7 @@ if let entry = selfTestManifest.first(where: { CommandLine.arguments.contains($0
 let flagsMovedToTestBundle = ["--list-selftest-flags"]
     + SelfTestManifestFlag.allCases.map(\.rawValue)
     + AudioRetentionDeadlockFlag.allCases.map(\.rawValue)
+    + CloudDrainDeadlockFlag.allCases.map(\.rawValue)
     + HangWatchdogFlag.allCases.map(\.rawValue)
 if let bad = CommandLine.arguments.first(where: { flagsMovedToTestBundle.contains($0) }) {
     FileHandle.standardError.write(Data("[viddydictate] \(bad): this test/probe flag moved to build/ViddyDictateTests.app — run it there, not the shipped app\n".utf8))

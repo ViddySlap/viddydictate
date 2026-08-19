@@ -597,11 +597,12 @@ enum CodexModelCatalogSelfTest {
         }
         let catalog = source("Sources/SelfTest/CodexModelCatalogSelfTest.swift")
         let transform = source("Sources/SelfTest/TextTransformSelfTest.swift")
+        let drain = source("Sources/SelfTest/CloudDrainDeadlockSelfTest.swift")
         let helper = source("Sources/SelfTest/SelfTestFixtureExecutable.swift")
 
         // Fail CLOSED: an unreadable file must never read as a vacuous pass.
         let sourcesReadable =
-            !catalog.isEmpty && !transform.isEmpty && !helper.isEmpty
+            !catalog.isEmpty && !transform.isEmpty && !drain.isEmpty && !helper.isEmpty
         // Split so this rule's own needles are never a contiguous match against the file that
         // carries them - a source-text rule that matches itself is always red.
         let localInstallTells = [
@@ -611,20 +612,20 @@ enum CodexModelCatalogSelfTest {
         ]
         let callersOwnNoFixtureInstall =
             sourcesReadable
-            && [catalog, transform].allSatisfy { file in
+            && [catalog, transform, drain].allSatisfy { file in
                 localInstallTells.allSatisfy { !file.contains($0) }
                     && file.contains("SelfTestFixtureExecutable.install(")
             }
         if !callersOwnNoFixtureInstall {
             print(
-                "  [diag] BROKEN RULE: CodexModelCatalogSelfTest and TextTransformSelfTest must "
-                    + "materialise every executable fixture through "
+                "  [diag] BROKEN RULE: CodexModelCatalogSelfTest, TextTransformSelfTest and "
+                    + "CloudDrainDeadlockSelfTest must materialise every executable fixture through "
                     + "SelfTestFixtureExecutable.install, never by writing and mode-setting one "
                     + "locally; an unwarmed fixture makes the test measure macOS's first-exec "
                     + "assessment instead of its own subject. See \(reference)\(rootHint)")
         }
         check(
-            "executable fixtures in both sub-second self-tests are installed only through the shared helper",
+            "executable fixtures in the process-boundary self-tests are installed only through the shared helper",
             callersOwnNoFixtureInstall)
 
         let helperWarmsAndFailsLoudly =

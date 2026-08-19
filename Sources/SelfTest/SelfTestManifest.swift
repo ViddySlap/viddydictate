@@ -196,8 +196,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         let out = arguments.count > i + 1 ? arguments[i + 1] : "build/sticky-skills-render"
         return StickySkillsTabRender.run(outDir: out) ? 0 : 1
     },
-    .textTransformSelftest: .init(tier: .deterministic) { _ in
-        TextTransformSelfTest.run() ? 0 : 1
+    .textTransformSelftest: .init(tier: .deterministic) { arguments in
+        if let reproExit = CloudDrainDeadlockSelfTest.reproExit(arguments: arguments) {
+            return reproExit
+        }
+        return TextTransformSelfTest.run() ? 0 : 1
     },
     .codexProviderSelftest: .init(tier: .deterministic) { _ in
         CodexProviderSelfTest.run() ? 0 : 1
