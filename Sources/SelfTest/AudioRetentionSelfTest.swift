@@ -113,6 +113,66 @@ enum AudioRetentionSelfTest {
                                 && $0.contains("transcribeAudioSnapshot(retainingAs: takeID")
                         })
 
+        let deadlockReference = "Projects/viddydictate/wiki/reference/retained-take-deadlock.md"
+        let retentionStore = (try? String(contentsOfFile: "Sources/App/AudioRetentionStore.swift",
+                                           encoding: .utf8)) ?? ""
+        let retainMethod = slice(retentionStore, from: "func retain(",
+                                 to: "/// Read a retained take back")
+        let loadMethod = slice(retentionStore, from: "func loadRecording(",
+                               to: "/// Return the retained file")
+        let enabledCall = retainMethod.range(of: "isEnabled()")?.lowerBound
+        let retainEnqueue = retainMethod.range(of: "queue.async")?.lowerBound
+        let completionHop = loadMethod.range(
+            of: "DispatchQueue.global(qos: .utility).async")?.lowerBound
+        let completionCall = loadMethod.range(of: "completion(data)")?.lowerBound
+        let escapingClosureInventoryIsKnown =
+            retentionStore.components(separatedBy: "@escaping").count - 1 == 2
+                && retentionStore.contains("enabled: @escaping () -> Bool")
+                && retentionStore.contains("completion: @escaping (Data?) -> Void")
+        let knownClosureCallsAreUnique =
+            retentionStore.components(separatedBy: "isEnabled()").count - 1 == 1
+                && retentionStore.components(separatedBy: "completion(data)").count - 1 == 1
+        let enabledCallPrecedesQueue: Bool
+        if let enabledCall, let retainEnqueue {
+            enabledCallPrecedesQueue = enabledCall < retainEnqueue
+        } else {
+            enabledCallPrecedesQueue = false
+        }
+        let completionCallFollowsHop: Bool
+        if let completionHop, let completionCall {
+            completionCallFollowsHop = completionHop < completionCall
+        } else {
+            completionCallFollowsHop = false
+        }
+        let escapingClosureRuleHolds = !retentionStore.isEmpty
+            && escapingClosureInventoryIsKnown
+            && knownClosureCallsAreUnique
+            && enabledCallPrecedesQueue
+            && completionCallFollowsHop
+        reporter.record(
+            "AudioRetentionStore queue blocks never invoke caller-supplied escaping closures",
+            escapingClosureRuleHolds,
+            escapingClosureRuleHolds ? "" :
+                "BROKEN RULE: never invoke caller-supplied escaping closures inside queue.async/queue.sync; "
+                    + "unknown code can wait on main while main waits on the store queue, recreating the "
+                    + "2026-08-18 AB-BA deadlock. See \(deadlockReference)"
+        )
+
+        let retryRetainedTake = slice(controller, from: "func retryRetainedTake(",
+                                      to: "/// Pure request builder")
+        let stillCurrent = slice(retryRetainedTake, from: "let stillCurrent: () -> Bool",
+                                 to: "retainedTakeRecovery.recover(")
+        let stillCurrentRuleHolds = !stillCurrent.isEmpty
+            && !stillCurrent.contains("DispatchQueue.main.sync")
+        reporter.record(
+            "DictationController stillCurrent contains no DispatchQueue.main.sync",
+            stillCurrentRuleHolds,
+            stillCurrentRuleHolds ? "" :
+                "BROKEN RULE: stillCurrent must never synchronously hop to main; doing so can wait on main "
+                    + "while main waits on AudioRetentionStore, recreating the 2026-08-18 AB-BA deadlock. "
+                    + "See \(deadlockReference)"
+        )
+
         var loadCalls = 0
         var ensureCalls = 0
         var transcribeCalls = 0
