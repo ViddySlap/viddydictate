@@ -72,6 +72,7 @@ enum CodexModelCatalogSelfTest {
         checkHandshakeAndDTO(reporter.record)
         checkProtocolFailures(reporter.record)
         checkBoundsAndProcessFailures(reporter.record)
+        checkFixtureWarmupOwnership(reporter.record)
         checkRealProcessDeadline(reporter.record)
         checkLaunchIdentityAndRetryableReap(reporter.record)
         checkLaunchTimeSharesOverallDeadline(reporter.record)
@@ -569,6 +570,81 @@ enum CodexModelCatalogSelfTest {
                 }))
     }
 
+    /// Source rule: the fresh-exec warm-up stays ONE concept with ONE owner.
+    ///
+    /// Both files below write shell fixtures to fresh UUID paths and then launch them inside
+    /// sub-second budgets. macOS charges a one-time security assessment on the first execution
+    /// of a newly written executable - 94-633 ms measured 2026-08-19 against 2.4-5.3 ms for a
+    /// later exec of the same file - so a fixture that is not warmed first measures the
+    /// assessment instead of the code under test. That is what made this very self-test 8/8 red
+    /// and `--text-transform-selftest` 15/15 red under fresh-exec contention.
+    ///
+    /// The rule exists because the obvious repair is 11 local ones. Eleven copies of a rule is a
+    /// concept with no owner, and the next fixture added to either file simply would not get
+    /// warmed. Diagnosis and measurements:
+    /// `Projects/viddydictate/wiki/reference/selftest-fixture-gatekeeper-trap.md`.
+    private static func checkFixtureWarmupOwnership(
+        _ check: (String, Bool) -> Void
+    ) {
+        print("--- fresh-exec fixture warm-up ownership ---")
+        let reference =
+            "Projects/viddydictate/wiki/reference/selftest-fixture-gatekeeper-trap.md"
+        let rootHint =
+            "; these are source-text rules read by relative path, so run the self-test "
+            + "from the worktree root"
+        func source(_ path: String) -> String {
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        }
+        let catalog = source("Sources/SelfTest/CodexModelCatalogSelfTest.swift")
+        let transform = source("Sources/SelfTest/TextTransformSelfTest.swift")
+        let helper = source("Sources/SelfTest/SelfTestFixtureExecutable.swift")
+
+        // Fail CLOSED: an unreadable file must never read as a vacuous pass.
+        let sourcesReadable =
+            !catalog.isEmpty && !transform.isEmpty && !helper.isEmpty
+        // Split so this rule's own needles are never a contiguous match against the file that
+        // carries them - a source-text rule that matches itself is always red.
+        let localInstallTells = [
+            "chmod" + "(",
+            ".utf8).write(to:" + " executable)",
+            ".utf8).write(to:" + " replacement)",
+        ]
+        let callersOwnNoFixtureInstall =
+            sourcesReadable
+            && [catalog, transform].allSatisfy { file in
+                localInstallTells.allSatisfy { !file.contains($0) }
+                    && file.contains("SelfTestFixtureExecutable.install(")
+            }
+        if !callersOwnNoFixtureInstall {
+            print(
+                "  [diag] BROKEN RULE: CodexModelCatalogSelfTest and TextTransformSelfTest must "
+                    + "materialise every executable fixture through "
+                    + "SelfTestFixtureExecutable.install, never by writing and mode-setting one "
+                    + "locally; an unwarmed fixture makes the test measure macOS's first-exec "
+                    + "assessment instead of its own subject. See \(reference)\(rootHint)")
+        }
+        check(
+            "executable fixtures in both sub-second self-tests are installed only through the shared helper",
+            callersOwnNoFixtureInstall)
+
+        let helperWarmsAndFailsLoudly =
+            sourcesReadable
+            && helper.contains("try warm(url, timeout: warmupTimeout)")
+            && helper.contains("posix_spawn(")
+            && helper.contains(#"[ \"$1\" = \"\(warmupArgument)\" ] && exit 0"#)
+            && !helper.contains("try" + "?")
+        if !helperWarmsAndFailsLoudly {
+            print(
+                "  [diag] BROKEN RULE: SelfTestFixtureExecutable must inject the warm-up guard, "
+                    + "spawn the freshly written file once, and throw on any warm-up failure; a "
+                    + "helper that silently no-ops recreates the same invisible problem it exists "
+                    + "to remove. See \(reference)\(rootHint)")
+        }
+        check(
+            "the fixture helper actually executes the file it wrote and never swallows a warm-up failure",
+            helperWarmsAndFailsLoudly)
+    }
+
     private static func checkRealProcessDeadline(_ check: (String, Bool) -> Void) {
         print("--- real process-group descendant/pipe-holder deadline ---")
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
@@ -607,10 +683,7 @@ enum CodexModelCatalogSelfTest {
             printf '%s\\n' '{"id":2,"result":{"data":[{"id":"preset","model":"executable","hidden":false,"supportedReasoningEfforts":[]}],"nextCursor":null}}'
             exit 0
             """
-            try Data(script.utf8).write(to: executable)
-            guard chmod(executable.path, 0o500) == 0 else {
-                throw CacheWriteFault()
-            }
+            try SelfTestFixtureExecutable.install(script: script, at: executable)
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             let launch = CodexCatalogProcessLaunch(
@@ -735,12 +808,9 @@ enum CodexModelCatalogSelfTest {
             printf '%s\\n' "$!" > \(childFile.path)
             while :; do /bin/sleep 1; done
             """
-            try Data(script.utf8).write(to: executable)
-            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: replacement)
-            guard chmod(executable.path, 0o500) == 0,
-                  chmod(replacement.path, 0o500) == 0 else {
-                throw CacheWriteFault()
-            }
+            try SelfTestFixtureExecutable.install(script: script, at: executable)
+            try SelfTestFixtureExecutable.install(
+                script: "#!/bin/sh\nexit 0\n", at: replacement)
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             var replacementInstalled = false
@@ -834,10 +904,7 @@ enum CodexModelCatalogSelfTest {
             printf '%s\\n' "$!" > \(childFile.path)
             while :; do /bin/sleep 1; done
             """
-            try Data(script.utf8).write(to: executable)
-            guard chmod(executable.path, 0o500) == 0 else {
-                throw CacheWriteFault()
-            }
+            try SelfTestFixtureExecutable.install(script: script, at: executable)
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             var processOperations: [CodexCatalogProcessOperation] = []
@@ -942,10 +1009,7 @@ enum CodexModelCatalogSelfTest {
             printf '%s\n' "$$" > \(leaderFile.path)
             while :; do :; done
             """
-            try Data(script.utf8).write(to: executable)
-            guard chmod(executable.path, 0o500) == 0 else {
-                throw CacheWriteFault()
-            }
+            try SelfTestFixtureExecutable.install(script: script, at: executable)
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             var processOperations: [CodexCatalogProcessOperation] = []
@@ -1071,10 +1135,8 @@ enum CodexModelCatalogSelfTest {
                 printf '%s\n' "$$" > \(leaderFile.path)
                 while :; do :; done
                 """
-                try Data(script.utf8).write(to: executable)
-                guard chmod(executable.path, 0o500) == 0 else {
-                    throw CacheWriteFault()
-                }
+                try SelfTestFixtureExecutable.install(
+                    script: script, at: executable)
                 let identity =
                     try CodexIsolationFoundation.strongFileIdentity(
                         at: executable, includeCodeSigning: false)
@@ -1140,12 +1202,9 @@ enum CodexModelCatalogSelfTest {
             printf '%s\n' "$$" > \(leaderFile.path)
             while :; do :; done
             """
-            try Data(script.utf8).write(to: executable)
-            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: replacement)
-            guard chmod(executable.path, 0o500) == 0,
-                  chmod(replacement.path, 0o500) == 0 else {
-                throw CacheWriteFault()
-            }
+            try SelfTestFixtureExecutable.install(script: script, at: executable)
+            try SelfTestFixtureExecutable.install(
+                script: "#!/bin/sh\nexit 0\n", at: replacement)
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             var postSpawn = false

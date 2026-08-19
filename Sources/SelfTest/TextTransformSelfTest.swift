@@ -699,8 +699,8 @@ enum TextTransformSelfTest {
             /usr/bin/stat -f '%Lp' "$(/usr/bin/dirname "$prompt_file")" > "$CAPTURE_ROOT/prompt-dir-mode"
             /usr/bin/printf '%s\n' '{"type":"result","is_error":false,"result":"synthetic-ok"}'
             """
-            try Data(script.utf8).write(to: executable)
-            _ = chmod(executable.path, 0o700)
+            try SelfTestFixtureExecutable.install(
+                script: script, at: executable, mode: 0o700)
 
             let promptCanary = "SYNTHETIC_PROMPT_\(UUID().uuidString)"
             let inputCanary = "SYNTHETIC_INPUT_\(UUID().uuidString)"
@@ -752,8 +752,8 @@ enum TextTransformSelfTest {
             /usr/bin/printf '%s\n' "$child" > "$1"
             exit 0
             """
-            try Data(script.utf8).write(to: executable)
-            _ = chmod(executable.path, 0o700)
+            try SelfTestFixtureExecutable.install(
+                script: script, at: executable, mode: 0o700)
 
             let run = CloudCleanupClient.runProcessForTest(
                 executable: executable.path, arguments: [pidFile.path], timeout: 5, grace: 0.2)
@@ -792,8 +792,8 @@ enum TextTransformSelfTest {
             /usr/bin/printf '%s\n' "$child" > "$1"
             while :; do /bin/sleep 1; done
             """
-            try Data(script.utf8).write(to: executable)
-            _ = chmod(executable.path, 0o700)
+            try SelfTestFixtureExecutable.install(
+                script: script, at: executable, mode: 0o700)
             let run = CloudCleanupClient.runProcessForTest(
                 executable: executable.path, arguments: [pidFile.path], timeout: 0.2, grace: 0.2)
             let descendant = (try? String(contentsOf: pidFile, encoding: .utf8))
