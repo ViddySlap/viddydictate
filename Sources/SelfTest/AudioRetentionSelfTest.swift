@@ -71,11 +71,19 @@ enum AudioRetentionSelfTest {
         let capturedBytes = Data("RIFF-captured".utf8)
         captured.retain(capturedBytes, id: capturedID, enabled: true)
         captured.flush()
+        // Wait on the completion, not on the store queue. This assertion was written against the
+        // PRE-FIX contract, where `loadRecording` invoked its completion with the queue held and so
+        // `flush()` implied delivery. Fix A (a133621) correctly broke that: the completion now hops to
+        // a global queue, `flush()` drains the store queue only, and reading the result straight after
+        // it passed only when the global queue happened to win the race. The wait is bounded so a
+        // completion that never arrives fails this check rather than hanging the suite.
+        let capturedDelivered = DispatchSemaphore(value: 0)
         var loadedCaptured: Data?
-        captured.loadRecording(id: capturedID) { loadedCaptured = $0 }
-        captured.flush()
+        captured.loadRecording(id: capturedID) { loadedCaptured = $0; capturedDelivered.signal() }
+        let capturedArrived = capturedDelivered.wait(timeout: .now() + 5) == .success
         reporter.record("take-release retention decision survives a later setting change",
-                        loadedCaptured == capturedBytes)
+                        capturedArrived && loadedCaptured == capturedBytes,
+                        capturedArrived ? "" : "completion never arrived within 5s")
 
         on.purge()
         on.flush()
