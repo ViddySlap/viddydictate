@@ -240,6 +240,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         let audioOK = AudioRetentionSelfTest.run()
         return infiniteOK && rollingOK && audioOK ? 0 : 1
     },
+    .hangWatchdogSelftest: .init(tier: .deterministic) { arguments in
+        if let proofExit = HangWatchdogSelfTest.abortProofExit(arguments: arguments) {
+            return proofExit
+        }
+        return HangWatchdogSelfTest.run() ? 0 : 1
+    },
     .lockedDeliverySelftest: .init(tier: .deterministic) { _ in
         LockedDeliverySelfTest.run() ? 0 : 1
     },

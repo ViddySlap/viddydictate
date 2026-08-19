@@ -463,6 +463,9 @@ tier_deterministic() {
         run_gate deterministic "notes store and bridge scratch probe" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --notes-probe || true
+        run_gate deterministic "hang watchdog policy, live mechanism, and source rules" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --hang-watchdog-selftest || true
         run_notes_http_gate || true
         run_codex_isolation_selftest_gate || true
     else

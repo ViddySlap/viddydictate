@@ -54,6 +54,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case hudPolishSelftest = "--hud-polish-selftest"
     case residencySelftest = "--residency-selftest"
     case historySelftest = "--history-selftest"
+    case hangWatchdogSelftest = "--hang-watchdog-selftest"
     case lockedDeliverySelftest = "--locked-delivery-selftest"
     case pathClassifierProbe = "--path-classifier-probe"
     case filesProbe = "--files-probe"
@@ -77,6 +78,14 @@ enum AudioRetentionDeadlockFlag: String, CaseIterable {
     case repro = "--audio-retention-deadlock-repro"
     case child = "--audio-retention-deadlock-child"
     case scratchRoot = "--audio-retention-deadlock-scratch-root"
+}
+
+// Sub-flag of --hang-watchdog-selftest, NOT a manifest flag of its own. It deliberately wedges the
+// main thread and lets the shipped watchdog SIGABRT this process, so it must stay out of every
+// verify.sh tier (it takes the real 45s threshold to fire and leaves a crash report by design) and it
+// must never be reachable from the shipped app.
+enum HangWatchdogFlag: String, CaseIterable {
+    case abortProof = "--hang-watchdog-abort-proof"
 }
 
 // Log any uncaught exception (helps catch a silent AppKit-swallowed throw).
@@ -129,6 +138,14 @@ if !CommandLine.arguments.contains(SelfTestManifestFlag.historySelftest.rawValue
     exit(2)
 }
 
+if !CommandLine.arguments.contains(SelfTestManifestFlag.hangWatchdogSelftest.rawValue),
+   let stray = CommandLine.arguments.first(where: {
+       HangWatchdogFlag(rawValue: $0) != nil
+   }) {
+    FileHandle.standardError.write(Data("[viddydictate] \(stray) is a --hang-watchdog-selftest sub-flag; run it as: --hang-watchdog-selftest \(stray)\n".utf8))
+    exit(2)
+}
+
 if let entry = selfTestManifest.first(where: { CommandLine.arguments.contains($0.flag) }) {
     exit(entry.handler(CommandLine.arguments))
 }
@@ -137,6 +154,7 @@ if let entry = selfTestManifest.first(where: { CommandLine.arguments.contains($0
 let flagsMovedToTestBundle = ["--list-selftest-flags"]
     + SelfTestManifestFlag.allCases.map(\.rawValue)
     + AudioRetentionDeadlockFlag.allCases.map(\.rawValue)
+    + HangWatchdogFlag.allCases.map(\.rawValue)
 if let bad = CommandLine.arguments.first(where: { flagsMovedToTestBundle.contains($0) }) {
     FileHandle.standardError.write(Data("[viddydictate] \(bad): this test/probe flag moved to build/ViddyDictateTests.app — run it there, not the shipped app\n".utf8))
     exit(2)

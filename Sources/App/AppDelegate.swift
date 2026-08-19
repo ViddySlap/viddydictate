@@ -429,6 +429,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return controller
     }()
     private var batteryAdvisoryTimer: Timer?
+    /// Safety net only (ADR 0017): it prevents no deadlock and repairs no bug. Its whole job is
+    /// that the NEXT unknown hang exits non-zero, so the existing KeepAlive relaunches and
+    /// ReportCrash leaves a stack for every thread.
+    private let hangWatchdog = HangWatchdog.productionWatchdog()
     private var powerStateToken: NSObjectProtocol?
     private var writeFailureToken: NSObjectProtocol?
     private var cloudCheckRequestToken: NSObjectProtocol?
@@ -473,6 +477,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        // Armed before any of the setup below, because a hang DURING launch is exactly as invisible as
+        // a hang at rest and nothing else would ever report it. ADR 0017.
+        hangWatchdog.start()
         setupMenu()
         setupEditMenu()
         _ = controller   // Force the lazy required-callback graph before any controller-dependent setup.
@@ -579,6 +586,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for url in urls {
             routeOpenedPath(url)
         }
+    }
+
+    /// A deliberate quit must never be converted into an abort. Teardown is the one main-thread stretch
+    /// that is allowed to be slow, and `KeepAlive: SuccessfulExit=false` would relaunch the app the user
+    /// just asked to close. Disarmed here rather than in `applicationShouldTerminate`, which can cancel
+    /// the quit and leave the app running — unwatched, if it had disarmed. ADR 0017.
+    func applicationWillTerminate(_ notification: Notification) {
+        hangWatchdog.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -972,6 +987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
     deinit {
+        hangWatchdog.stop()
         batteryAdvisoryTimer?.invalidate()
         if let token = powerStateToken { NotificationCenter.default.removeObserver(token) }
         if let token = writeFailureToken { NotificationCenter.default.removeObserver(token) }

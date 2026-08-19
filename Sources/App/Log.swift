@@ -41,6 +41,32 @@ enum Log {
         }
     }
 
+    /// Crash-path write, for a caller that is about to `abort()`. The ordinary `write` only ENQUEUES,
+    /// so the line would die with the process; this waits for the queue to drain past it.
+    ///
+    /// The wait is bounded because the caller is the hang watchdog: a wedged log queue must not be able
+    /// to swallow the abort itself. On timeout the line is appended directly from the calling thread —
+    /// a duplicated hang line is harmless, a missing one loses the only signal that separates a hang
+    /// from a genuine crash in the report. See `HangWatchdog` and ADR 0017.
+    static func writeBeforeCrash(_ msg: String, timeout: TimeInterval = 2) {
+        write(msg)
+        let drained = DispatchSemaphore(value: 0)
+        q.async { drained.signal() }
+        guard drained.wait(timeout: .now() + timeout) == .timedOut else { return }
+        // Own formatter: `stamp` belongs to the queue that just failed to drain.
+        let fallbackStamp = DateFormatter()
+        fallbackStamp.dateFormat = "HH:mm:ss.SSS"
+        let line = "\(fallbackStamp.string(from: Date())) \(msg)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = try? FileHandle(forWritingTo: url) {
+            defer { try? fh.close() }
+            fh.seekToEndOfFile()
+            fh.write(data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
     /// Headless deterministic-test barrier. Production never calls this; it lets privacy tests inspect
     /// the scratch log only after every queued classification line has been persisted.
     static func flushForTest() { q.sync {} }
