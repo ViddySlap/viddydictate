@@ -331,6 +331,16 @@ enum CloudUpdateChecker {
 
     /// UI settings mutations are main-thread gestures. Compare and write in one main-queue block so a
     /// long provider smoke can never overwrite a route that the user edited while the check was running.
+    ///
+    /// The `main.sync` below is deadlock-audited (2026-08-19), not merely guarded. `Thread.isMainThread` alone
+    /// would NOT be enough: it defends against a hop from main, never against a hop from a context that main is
+    /// itself blocked on, which is exactly how the 2026-08-18 retained-take deadlock closed. What makes this one
+    /// safe is the CALLER. `CloudUpdateChecker.run` is the only production caller, it is dispatched on
+    /// `DispatchQueue.global(qos: .utility)` (concurrent — nothing ever `sync`s onto it), and it reaches here
+    /// from its own top-level loop holding no lock and no queue. Every `ModelsPowerSettingsStore` lock
+    /// acquisition happens inside `body`, i.e. on main, and `mutate` already unlocks before posting `didChange`.
+    /// Keep it that way: never call this from inside a `withLock` or `queue.sync` scope.
+    /// See Projects/viddydictate/wiki/reference/retained-take-deadlock.md.
     private static func applyIfUnchanged(_ decision: PresetUpdateDecision,
                                          settings: ModelsPowerSettingsStore) -> ApplyResult {
         let body = { () -> ApplyResult in
@@ -459,6 +469,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Loopback control endpoint for the Sticky Notes toolset. Binds 127.0.0.1
     // only; the "open" target + list active-flag resolve against the live registry on the main thread, and
     // L2 content writes push their live-render intent through the registry on the main thread.
+    //
+    // Both `main.sync` hops below are deadlock-audited (2026-08-19), not merely `Thread.isMainThread`-guarded —
+    // that guard defends only against a hop FROM main, never against a hop from a context main is blocked on,
+    // which is how the 2026-08-18 retained-take deadlock closed. These two are safe because of their caller and
+    // their neighbours, and both of those are invariants, not accidents:
+    //   1. There is exactly ONE calling context: the `notes-control` accept Thread, which invokes both closures
+    //      from `NotesControlServer.route(...)` holding nothing. Every store call returns before the sink is
+    //      invoked, and `withResolvedTarget` passes a value rather than scoping a lock. It is a raw `Thread`,
+    //      so main cannot `sync` onto it, and nothing in-app is a client of the control port.
+    //   2. Main DOES block on `StickyNotesStore`'s serial queue (`renderExternalWrite` -> `isFileBackedNote`),
+    //      but that queue can never block back: the store and its two engines contain no `DispatchQueue.main`,
+    //      no `NotificationCenter` and no escaping closures, so nothing running on it can reach main or call
+    //      caller-supplied code. That is precisely the property `AudioRetentionStore.loadRecording` violated.
+    // Both are pinned by `--notes-http-selftest`. See
+    // Projects/viddydictate/wiki/reference/retained-take-deadlock.md.
     private lazy var notesControlServer = NotesControlServer(
         store: .shared,
         activeNoteId: { [weak self] in

@@ -520,6 +520,49 @@ enum NotesControlSelfTest {
             check("read_attachments(no target): reachable", false)
         }
 
+        // --- deadlock source rules (vdd-L6, 2026-08-19) ------------------------------------------
+        // AppDelegate's `activeNoteId` / `renderSink` closures hop to main with `DispatchQueue.main.sync` from
+        // this server's handler thread. The 2026-08-18 audit found them unreachable from any lock- or
+        // serial-queue-holding context, but that verdict rests on two invariants that a future edit could
+        // silently break, so pin both. Source-text rules, read by relative path from the worktree root exactly
+        // like the AudioRetentionStore rules in `--history-selftest`.
+        let deadlockReference = "Projects/viddydictate/wiki/reference/retained-take-deadlock.md"
+
+        let controlServerPath = "Sources/App/NotesControlServer.swift"
+        let controlServerSource = (try? String(contentsOfFile: controlServerPath, encoding: .utf8)) ?? ""
+        let serverOwnsNothing = !controlServerSource.contains("NSLock")
+            && !controlServerSource.contains("DispatchQueue")
+        check("NotesControlServer owns no lock or queue to hold across its main hop",
+              !controlServerSource.isEmpty && serverOwnsNothing,
+              controlServerSource.isEmpty
+                ? "\(controlServerPath) unreadable — run this selftest from the worktree root"
+                : (serverOwnsNothing ? "" :
+                    "BROKEN RULE: NotesControlServer must own no lock and no dispatch queue. Its handler thread "
+                    + "hops to main synchronously via the injected activeNoteId/renderSink closures; anything it "
+                    + "holds across that hop can be waited on by main, recreating the 2026-08-18 AB-BA "
+                    + "deadlock. See \(deadlockReference)"))
+
+        let storeSources = ["Sources/App/StickyNotesStore.swift",
+                            "Sources/App/FileBackedNoteEngine.swift",
+                            "Sources/App/NotesAttachmentEngine.swift"]
+            .map { ($0, (try? String(contentsOfFile: $0, encoding: .utf8)) ?? "") }
+        let unreadableStoreSources = storeSources.filter { $0.1.isEmpty }.map(\.0)
+        let callingOutStoreSources = storeSources.filter { _, text in
+            text.contains("DispatchQueue.main") || text.contains("NotificationCenter")
+                || text.contains("@escaping")
+        }.map(\.0)
+        let storeQueueStaysPure = unreadableStoreSources.isEmpty && callingOutStoreSources.isEmpty
+        check("sticky-notes serial queue never calls out to main or to caller-supplied code",
+              storeQueueStaysPure,
+              storeQueueStaysPure ? "" : (unreadableStoreSources.isEmpty
+                ? "BROKEN RULE in \(callingOutStoreSources.joined(separator: ", ")): the sticky-notes serial "
+                    + "queue must stay pure internal work. Main blocks on it via queue.sync "
+                    + "(NotesWindowRegistry.renderExternalWrite -> StickyNotesStore), so anything on that queue "
+                    + "that reaches main or runs caller-supplied code closes the 2026-08-18 AB-BA cycle — the "
+                    + "exact shape of AudioRetentionStore.loadRecording. See \(deadlockReference)"
+                : "unreadable — run this selftest from the worktree root: "
+                    + unreadableStoreSources.joined(separator: ", ")))
+
         return finish(reporter)
     }
 
