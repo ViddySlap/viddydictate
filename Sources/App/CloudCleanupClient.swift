@@ -394,6 +394,37 @@ enum CloudCleanupClient {
                               environment: environment, timeout: timeout, grace: 2)
     }
 
+    /// Spawn one child into its OWN process group, bound by `timeout`, then tear the whole group down.
+    ///
+    /// WHAT IS PROVEN, and how. Measured 2026-08-19 by driving this function against hostile fixtures and
+    /// judging survivorship with `ps` AFTER the host process had exited, so the verdict never came from
+    /// `leaderReaped` / `residualProcessGroup` (full method + numbers:
+    /// `Projects/viddydictate/wiki/reference/process-group-reaping.md` in Ben's vault). Every case that
+    /// stays inside the group is cleaned, with nothing surviving: clean exit (24 ms); timeout with a
+    /// cooperative leader (352 ms); timeout with a leader that IGNORES SIGTERM, escalated to group SIGKILL
+    /// (834 ms); timeout with leader AND descendant both ignoring SIGTERM (812 ms); and a clean leader exit
+    /// leaving a SIGTERM-ignoring same-group pipe holder, where `hadResidualProcessGroup` fires, the group
+    /// is killed, and stdout is still delivered intact (116 ms). The real `claude` CLI behaves: driven
+    /// through `spawnSync` and killed at a 9 s timeout while fully booted, 27 distinct processes were
+    /// tracked in the spawned children's groups -- the CLI, its `security` keychain helpers, its node MCP
+    /// servers, `private-fs`, a `sh -c ps aux | grep` and its children -- every one of them inside the
+    /// leader's group, and every one gone afterwards.
+    ///
+    /// THE ONE THING THAT DEFEATS IT is a descendant that leaves the process group (`setsid`) while still
+    /// holding stdout or stderr. `kill(-pid, ...)` cannot reach it by construction, `processGroupIsEmpty`
+    /// then reports the group EMPTY and the teardown looks clean -- and the drain waits below never return,
+    /// because the pipe never sees EOF. `timeout` and `grace` bound the KILL; they do not bound the DRAIN.
+    /// Reproduced deterministically and pinned with `sample`: this thread parked in `semaphore_wait_trap`
+    /// under `runProcess`, both reader threads in `read()` under `readDataToEndOfFile`, identical across
+    /// samples 12 s apart at 0% CPU, with the escaped descendant alive at ppid 1. No `claude` invocation
+    /// has been observed doing this, but a user-scope MCP server or hook that daemonises would.
+    ///
+    /// THE `ECHILD` BRANCH (`waited < 0` in the loops below leaves `reaped` false) IS NOT REACHABLE HERE.
+    /// It needs a competing reaper, and there is none: nothing in this app touches SIGCHLD, launchd hands a
+    /// LaunchAgent SIG_DFL (measured), and a `Foundation.Process` running concurrently does not steal this
+    /// child (measured). Forced with SIGCHLD set to SIG_IGN it degrades classification, not cleanup: a
+    /// successful run is reported `timedOut=true, leaderReaped=false` with its stdout still captured and the
+    /// group still empty. Fails closed, so it is a wrong reason rather than a leak.
     private static func runProcess(executable: String, arguments: [String], stdin: Data,
                                    environment: [String: String], timeout: TimeInterval,
                                    grace: TimeInterval) throws -> ProcessRunResult {
