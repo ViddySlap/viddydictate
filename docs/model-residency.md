@@ -74,6 +74,13 @@ safe for layered reasons:
 None of these global settings are modified by this feature. ViddyDictate expresses its one idle TTL at
 load time via `--ttl`, scoped to each instance it loads.
 
+The Setup tab's **Local models** section READS `developer.jitModelTTL` and reports it as a preflight row
+when LM Studio holds JIT-loaded models longer than ViddyDictate's own idle timer, with the instruction to
+change it in LM Studio. It is a report, not a control, and the reason is structural rather than polite:
+LM Studio keeps `settings.json` in memory and rewrites it, so a write from another process is clobbered on
+its next save. `LocalModelSetup` has no writer for that path, and `--local-model-setup-selftest` asserts a
+read leaves the file byte-for-byte unchanged.
+
 ## Acceptance test: `--residency-selftest`
 
 ```

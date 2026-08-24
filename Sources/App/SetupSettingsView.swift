@@ -37,6 +37,7 @@ final class SetupSettingsView: NSView {
     private var content: Content = .checking
     private let onboarding: ProviderOnboardingView
     private let geminiKey: GeminiKeySectionView
+    private let localModels: LocalModelsSectionView
     /// One check at a time. The button is disabled while a check runs, so the state the user sees and the
     /// state that guards re-entry are the same fact rather than two that can disagree.
     private var checking = false
@@ -44,9 +45,15 @@ final class SetupSettingsView: NSView {
     init(width: CGFloat,
          observer: @escaping Observer = Preflight.observe,
          geminiKeyWriter: GeminiKeySectionView.Writer? = nil,
-         geminiKeyDeleter: GeminiKeySectionView.Deleter? = nil) {
+         geminiKeyDeleter: GeminiKeySectionView.Deleter? = nil,
+         localModels: LocalModelsSectionView.Environment = .live) {
         self.W = width
         self.observer = observer
+        // The local-model section measures itself synchronously - two settings and one local file - so it is
+        // not part of the tab's asynchronous observation. Its seams are injected for the same reason the
+        // keychain halves above are: the render gate must drive every state without writing this Mac's
+        // settings or depending on what its LM Studio happens to be set to.
+        self.localModels = LocalModelsSectionView(width: width, environment: localModels)
         // The Setup tab owns its own subtitle and footer, so the shared rows contribute only their headline
         // and cards here rather than repeating the first-run window's standing copy.
         self.onboarding = ProviderOnboardingView(width: width, showsStandingCopy: false)
@@ -156,6 +163,17 @@ final class SetupSettingsView: NSView {
         geminiKey.apply({ if case .report(_, _, let key) = content { return key } else { return nil } }())
         addSubview(geminiKey)
         y = geminiKey.frame.maxY + 14
+
+        // The local-model budget and idle timer, then LM Studio's own JIT timeout as a read-only row. Third
+        // among the sections that hold controls, and above the read-only preflight rows, because it is a
+        // setting rather than a check - and because a first-run user needs a provider and a key before the
+        // question of how much memory a local model may hold arises at all.
+        addSubview(sectionHeader(LocalModelSetup.header, y: y))
+        y += 18
+        localModels.frame.origin = NSPoint(x: 0, y: y)
+        localModels.apply()
+        addSubview(localModels)
+        y = localModels.frame.maxY + 14
 
         if case .report(let report, _, _) = content {
             addSubview(sectionHeader("EVERYTHING ELSE THIS INSTALL NEEDS", y: y))

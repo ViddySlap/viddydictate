@@ -174,6 +174,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .geminiKeySetupSelftest: .init(tier: .deterministic) { _ in
         GeminiKeySetupSelfTest.run() ? 0 : 1
     },
+    // Pure: the slider's two renderings, the LM Studio JIT reader driven against fixtures in this run's own
+    // TMPDIR, and what each reading is reported as. No view and no real settings file.
+    .localModelSetupSelftest: .init(tier: .deterministic) { _ in
+        LocalModelSetupSelfTest.run() ? 0 : 1
+    },
     .setupRender: .init(tier: .gui) { arguments in
         guard let i = arguments.firstIndex(of: "--setup-render") else { return 1 }
         let out = arguments.count > i + 1 ? arguments[i + 1] : "build/setup-render"

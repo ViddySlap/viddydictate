@@ -424,6 +424,9 @@ tier_deterministic() {
         run_gate deterministic "Gemini key section copy, save policy, and never-echo selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --gemini-key-setup-selftest || true
+        run_gate deterministic "local model budget rendering and LM Studio JIT reader selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-model-setup-selftest || true
         run_gate deterministic "secret-store resolution order and off-state selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --secret-store-selftest || true

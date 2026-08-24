@@ -40,6 +40,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case preflightSurfaceSelftest = "--preflight-surface-selftest"
     case providerOnboardingSelftest = "--provider-onboarding-selftest"
     case geminiKeySetupSelftest = "--gemini-key-setup-selftest"
+    case localModelSetupSelftest = "--local-model-setup-selftest"
     case setupRender = "--setup-render"
     case providerOnboardingRender = "--provider-onboarding-render"
     case modelsPowerUIProbe = "--models-power-ui-probe"
