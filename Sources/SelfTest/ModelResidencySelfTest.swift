@@ -80,9 +80,8 @@ enum ModelResidencySelfTest {
                     model, ttlOverrideSeconds: ttlOverrideSeconds,
                     dependencies: sandboxDependencies).isReady
             }
-            let ready: Bool = ModelManager.shared.ensureReady(
-                model, ttlOverrideSeconds: ttlOverrideSeconds)
-            return ready
+            return ModelManager.shared.ensureReady(
+                model, ttlOverrideSeconds: ttlOverrideSeconds).isReady
         }
 
         // Record bge-m3 residency up front; the invariant is that qwen's whole load/evict cycle does not

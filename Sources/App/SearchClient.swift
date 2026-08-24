@@ -265,8 +265,39 @@ enum SearchClient {
     /// provider, so a route that degraded onto Local still gets its cold load out of the call timeout.
     private static func prepareSynthesis(_ resolution: LLMRouteResolution) -> CleanupClient.Result? {
         guard let bundle = resolution.bundle, bundle.provider == .local else { return nil }
-        return ModelManager.shared.ensureReady(bundle.modelID)
-            ? nil : .unavailable("synthesis model not loaded")
+        let readiness: ModelManager.ReadinessResult =
+            ModelManager.shared.ensureReady(bundle.modelID)
+        return CleanupClient.failureResult(
+            for: readiness, loadFailureMessage: "synthesis model not loaded")
+    }
+
+    /// Option+G-only early-out. This performs the same capacity preparation as `ensureReady` without
+    /// loading the model, so a refusal happens before the paid Gemini request. The authoritative
+    /// `prepareSynthesis` call remains after grounding because memory can change during that request.
+    private static func precheckSynthesis(_ resolution: LLMRouteResolution) -> CleanupClient.Result? {
+        guard let bundle = resolution.bundle, bundle.provider == .local else { return nil }
+        let readiness = ModelManager.shared.capacityPrecheck(bundle.modelID)
+        return CleanupClient.failureResult(
+            for: readiness, loadFailureMessage: "synthesis model not loaded")
+    }
+
+    /// Injected seams pin the Option+G ordering without reading a real key or making a paid request.
+    /// Production uses `live`; deterministic coverage supplies a recorded grounding transport.
+    struct GeminiAnswerDependencies {
+        let resolveKey: () -> String?
+        let synthesisResolution: () -> LLMRouteResolution
+        let capacityPrecheck: (LLMRouteResolution) -> CleanupClient.Result?
+        let grounded: (String, String) -> (answer: String, failure: CleanupClient.Result?)
+        let prepareSynthesis: (LLMRouteResolution) -> CleanupClient.Result?
+
+        static let live = GeminiAnswerDependencies(
+            resolveKey: { SearchClient.resolveGeminiKey() },
+            synthesisResolution: {
+                SearchClient.synthesisResolution(route: .searchGeminiSynth)
+            },
+            capacityPrecheck: { SearchClient.precheckSynthesis($0) },
+            grounded: { SearchClient.geminiGrounded(question: $0, key: $1) },
+            prepareSynthesis: { SearchClient.prepareSynthesis($0) })
     }
 
     // MARK: - Gemini grounding (Option+G retrieval)
@@ -334,8 +365,12 @@ enum SearchClient {
         // Fail-fast on a load failure with a clear diagnostic, matching CleanupClient/EmailClient —
         // proceeding into the pipeline against an unloaded model just hangs/times out with a murkier
         // error (model-lifecycle finding: ensureReady's contract must not silently fork between clients).
-        guard ModelManager.shared.ensureReady(Settings.searchModel) else {       // retrieval / agentic (qwen)
-            return .unavailable("retrieval model not loaded")
+        let retrievalReadiness: ModelManager.ReadinessResult =
+            ModelManager.shared.ensureReady(Settings.searchModel)
+        if let failure = CleanupClient.failureResult(
+            for: retrievalReadiness, loadFailureMessage: "retrieval model not loaded"
+        ) {                                                                      // retrieval / agentic (qwen)
+            return failure
         }
         // Resolve before retrieval: an off route cannot synthesize an answer, so the agentic loop is not
         // worth running, and the mode reports itself off with the specific reason instead.
@@ -358,16 +393,19 @@ enum SearchClient {
     /// Option+G: Gemini grounding -> gemma synthesis (so the spoken format matches Option+L).
     /// Synchronous — call OFF the main thread.
     static func geminiAnswerSync(question: String,
-                                 retryCompletion: ((CleanupClient.Result) -> Void)? = nil) -> CleanupClient.Result {
-        guard let key = resolveGeminiKey() else { return geminiOffResult() }
+                                 retryCompletion: ((CleanupClient.Result) -> Void)? = nil,
+                                 dependencies: GeminiAnswerDependencies = .live) -> CleanupClient.Result {
+        guard let key = dependencies.resolveKey() else { return geminiOffResult() }
         // Resolve before the grounded call for the same reason Option+L resolves before retrieval.
-        let resolution = synthesisResolution(route: .searchGeminiSynth)
+        let resolution = dependencies.synthesisResolution()
         if let off = TextTransformClient.offResult(resolution, route: .searchGeminiSynth) { return off }
-        let (raw, failure) = geminiGrounded(question: question, key: key)
+        // Refuse before Gemini so capacity failure never spends a paid request and discards its answer.
+        if let failure = dependencies.capacityPrecheck(resolution) { return failure }
+        let (raw, failure) = dependencies.grounded(question, key)
         if let failure = failure { return failure }
         // If the resolved synthesis provider is Local, make that model resident before the synth pass.
         // Gemini did retrieval remotely; Claude/Codex synthesis needs no LM Studio residency step.
-        if let failure = prepareSynthesis(resolution) { return failure }
+        if let failure = dependencies.prepareSynthesis(resolution) { return failure }
         // Feed Gemini's grounded answer to the resolved synthesis route as "search results" so the
         // voice + ASCII/no-markdown rules match Option+L exactly.
         return synthesize(route: .searchGeminiSynth, question: question, resultsBlock: raw,

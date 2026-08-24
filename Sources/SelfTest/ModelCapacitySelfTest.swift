@@ -9,6 +9,7 @@ enum ModelCapacitySelfTest {
 
         parserChecks(reporter)
         factorAndMissingFactChecks(reporter)
+        clientWiringAndGeminiOrderingChecks(reporter)
         ownershipAndEvictionChecks(reporter)
         onePassCheck(reporter)
 
@@ -170,6 +171,122 @@ enum ModelCapacitySelfTest {
                             })
     }
 
+    private static func clientWiringAndGeminiOrderingChecks(_ reporter: SelfTestReporter) {
+        let overBudget = CleanupClient.failureResult(
+            for: .capacityRefused(.overBudget), loadFailureMessage: "fixture load failed")!
+        let factsUnavailable = CleanupClient.failureResult(
+            for: .capacityRefused(.factsUnavailable), loadFailureMessage: "fixture load failed")!
+
+        reporter.record(
+            "over-budget refusal maps to Ben's exact unavailable string",
+            unavailableMessage(overBudget) == CleanupClient.overBudgetMessage
+                && CleanupClient.overBudgetMessage
+                    == "Not enough space in RAM. Adjust local model settings under the Setup tab.")
+        reporter.record(
+            "unreadable memory facts map to a distinct honest unavailable string",
+            unavailableMessage(factsUnavailable) == CleanupClient.memoryFactsUnavailableMessage
+                && CleanupClient.memoryFactsUnavailableMessage
+                    == "Memory facts could not be read, so the model was not loaded."
+                && unavailableMessage(factsUnavailable) != unavailableMessage(overBudget))
+
+        let overPresentation = TextTransformClient.safeFailurePresentation(for: overBudget)
+        let factsPresentation = TextTransformClient.safeFailurePresentation(for: factsUnavailable)
+        let ordinaryPresentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("fixture provider diagnostic that must stay hidden"))
+        reporter.record(
+            "capacity strings survive presentation intact and force the full HUD",
+            overPresentation?.userMessage == CleanupClient.overBudgetMessage
+                && overPresentation?.forceFullToast == true
+                && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage
+                && factsPresentation?.forceFullToast == true)
+        reporter.record(
+            "ordinary provider diagnostics remain generic and pill-eligible",
+            ordinaryPresentation?.userMessage == "Selected provider is unavailable"
+                && ordinaryPresentation?.forceFullToast == false)
+
+        let cleanupSemaphore = DispatchSemaphore(value: 0)
+        var cleanupResult: CleanupClient.Result = .badOutput("unset")
+        CleanupClient.cleanup(
+            "raw cleanup fixture", endpoint: URL(string: "http://127.0.0.1:1")!,
+            readiness: { _ in .capacityRefused(.overBudget) }
+        ) {
+            cleanupResult = $0
+            cleanupSemaphore.signal()
+        }
+        let cleanupReturned = cleanupSemaphore.wait(timeout: .now() + 2) == .success
+        reporter.record(
+            "CleanupClient returns the typed over-budget refusal without transport",
+            cleanupReturned
+                && unavailableMessage(cleanupResult) == CleanupClient.overBudgetMessage
+                && CleanupLogic.landing(for: cleanupResult) == .rawFallback)
+
+        let emailSemaphore = DispatchSemaphore(value: 0)
+        var emailResult: CleanupClient.Result = .badOutput("unset")
+        EmailClient.email(
+            "raw email fixture", endpoint: URL(string: "http://127.0.0.1:1")!,
+            readiness: { _ in .capacityRefused(.factsUnavailable) }
+        ) {
+            emailResult = $0
+            emailSemaphore.signal()
+        }
+        let emailReturned = emailSemaphore.wait(timeout: .now() + 2) == .success
+        reporter.record(
+            "EmailClient returns the distinct facts-unavailable refusal without transport",
+            emailReturned
+                && unavailableMessage(emailResult) == CleanupClient.memoryFactsUnavailableMessage
+                && CleanupLogic.landing(for: emailResult) == .rawFallback)
+
+        var geminiRequests = 0
+        var authoritativePreparations = 0
+        func geminiResult(
+            _ refusal: ModelManager.CapacityRefusal
+        ) -> CleanupClient.Result {
+            let mapped = CleanupClient.failureResult(
+                for: .capacityRefused(refusal), loadFailureMessage: "fixture load failed")!
+            let dependencies = SearchClient.GeminiAnswerDependencies(
+                resolveKey: { "fixture-key-never-sent" },
+                synthesisResolution: { .pinned(.local("fixture-gemma")) },
+                capacityPrecheck: { _ in mapped },
+                grounded: { _, _ in
+                    geminiRequests += 1
+                    return ("fixture grounded answer", nil)
+                },
+                prepareSynthesis: { _ in
+                    authoritativePreparations += 1
+                    return mapped
+                })
+            return SearchClient.geminiAnswerSync(
+                question: "fixture question", dependencies: dependencies)
+        }
+
+        let geminiOverBudget = geminiResult(.overBudget)
+        let geminiFactsUnavailable = geminiResult(.factsUnavailable)
+        reporter.record(
+            "Option+G refusal makes zero Gemini requests through the recorded transport",
+            geminiRequests == 0 && authoritativePreparations == 0,
+            "geminiRequests=\(geminiRequests) authoritativePreparations=\(authoritativePreparations)")
+        reporter.record(
+            "SearchClient preserves both capacity refusal messages on the early-out",
+            unavailableMessage(geminiOverBudget) == CleanupClient.overBudgetMessage
+                && unavailableMessage(geminiFactsUnavailable)
+                    == CleanupClient.memoryFactsUnavailableMessage)
+
+        var precheckLoads: [String] = []
+        let precheck = ModelManager().capacityPrecheck(
+            "incoming",
+            dependencies: .init(
+                availableInstalledModels: { [installedModel("incoming", size: 100)] },
+                residentModels: { [] },
+                wiredBytes: { 10 },
+                budgetBytes: { _ in 1_000 },
+                ensureLoaded: { model, _ in precheckLoads.append(model); return true },
+                unload: { _ in }))
+        reporter.record(
+            "capacity precheck authorizes without loading the requested model",
+            precheck == .ready && precheckLoads.isEmpty,
+            "loads=\(precheckLoads)")
+    }
+
     private static func onePassCheck(_ reporter: SelfTestReporter) {
         let manager = ModelManager()
         var residents: [ModelResidency.ResidentModel] = []
@@ -221,5 +338,10 @@ enum ModelCapacitySelfTest {
 
     private static func installedModel(_ id: String, size: Int64?) -> LMStudioInstalledModel {
         .init(modelID: id, label: id, type: "llm", sizeBytes: size, visionFlag: false)
+    }
+
+    private static func unavailableMessage(_ result: CleanupClient.Result) -> String? {
+        guard case .unavailable(let message) = result else { return nil }
+        return message
     }
 }

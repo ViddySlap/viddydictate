@@ -61,6 +61,12 @@ final class ModelManager {
     /// never adopted, even when its identifier is one ViddyDictate commonly uses.
     private var ownedModels = Set<String>()
 
+    private enum CapacityPreparation {
+        case alreadyResident
+        case loadAllowed
+        case refused(CapacityRefusal)
+    }
+
     init() {}
 
     /// The idle TTL handed to LM Studio at load time. One persisted setting governs every model role.
@@ -73,21 +79,34 @@ final class ModelManager {
     /// load does not count against that request's timeout. Loads with the app's configured TTL so LM
     /// Studio owns the eviction; `ttlOverrideSeconds` is a test-only seam (the residency self-test uses
     /// a short TTL so eviction is observable without waiting for the configured interval). Returns
-    /// a typed result so the client layer can distinguish a capacity refusal from an LM Studio load
-    /// failure. A same-signature Bool compatibility overload below preserves existing clients until
-    /// their dedicated wiring link maps the typed refusal onto user-facing fallback text.
+    /// a typed result so every client must distinguish a capacity refusal from an LM Studio load
+    /// failure instead of silently collapsing the policy outcome to a Bool.
     @discardableResult
     func ensureReady(_ model: String, ttlOverrideSeconds: Int? = nil) -> ReadinessResult {
         ensureReady(model, ttlOverrideSeconds: ttlOverrideSeconds, dependencies: .live)
     }
 
-    /// Existing call-site compatibility only. Capacity policy still runs; this overload deliberately
-    /// collapses the typed outcome until L4 wires the capacity refusal through the clients.
-    @discardableResult
-    func ensureReady(_ model: String, ttlOverrideSeconds: Int? = nil) -> Bool {
-        let result: ReadinessResult = ensureReady(
-            model, ttlOverrideSeconds: ttlOverrideSeconds, dependencies: .live)
-        return result.isReady
+    /// Cheap early-out for a caller that has expensive work to do before the model is needed. It runs
+    /// the same live-fact check and bounded self-eviction pass as `ensureReady`, but never loads the
+    /// requested model. `ensureReady` must still run immediately before inference: memory can change
+    /// after this snapshot, so this is an optimization rather than load authorization.
+    func capacityPrecheck(_ model: String) -> ReadinessResult {
+        capacityPrecheck(model, dependencies: .live)
+    }
+
+    func capacityPrecheck(
+        _ model: String,
+        dependencies: CapacityDependencies
+    ) -> ReadinessResult {
+        policyLock.lock()
+        defer { policyLock.unlock() }
+
+        switch prepareCapacity(for: model, dependencies: dependencies) {
+        case .alreadyResident, .loadAllowed:
+            return .ready
+        case .refused(let reason):
+            return .capacityRefused(reason)
+        }
     }
 
     @discardableResult
@@ -99,8 +118,31 @@ final class ModelManager {
         policyLock.lock()
         defer { policyLock.unlock() }
 
+        switch prepareCapacity(for: model, dependencies: dependencies) {
+        case .alreadyResident:
+            return .ready
+        case .refused(let reason):
+            return .capacityRefused(reason)
+        case .loadAllowed:
+            break
+        }
+
+        let loaded = dependencies.ensureLoaded(model, ttlOverrideSeconds ?? ttl(for: model))
+        guard loaded else { return .loadFailed }
+        ownedModels.insert(model)
+        return .ready
+    }
+
+    /// Shared capacity preparation for the early Option+G check and the authoritative load path.
+    /// Keeping the facts, estimate, ownership filter, one-pass eviction, and recheck in one function
+    /// prevents the early-out from drifting into a looser policy than `ensureReady`.
+    private func prepareCapacity(
+        for model: String,
+        dependencies: CapacityDependencies
+    ) -> CapacityPreparation {
+
         guard let residents = dependencies.residentModels() else {
-            return .capacityRefused(.factsUnavailable)
+            return .refused(.factsUnavailable)
         }
 
         // Drop ownership as soon as a previously owned instance is observed absent (for example,
@@ -109,7 +151,7 @@ final class ModelManager {
 
         // A resident request allocates nothing new. Do not re-load it (LM Studio would create :2),
         // and do not claim ownership if another caller made it resident.
-        if residents.contains(where: { $0.identifier == model }) { return .ready }
+        if residents.contains(where: { $0.identifier == model }) { return .alreadyResident }
 
         guard let installed = dependencies.availableInstalledModels(),
               let size = installed.first(where: { $0.modelID == model })?.sizeBytes,
@@ -117,7 +159,7 @@ final class ModelManager {
               let estimatedIncoming = Self.estimatedIncomingBytes(sizeBytes: size),
               let firstWired = dependencies.wiredBytes(),
               let firstBudget = dependencies.budgetBytes(Settings.modelMemoryBudgetSliderPosition)
-        else { return .capacityRefused(.factsUnavailable) }
+        else { return .refused(.factsUnavailable) }
 
         if !Self.fits(wiredBytes: firstWired, incomingBytes: estimatedIncoming,
                       budgetBytes: firstBudget) {
@@ -145,16 +187,13 @@ final class ModelManager {
             guard let recheckedWired = dependencies.wiredBytes(),
                   let recheckedBudget = dependencies.budgetBytes(
                     Settings.modelMemoryBudgetSliderPosition)
-            else { return .capacityRefused(.factsUnavailable) }
+            else { return .refused(.factsUnavailable) }
             guard Self.fits(wiredBytes: recheckedWired, incomingBytes: estimatedIncoming,
                             budgetBytes: recheckedBudget)
-            else { return .capacityRefused(.overBudget) }
+            else { return .refused(.overBudget) }
         }
 
-        let loaded = dependencies.ensureLoaded(model, ttlOverrideSeconds ?? ttl(for: model))
-        guard loaded else { return .loadFailed }
-        ownedModels.insert(model)
-        return .ready
+        return .loadAllowed
     }
 
     static func estimatedIncomingBytes(sizeBytes: Int64) -> UInt64? {

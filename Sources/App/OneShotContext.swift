@@ -41,7 +41,8 @@ protocol OneShotContext: AnyObject {
 
     /// The shared piece-2 "land a one-shot selection-transform RESULT" tail: on success paste back over
     /// the selection, record provenance, and (for undo-wired modes) register the smart-undo source; on
-    /// failure leave the text untouched via `failInPlace`. The in-place transform modes route here.
+    /// failure leave selection text untouched or deliver a fresh dictated input raw. The in-place
+    /// transform modes route here; the input source decides which failure action preserves user text.
     func landInPlaceTransform(_ result: CleanupClient.Result, input: String, mode: HistoryMode,
                               level: Int?, wireUndo: Bool, uiNoun: String, logNoun: String,
                               levelLabel: String?, inputSource: NotesBullseyeLogic.InputSource,

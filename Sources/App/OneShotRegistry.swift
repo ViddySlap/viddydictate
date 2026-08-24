@@ -330,7 +330,8 @@ final class OneShotRegistry {
     /// Land the result and release the stage, dispatching on `descriptor.landing` (the single
     /// authoritative representation of where a mode's result goes). `.inPlace` routes through the shared
     /// piece-2 `landInPlaceTransform` tail (paste-back + provenance + optional smart-undo, or
-    /// leave-untouched on failure); `.nonDestructive` runs the mode's bespoke hook (search's answer
+    /// preserve the original selection / deliver a fresh dictation raw on failure); `.nonDestructive`
+    /// runs the mode's bespoke hook (search's answer
     /// note / HUD) — a `.nonDestructive` row with no hook is a table bug and fails loudly rather than
     /// falling through to a destructive paste over the selection. Either way the busy-latch drops, the
     /// pending pick clears, and the idle hint is restored exactly once.
@@ -565,8 +566,11 @@ final class OneShotRegistry {
                                                            id: historyID ?? UUID())
                     case .unavailable, .timedOut, .badOutput:
                         let failure = TextTransformClient.safeFailure(for: result)!
+                        let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                         Log.write("search fallback classification=\(failure.logToken) — \(m.label)")
-                        self.context.hud.toast("⚠️ Search: \(failure.userMessage) — no answer inserted.")
+                        self.context.hud.toast(
+                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.",
+                            forceFull: presentation.forceFullToast)
                     }
                 })
         }
@@ -600,8 +604,11 @@ final class OneShotRegistry {
                                                        id: historyID ?? UUID())
                 case .unavailable, .timedOut, .badOutput:
                     let failure = TextTransformClient.safeFailure(for: result)!
+                    let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                     Log.write("custom \(m.id) fallback classification=\(failure.logToken)")
-                    self.context.hud.toast("⚠️ \(label): \(failure.userMessage) — no output inserted. Retry in Models.")
+                    self.context.hud.toast(
+                        "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry in Models.",
+                        forceFull: presentation.forceFullToast)
                 }
             }
             : nil

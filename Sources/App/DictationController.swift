@@ -762,8 +762,8 @@ final class DictationController {
         return true
     }
 
-    /// Shared "the LLM pass failed, leave the user's text untouched" routing for the in-place transform
-    /// modes (Cleanup-selection, email). `.ok` is handled by the caller (the success payload + landing
+    /// Shared "the LLM pass failed, leave the selected text untouched" routing for selection-input
+    /// transforms (Cleanup-selection and email-selection). `.ok` is handled by the caller (payload + landing
     /// differ per mode); the three failure cases collapse to a logged reason + a mode-nouned toast, gated
     /// by `CleanupLogic.landing(for:)`. Search and the inline cleanup switch keep bespoke fallbacks because
     /// their failure ACTION differs (answer-surface toast / paste-raw), so routing them here would be false
@@ -771,8 +771,11 @@ final class DictationController {
     private func failInPlace(_ result: CleanupClient.Result, uiNoun: String, logNoun: String) {
         guard CleanupLogic.landing(for: result) == .rawFallback else { return }  // .ok: caller lands it
         guard let failure = TextTransformClient.safeFailure(for: result) else { return }
+        guard let presentation = TextTransformClient.safeFailurePresentation(for: result) else { return }
         Log.write("\(logNoun) fallback classification=\(failure.logToken) — text untouched")
-        hud.toast("⚠️ \(uiNoun): \(failure.userMessage) — text left as-is. Retry in Models.")
+        hud.toast(
+            "⚠️ \(uiNoun): \(presentation.userMessage) — text left as-is. Retry in Models.",
+            forceFull: presentation.forceFullToast)
     }
 
     /// Land a successful selection-transform result through the focus fallback. The shared notes delivery
@@ -888,7 +891,21 @@ final class DictationController {
                 }
             }
         case .unavailable, .timedOut, .badOutput:
-            failInPlace(result, uiNoun: uiNoun, logNoun: logNoun)
+            switch CleanupLogic.inPlaceFailureLanding(for: inputSource) {
+            case .leaveExistingText:
+                failInPlace(result, uiNoun: uiNoun, logNoun: logNoun)
+            case .deliverRawTranscript:
+                let failure = TextTransformClient.safeFailure(for: result)!
+                let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+                Log.write("\(logNoun) fallback classification=\(failure.logToken) — raw")
+                hud.toast(
+                    "⚠️ \(uiNoun): \(presentation.userMessage) — pasted raw. Retry in Models.",
+                    forceFull: presentation.forceFullToast)
+                finalize(
+                    delivered: input, raw: input, cleaned: nil, mode: .raw,
+                    historyID: historyID ?? UUID(), keepHUD: true,
+                    lateRecovery: lateRecovery)
+            }
         }
     }
 
@@ -1169,8 +1186,11 @@ final class DictationController {
                     }
                 case .unavailable, .timedOut, .badOutput:
                     let failure = TextTransformClient.safeFailure(for: result)!
+                    let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                     Log.write("cleanup fallback classification=\(failure.logToken) → raw")
-                    self.hud.toast("⚠️ \(failure.userMessage) — pasted raw. Retry in Models.")
+                    self.hud.toast(
+                        "⚠️ \(presentation.userMessage) — pasted raw. Retry in Models.",
+                        forceFull: presentation.forceFullToast)
                     self.finalize(
                         delivered: raw, raw: raw, cleaned: nil, mode: .raw,
                         historyID: takeID, keepHUD: true, lateRecovery: recovered
@@ -1273,8 +1293,11 @@ final class DictationController {
             }
         case .unavailable, .timedOut, .badOutput:
             let failure = TextTransformClient.safeFailure(for: result)!
+            let presentation = TextTransformClient.safeFailurePresentation(for: result)!
             Log.write("cleanup explicit retry classification=\(failure.logToken) — raw unchanged")
-            hud.toast("⚠️ \(failure.userMessage) — raw text left unchanged. Retry in Models.")
+            hud.toast(
+                "⚠️ \(presentation.userMessage) — raw text left unchanged. Retry in Models.",
+                forceFull: presentation.forceFullToast)
         }
     }
 

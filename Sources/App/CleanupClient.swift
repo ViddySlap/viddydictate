@@ -12,6 +12,13 @@ import Foundation
 /// the pending `gemma-3-4b-it-qat` head-to-head swaps in via config with no code change.
 enum CleanupClient {
 
+    /// Capacity refusals are app-authored and safe to show verbatim. Do not replace the over-budget
+    /// sentence: Ben chose it as the user-facing instruction for the real RAM-capacity case.
+    static let overBudgetMessage =
+        "Not enough space in RAM. Adjust local model settings under the Setup tab."
+    static let memoryFactsUnavailableMessage =
+        "Memory facts could not be read, so the model was not loaded."
+
     /// Fence the raw transcript inside the delimiter markers the prompts reference, so the model sees
     /// the dictation strictly as a delimited DATA block (the prompt-injection fix). Coupled to the
     /// marker constants + prompt wording in `Prompts.swift`.
@@ -74,6 +81,33 @@ enum CleanupClient {
         case unavailable(String)   // LM Studio down / connection refused / bad response
         case timedOut              // ran too long past the safety timeout
         case badOutput(String)     // ran, but produced empty / unusable output
+    }
+
+    /// Map the model policy's typed result onto the existing failure-soft client contract. Ordinary
+    /// LM Studio load failures keep each client's established wording; capacity cases are distinct.
+    static func failureResult(
+        for readiness: ModelManager.ReadinessResult,
+        loadFailureMessage: String
+    ) -> Result? {
+        switch readiness {
+        case .ready:
+            return nil
+        case .capacityRefused(.overBudget):
+            return .unavailable(overBudgetMessage)
+        case .capacityRefused(.factsUnavailable):
+            return .unavailable(memoryFactsUnavailableMessage)
+        case .loadFailed:
+            return .unavailable(loadFailureMessage)
+        }
+    }
+
+    /// Only these two allowlisted strings may bypass the generic, content-safe provider wording at
+    /// presentation time. Arbitrary transport/provider errors can contain user or service text.
+    static func capacityRefusalMessage(for result: Result) -> String? {
+        guard case .unavailable(let message) = result,
+              message == overBudgetMessage || message == memoryFactsUnavailableMessage
+        else { return nil }
+        return message
     }
 
     enum ChatResponseClassification {
@@ -173,6 +207,11 @@ enum CleanupClient {
                         model: String = Settings.cleanupModel,
                         endpoint: URL = Settings.cleanupEndpoint,
                         systemPrompt: String = Settings.cleanupPrompt(.cleanup),
+                        readiness: @escaping (String) -> ModelManager.ReadinessResult = { model in
+                            let result: ModelManager.ReadinessResult =
+                                ModelManager.shared.ensureReady(model)
+                            return result
+                        },
                         completion: @escaping (Result) -> Void) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(.badOutput("empty input")); return }
@@ -181,9 +220,12 @@ enum CleanupClient {
         // a raw fallback. ensureReady loads the model with its per-model TTL; LM Studio owns eviction
         // now (interop ADR 0004), and the request below resets LM Studio's idle clock.
         DispatchQueue.global(qos: .userInitiated).async {
-            guard ModelManager.shared.ensureReady(model) else {
+            let readinessResult = readiness(model)
+            if let failure = failureResult(
+                for: readinessResult, loadFailureMessage: "model not loaded"
+            ) {
                 Log.write("cleanup: \(model) could not be made resident")
-                completion(.unavailable("model not loaded")); return
+                completion(failure); return
             }
             sendRequest(raw, timeout: timeout, model: model, endpoint: endpoint,
                         systemPrompt: systemPrompt, completion: completion)

@@ -79,6 +79,17 @@ enum CleanupLogic {
         }
     }
 
+    /// A failed in-place one-shot has two materially different inputs. Selection text already exists
+    /// at its destination and must remain untouched; a fresh dictation exists only in memory and must
+    /// be delivered raw or it is lost. Option+M exercises both arms, so the caller must not collapse
+    /// them into one "leave untouched" action.
+    enum InPlaceFailureLanding: Equatable { case leaveExistingText, deliverRawTranscript }
+    static func inPlaceFailureLanding(
+        for inputSource: NotesBullseyeLogic.InputSource
+    ) -> InPlaceFailureLanding {
+        inputSource == .dictation ? .deliverRawTranscript : .leaveExistingText
+    }
+
     /// Undo-eligibility: a delivered take is revertable by `right-Option + Z` only when a DISTINCT
     /// cleaned/transformed version actually replaced the raw. Raw passthrough (`cleaned == nil`) or a
     /// no-op transform (`cleaned == raw`) has nothing to revert to, so it wires no undo. Centralizes
