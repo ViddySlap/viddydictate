@@ -1,4 +1,4 @@
-# Model residency: LM Studio owns eviction (per-model TTL)
+# Model residency: LM Studio owns eviction (one app TTL setting)
 
 This file describes ViddyDictate's shipped model-residency behavior. It replaced the earlier
 app-managed idle-unload timer while keeping its intent: an idle Mac must not keep large models
@@ -7,7 +7,7 @@ pinned overnight.
 ## The change
 
 **LM Studio owns model eviction, not the app.** Every time a mode makes a model resident it loads it
-with a per-model idle `--ttl`, and LM Studio unloads the model on its own after that idle window. There
+with the app's configured idle `--ttl`, and LM Studio unloads the model on its own after that idle window. There
 is **no app-side unload timer and no keep-alive ping** for the LLMs.
 
 Why the reversal: ViddyDictate and external consumers share the same two local models (qwen for cleanup /
@@ -24,24 +24,22 @@ wins.)
   `lms load <model> -y --ttl <seconds>`. (Was: `lms load <model> -y` with no TTL.)
 - `ModelManager` — the idle-unload timer machinery (`start()`, the repeating `Timer`, `evictIfIdle()`,
   the `lastUse` / `evicted` latch) is **deleted**. What remains is the policy: the working set and the
-  per-model TTL (`ttl(for:)`), plus `ensureReady` as the load-on-demand entry point.
+  one persisted TTL (`ttl(for:)`), plus `ensureReady` as the load-on-demand entry point.
 - `AppDelegate.applicationDidFinishLaunching` — the `ModelManager.shared.start()` call is removed;
   nothing needs arming at launch (the LM Studio server is started lazily on the first load).
 - The `ensureReady` call sites (CleanupClient / EmailClient / SearchClient) are unchanged in shape —
   their comments were updated to describe LM Studio-owned eviction.
 
-### Per-model TTL
+### One idle-unload setting
 
-Set in `ModelManager` and applied at load time:
+`Settings.modelIdleUnloadSeconds` is the single idle window ViddyDictate applies at load time:
 
-| Model (role)                                  | Idle TTL |
-|-----------------------------------------------|----------|
-| `qwen3-coder-30b-a3b-instruct-mlx` (cleanup / search retrieval) | 900 s (15 min) |
-| `google/gemma-4-e4b` (email / search synthesis)                 | 300 s (5 min)  |
+- The default is 600 seconds (10 minutes).
+- `ModelManager.ttl(for:)` returns that one value for every model; there is no role-specific branch.
+- The user controls the value from the Setup tab's Local models section.
 
-The IDs are not hardcoded twice — `ttl(for:)` derives them from the same `Settings` model keys the
-working set uses. `ensureReady` takes a test-only `ttlOverrideSeconds` seam so the self-test can observe
-eviction in seconds instead of 15 minutes.
+`ensureReady` keeps its test-only `ttlOverrideSeconds` seam so the self-test can observe eviction in
+seconds instead of waiting for the configured production interval.
 
 Bootstrap wrinkle: a model that is already resident **without** a TTL (loaded manually in the LM Studio
 GUI, or by an older ViddyDictate build) is left as-is by `ensureLoaded` — it is not yanked out from under
@@ -73,8 +71,8 @@ safe for layered reasons:
   that carries no explicit `--ttl`; ViddyDictate's explicit `lms load --ttl` overrides it per instance).
 - `~/.lmstudio/.internal/http-server-config.json` → `justInTimeModelLoading: true`.
 
-None of these global settings are modified by this link — per-model TTL is expressed at load time via
-`--ttl`, which a single global value cannot express anyway.
+None of these global settings are modified by this feature. ViddyDictate expresses its one idle TTL at
+load time via `--ttl`, scoped to each instance it loads.
 
 ## Acceptance test: `--residency-selftest`
 
@@ -84,10 +82,11 @@ None of these global settings are modified by this link — per-model TTL is exp
 ```
 
 `ModelResidencySelfTest` runs the locked **interleaved eviction acceptance test** from the verification bundle,
-on qwen (the named model), with a short (20 s) test TTL so eviction is observable in ~35 s instead of 15
-minutes. It asserts, in order:
+on qwen (the named model), with a short (20 s) test TTL so eviction is observable in ~35 s instead of
+waiting for the configured production interval. It asserts, in order:
 
-1. the per-model TTL policy is the locked one (qwen 900 s, gemma 300 s) — pure unit check;
+1. the one configured idle TTL applies to cleanup, email, search retrieval, search synthesis, and an
+   otherwise unknown model ID — pure unit check;
 2. clean slate: qwen unloaded;
 3. **ViddyDictate cleanup-path** load: `ensureReady(qwen, ttlOverride: 20)` → resident, and `lms ps
    --json` shows the 20 s TTL actually reached LM Studio;
@@ -98,8 +97,8 @@ minutes. It asserts, in order:
    residency is unchanged**;
 7. the next request JIT-reloads qwen.
 
-Production TTLs are 900 s / 300 s; the test uses 20 s only to keep the idle wait short. The mechanism is
-identical at any TTL value.
+The production default is 600 s; the test uses 20 s only to keep the idle wait short. The mechanism is
+identical at any configured TTL value.
 
 ### Evidence captured while building this link
 
@@ -111,5 +110,5 @@ identical at any TTL value.
 
 ## Current status
 
-This mechanism shipped in ViddyDictate on 2026-07-06. Rebuilding and reinstalling the app preserves
-the same LM Studio-owned eviction behavior.
+This mechanism shipped in ViddyDictate on 2026-07-06. LM Studio still owns eviction; ViddyDictate now
+feeds it one user-controlled idle window for every local model.

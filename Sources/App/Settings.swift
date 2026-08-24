@@ -25,6 +25,10 @@ enum Settings {
         static let gain        = "meterGain"          // 0…1
         static let reactivity  = "meterReactivity"    // 0…1
         static let reduceRepeats = "reduceRepeats"    // Bool
+        // Local-model residency and capacity controls. LM Studio owns eviction; the app supplies the
+        // one idle TTL at load time. The budget position is the Setup slider's visible 0…100 value.
+        static let modelIdleUnloadSeconds = "modelIdleUnloadSeconds"
+        static let modelMemoryBudgetSliderPosition = "modelMemoryBudgetSliderPosition"
         // Cleanup mode (post-processing layer). Model-pluggable: the model id, endpoint, prompt,
         // and safety timeout are all config so the pending Gemma 3 4B IT QAT head-to-head swaps in
         // without a code change.
@@ -133,6 +137,8 @@ enum Settings {
         static let gain = 0.20
         static let reactivity = 0.72
         static let reduceRepeats = true
+        static let modelIdleUnloadSeconds = 600
+        static let modelMemoryBudgetSliderPosition = 54.0
         // Cleanup model: qwen3-coder-30b-a3b is the on-disk pick that clears the golden green
         // bar (the locked first-pass llama-3.2-3b hallucinates on the hardest meta-dictation,
         // golden sample 3). Model-pluggable: change this one value to swap back to the 3B or to
@@ -186,6 +192,8 @@ enum Settings {
 
     /// Allowed range for the per-tab history retention caps.
     static let historyMaxRange = 1...500
+    /// Allowed range for the Setup tab's visible local-model memory budget position.
+    static let modelMemoryBudgetSliderRange = 0.0...100.0
 
     /// Live flag (not persisted) so the settings preview can avoid starting a second mic while a
     /// real dictation is in flight. Set by the controller around each take.
@@ -198,6 +206,8 @@ enum Settings {
             K.gain: Defaults.gain,
             K.reactivity: Defaults.reactivity,
             K.reduceRepeats: Defaults.reduceRepeats,
+            K.modelIdleUnloadSeconds: Defaults.modelIdleUnloadSeconds,
+            K.modelMemoryBudgetSliderPosition: Defaults.modelMemoryBudgetSliderPosition,
             K.cleanupModel: Defaults.cleanupModel,
             K.cleanupEndpoint: Defaults.cleanupEndpoint,
             K.cleanupSystemPrompt: firmCleanupPrompt,
@@ -651,6 +661,29 @@ enum Settings {
             ids.remove(modeID)
         }
         persistentToggleModeIDs = ids
+    }
+
+    // MARK: local models
+
+    /// The one idle TTL ViddyDictate supplies to LM Studio for every model it loads.
+    static var modelIdleUnloadSeconds: Int {
+        get { positiveInt(K.modelIdleUnloadSeconds, fallback: Defaults.modelIdleUnloadSeconds) }
+        set { d.set(max(1, newValue), forKey: K.modelIdleUnloadSeconds); notify() }
+    }
+
+    /// The Setup slider's visible 0…100 position. `SystemMemory` maps it onto the safe wire-budget range.
+    static var modelMemoryBudgetSliderPosition: Double {
+        get {
+            min(modelMemoryBudgetSliderRange.upperBound,
+                max(modelMemoryBudgetSliderRange.lowerBound,
+                    d.double(forKey: K.modelMemoryBudgetSliderPosition)))
+        }
+        set {
+            d.set(min(modelMemoryBudgetSliderRange.upperBound,
+                      max(modelMemoryBudgetSliderRange.lowerBound, newValue)),
+                  forKey: K.modelMemoryBudgetSliderPosition)
+            notify()
+        }
     }
 
     static func resetToDefaults() {

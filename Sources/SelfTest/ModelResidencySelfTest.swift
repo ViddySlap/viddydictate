@@ -1,14 +1,14 @@
 import Foundation
 
 /// Headless verification of the model-residency mechanism (interop ADR 0004, reversing ADR 0006's
-/// app-side idle timer): LM Studio — not the app — owns eviction, via the per-model `--ttl` set on each
+/// app-side idle timer): LM Studio — not the app — owns eviction, via the configured `--ttl` set on each
 /// `ensureReady` load. Run with `--residency-selftest`. Needs LM Studio.
 ///
 /// It runs the locked interleaved eviction acceptance test on the real app path, on qwen (the cleanup /
 /// retrieval model the acceptance test names), with a SHORT test TTL so eviction is observable in
-/// seconds instead of the production 15 minutes:
+/// seconds instead of the production setting:
 ///
-///   1. per-model TTL policy is the locked one (qwen 900s, gemma 300s)  [pure unit assert]
+///   1. one configured TTL applies to every model role and unknown model IDs  [pure unit assert]
 ///   2. clean slate: qwen unloaded
 ///   3. ViddyDictate cleanup-path load: `ensureReady(qwen, ttlOverride: short)` -> resident, and the
 ///      short TTL actually reached LM Studio (`lms ps --json` ttlMs)
@@ -25,7 +25,7 @@ enum ModelResidencySelfTest {
     /// A representative model loaded outside ViddyDictate. It must never be evicted as a side effect
     /// of loading or evicting the app's LLMs. Not a Settings model.
     private static let bgeEmbedder = "text-embedding-bge-m3"
-    /// Short idle TTL for the test so eviction happens in seconds, not the production 15 min. Comfortably
+    /// Short idle TTL for the test so eviction happens in seconds, not the production setting. Comfortably
     /// longer than the gap between the load and the idle wait so the model does not evict mid-test.
     private static let testTTL = 20
     /// How long to idle after last use before checking for eviction (TTL + margin).
@@ -38,11 +38,19 @@ enum ModelResidencySelfTest {
         let reporter = SelfTestReporter()
         let check = reporter
 
-        // 1. Per-model TTL policy is the locked one — pure, no LM Studio needed.
-        let qwenTTL = ModelManager.shared.ttl(for: Settings.cleanupModel)
-        let gemmaTTL = ModelManager.shared.ttl(for: Settings.emailModel)
-        check("per-model TTL policy (qwen 900 / gemma 300)", qwenTTL == 900 && gemmaTTL == 300,
-              "qwen=\(qwenTTL)s, gemma=\(gemmaTTL)s")
+        // 1. One persisted TTL applies to every model role — pure, no LM Studio needed.
+        let configuredTTL = Settings.modelIdleUnloadSeconds
+        let ttlSamples = [
+            "cleanup": ModelManager.shared.ttl(for: Settings.cleanupModel),
+            "email": ModelManager.shared.ttl(for: Settings.emailModel),
+            "search retrieval": ModelManager.shared.ttl(for: Settings.searchModel),
+            "search synthesis": ModelManager.shared.ttl(for: Settings.searchSynthModel),
+            "unknown": ModelManager.shared.ttl(for: "selftest/unknown-model"),
+        ]
+        let allUseConfiguredTTL = ttlSamples.values.allSatisfy { $0 == configuredTTL }
+        check("one configured idle TTL applies to every model", allUseConfiguredTTL,
+              "configured=\(configuredTTL)s; " + ttlSamples.sorted { $0.key < $1.key }
+                  .map { "\($0.key)=\($0.value)s" }.joined(separator: ", "))
 
         guard FileManager.default.isExecutableFile(atPath: "\(NSHomeDirectory())/.lmstudio/bin/lms") else {
             print("\n  [skip] lms CLI not found, cannot run the live eviction test")
@@ -65,7 +73,7 @@ enum ModelResidencySelfTest {
         check("cleanup-path load makes qwen resident", ready && residentAfterLoad,
               String(format: "ensureReady=%@, isLoaded=%@, %.1fs", b(ready), b(residentAfterLoad), Date().timeIntervalSince(t0)))
         let seenTTL = ModelResidency.loadedTTLSeconds(model)
-        check("per-model TTL reached LM Studio", seenTTL == testTTL, "lms ps ttl=\(seenTTL.map(String.init) ?? "nil")s (expected \(testTTL)s)")
+        check("TTL override reached LM Studio", seenTTL == testTTL, "lms ps ttl=\(seenTTL.map(String.init) ?? "nil")s (expected \(testTTL)s)")
 
         // 4. Shared-client seam: a real /v1 chat turn against the shared resident qwen. Also resets LM Studio's
         //    idle clock, so the idle window below is measured from here.
