@@ -122,6 +122,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelsPowerSelftest: .init(tier: .deterministic) { _ in
         ModelsPowerSettingsSelfTest.run() ? 0 : 1
     },
+    .systemMemorySelftest: .init(tier: .deterministic) { _ in
+        SystemMemorySelfTest.run() ? 0 : 1
+    },
     .promptOverlaySelftest: .init(tier: .deterministic) { _ in
         PromptOverlaySelfTest.run() ? 0 : 1
     },
