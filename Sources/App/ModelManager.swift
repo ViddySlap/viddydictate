@@ -40,6 +40,9 @@ final class ModelManager {
         let budgetBytes: (Double) -> UInt64?
         let ensureLoaded: (String, Int) -> Bool
         let unload: (String) -> Void
+        /// How long the recheck may wait for the kernel to reclaim an evicted model's wired pages.
+        /// Defaults to 0 so a test supplying its own facts sees no wall-clock wait; production waits.
+        var evictionSettleSeconds: Double = 0
 
         static let live = CapacityDependencies(
             availableInstalledModels: { ModelResidency.availableInstalledModels() },
@@ -47,8 +50,20 @@ final class ModelManager {
             wiredBytes: { SystemMemory.wiredBytes },
             budgetBytes: { SystemMemory.budgetBytes(forSliderPosition: $0) },
             ensureLoaded: { ModelResidency.ensureLoaded($0, ttlSeconds: $1) },
-            unload: { ModelResidency.unload($0) })
+            unload: { ModelResidency.unload($0) },
+            evictionSettleSeconds: evictionSettleWindow)
     }
+
+    /// `lms unload` returns before macOS has unwired the model worker's pages. Measured on this Mac
+    /// (`vdmg-REV`, 2026-08-24): unload returned at +0.148s with `wire_count` still reporting 10.00 of
+    /// 10.43 GB, and the reading did not settle to 3.50 GB until ~+0.68s. Re-reading immediately
+    /// therefore compares the INCOMING model against the PRE-eviction number, so the recheck can never
+    /// pass on the strength of the eviction it just performed - the app unloads its own warm model and
+    /// refuses anyway. Waiting for the reading to catch up is what makes LOCKED DECISION 2's recheck
+    /// mean anything; it is still ONE eviction pass, not a second one.
+    static let evictionSettleWindow: Double = 2.0
+    /// Sampling interval inside that window. Short enough that the common case costs ~1 sample.
+    static let evictionSettleInterval: Double = 0.05
 
     static let shared = ModelManager()
 
@@ -182,6 +197,22 @@ final class ModelManager {
                 // Even a failed/no-op unload cannot justify a later, broader attempt. Forgetting the
                 // claim makes the safety boundary tighter; the live recheck below decides capacity.
                 ownedModels.remove(candidate.identifier)
+            }
+
+            // Let the wired reading catch up with the unload before the recheck reads it. Bounded, and
+            // it exits the instant the reading is good enough, so a machine that frees promptly pays
+            // one sample and a machine that never frees still refuses exactly as it would have.
+            if !candidates.isEmpty, dependencies.evictionSettleSeconds > 0 {
+                let deadline = Date().addingTimeInterval(dependencies.evictionSettleSeconds)
+                while Date() < deadline {
+                    guard let settling = dependencies.wiredBytes(),
+                          let budget = dependencies.budgetBytes(
+                            Settings.modelMemoryBudgetSliderPosition)
+                    else { break }
+                    if Self.fits(wiredBytes: settling, incomingBytes: estimatedIncoming,
+                                 budgetBytes: budget) { break }
+                    Thread.sleep(forTimeInterval: Self.evictionSettleInterval)
+                }
             }
 
             guard let recheckedWired = dependencies.wiredBytes(),

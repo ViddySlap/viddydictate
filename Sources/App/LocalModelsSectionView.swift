@@ -181,8 +181,12 @@ final class LocalModelsSectionView: NSView {
         card.addSubview(popup)
         y = popup.frame.maxY + 4
 
+        // Secondary, not tertiary, for the same reason the reserved-RAM caption above is: measured
+        // against this card's composited fill, tertiary body copy comes out at 2.26:1 and secondary at
+        // 5.72:1, and 2.26:1 is below the 3:1 floor for even large text. This line is what tells you
+        // what the control beside it actually does, so it has to be readable.
         let hint = wrapped(.timerHint, LocalModelSetup.timerHint, x: textX, y: y, width: textW,
-                           size: 10.5, color: .tertiaryLabelColor)
+                           size: 10.5, color: .secondaryLabelColor)
         card.addSubview(hint)
         y = hint.frame.maxY
 
@@ -220,10 +224,13 @@ final class LocalModelsSectionView: NSView {
 
         // Laid out from one list so the row cannot lose a line by forgetting a call, and so the identifiers
         // are assigned positionally from the order the pure layer documents.
+        // Same legibility rule as the controls card: nothing in this section renders at tertiary. The
+        // consequence line in particular carries LOCKED DECISION 1's most surprising cost - that another
+        // app's model spends your budget - and it renders in exactly the state Ben's Mac is in today.
         let lines: [(LocalModelSetup.Part, String?, NSColor)] = [
             (.jitSummary, LocalModelSetup.jitSummary(status), .secondaryLabelColor),
-            (.jitRemedy, LocalModelSetup.jitRemedy(status), attention ? .labelColor : .tertiaryLabelColor),
-            (.jitConsequence, LocalModelSetup.jitConsequence(status), .tertiaryLabelColor),
+            (.jitRemedy, LocalModelSetup.jitRemedy(status), attention ? .labelColor : .secondaryLabelColor),
+            (.jitConsequence, LocalModelSetup.jitConsequence(status), .secondaryLabelColor),
         ]
         for (part, text, color) in lines {
             guard let text = text else { continue }

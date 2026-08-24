@@ -12,6 +12,7 @@ enum ModelCapacitySelfTest {
         clientWiringAndGeminiOrderingChecks(reporter)
         ownershipAndEvictionChecks(reporter)
         onePassCheck(reporter)
+        evictionSettleChecks(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "Model capacity"))
@@ -327,6 +328,93 @@ enum ModelCapacitySelfTest {
         reporter.record("one pass attempts each eligible owned model once and never loads incoming",
                         unloads == ["owned"] && loads.isEmpty,
                         "unloads=\(unloads) loads=\(loads)")
+    }
+
+    /// The recheck must survive the lag between `lms unload` returning and macOS unwiring the pages.
+    ///
+    /// Measured live on 2026-08-24 (`vdmg-REV`): unload returned at +0.148s with `wire_count` still
+    /// reporting 10.00 of 10.43 GB, settling to 3.50 GB only at ~+0.68s. Without a settle window the
+    /// recheck reads the PRE-eviction number, so the pass unloads the app's own warm model and refuses
+    /// anyway - LOCKED DECISION 2's recheck could never pass on the strength of its own eviction. The
+    /// stale reading below reproduces exactly that; drop the window and this case returns .overBudget.
+    private static func evictionSettleChecks(_ reporter: SelfTestReporter) {
+        let installed = [installedModel("owned", size: 500), installedModel("incoming", size: 100)]
+        let staleReadings: [UInt64] = [950, 950, 950]   // unload has returned; the kernel has not caught up
+        let settled: UInt64 = 400
+
+        func outcome(settleSeconds: Double) -> (ModelManager.ReadinessResult, Int, [String]) {
+            let manager = ModelManager()
+            var residents: [ModelResidency.ResidentModel] = []
+            var unloads: [String] = []
+            var reads = 0
+            let setup = ModelManager.CapacityDependencies(
+                availableInstalledModels: { installed },
+                residentModels: { residents },
+                wiredBytes: { 0 },
+                budgetBytes: { _ in 1_000 },
+                ensureLoaded: { model, _ in residents.append(resident(model, 500, 1, "idle")); return true },
+                unload: { _ in })
+            _ = manager.ensureReady("owned", ttlOverrideSeconds: 600, dependencies: setup)
+
+            let blocked = ModelManager.CapacityDependencies(
+                availableInstalledModels: { installed },
+                residentModels: { residents },
+                wiredBytes: {
+                    defer { reads += 1 }
+                    return reads < staleReadings.count ? staleReadings[reads] : settled
+                },
+                budgetBytes: { _ in 1_000 },
+                ensureLoaded: { _, _ in true },
+                unload: { model in
+                    unloads.append(model)
+                    residents.removeAll { $0.identifier == model }
+                },
+                evictionSettleSeconds: settleSeconds)
+            let result = manager.ensureReady(
+                "incoming", ttlOverrideSeconds: 600, dependencies: blocked)
+            return (result, reads, unloads)
+        }
+
+        let (withoutWindow, _, unloadedWithout) = outcome(settleSeconds: 0)
+        reporter.record(
+            "WITHOUT a settle window a stale wired reading refuses the load it just made room for",
+            withoutWindow == .capacityRefused(.overBudget) && unloadedWithout == ["owned"],
+            "result=\(withoutWindow) unloads=\(unloadedWithout)")
+
+        let (withWindow, reads, unloadedWith) = outcome(settleSeconds: 1.0)
+        reporter.record(
+            "WITH the settle window the recheck sees the freed memory and the load proceeds",
+            withWindow == .ready, "result=\(withWindow) wiredReads=\(reads)")
+        reporter.record(
+            "the settle window does not widen the pass: still exactly one unload, LRU-scoped",
+            unloadedWith == ["owned"], "unloads=\(unloadedWith)")
+
+        // A machine that never frees the memory must still refuse rather than spin to the deadline
+        // and then load anyway.
+        let manager = ModelManager()
+        var residents: [ModelResidency.ResidentModel] = []
+        let setup = ModelManager.CapacityDependencies(
+            availableInstalledModels: { installed },
+            residentModels: { residents },
+            wiredBytes: { 0 },
+            budgetBytes: { _ in 1_000 },
+            ensureLoaded: { model, _ in residents.append(resident(model, 500, 1, "idle")); return true },
+            unload: { _ in })
+        _ = manager.ensureReady("owned", ttlOverrideSeconds: 600, dependencies: setup)
+        var loads: [String] = []
+        let neverFrees = ModelManager.CapacityDependencies(
+            availableInstalledModels: { installed },
+            residentModels: { residents },
+            wiredBytes: { 950 },
+            budgetBytes: { _ in 1_000 },
+            ensureLoaded: { model, _ in loads.append(model); return true },
+            unload: { model in residents.removeAll { $0.identifier == model } },
+            evictionSettleSeconds: 0.3)
+        let stuck = manager.ensureReady("incoming", ttlOverrideSeconds: 600, dependencies: neverFrees)
+        reporter.record(
+            "memory that never frees still refuses after the window, and never loads incoming",
+            stuck == .capacityRefused(.overBudget) && loads.isEmpty,
+            "result=\(stuck) loads=\(loads)")
     }
 
     private static func resident(

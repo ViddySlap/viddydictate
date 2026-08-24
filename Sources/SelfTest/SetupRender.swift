@@ -313,6 +313,18 @@ enum SetupRender {
         check("[local models \(state)] the gigabyte line is the only place a size is claimed",
               !(label(LocalModelSetup.identifier(.reservedLine), in: view)?.stringValue.contains("of")
                 ?? false))
+
+        // No line in this section renders at tertiary, in ANY state. Measured on the composited render
+        // (`vdmg-REV`, 2026-08-24): tertiary body copy against this card's fill is 2.26:1, below the
+        // 3:1 floor for even large text, while secondary is 5.72:1. The colour constant looks perfectly
+        // reasonable in the source and only the render shows the problem, which is why this is asserted
+        // at the surface rather than left to a reading of the file.
+        let tertiary = LocalModelSetup.Part.allCases
+            .filter { !$0.isControl }
+            .filter { label(LocalModelSetup.identifier($0), in: view)?.textColor == .tertiaryLabelColor }
+            .map(\.rawValue)
+        check("[local models \(state)] no line in the section renders at tertiary",
+              tertiary.isEmpty, tertiary.joined(separator: ","))
     }
 
     /// The layout claims a screenshot cannot make for itself. This card holds two controls and the longest
