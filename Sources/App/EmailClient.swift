@@ -34,15 +34,23 @@ enum EmailClient {
                       model: String = Settings.emailModel,
                       endpoint: URL = Settings.emailEndpoint,
                       systemPrompt: String = Settings.emailSystemPrompt,
+                      readiness: @escaping (String) -> ModelManager.ReadinessResult = { model in
+                          let result: ModelManager.ReadinessResult =
+                              ModelManager.shared.ensureReady(model)
+                          return result
+                      },
                       completion: @escaping (CleanupClient.Result) -> Void) {
         // Make the model resident BEFORE the timed request, on a background queue under the caller's
         // thinking spinner: the email model (gemma) may have been TTL-evicted by LM Studio, so the cold
         // load happens here instead of eating the request timeout. ensureReady loads it with its
         // per-model TTL (interop ADR 0004); the request below resets LM Studio's idle clock.
         DispatchQueue.global(qos: .userInitiated).async {
-            guard ModelManager.shared.ensureReady(model) else {
+            let readinessResult = readiness(model)
+            if let failure = CleanupClient.failureResult(
+                for: readinessResult, loadFailureMessage: "model not loaded"
+            ) {
                 Log.write("email: \(model) could not be made resident")
-                completion(.unavailable("model not loaded")); return
+                completion(failure); return
             }
             request(selection, timeout: timeout, model: model, endpoint: endpoint,
                     systemPrompt: systemPrompt, completion: completion)

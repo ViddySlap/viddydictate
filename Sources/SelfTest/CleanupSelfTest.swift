@@ -132,6 +132,10 @@ enum CleanupSelfTest {
         check("unavailable -> raw fallback", CleanupLogic.landing(for: .unavailable("down")) == .rawFallback)
         check("timeout -> raw fallback", CleanupLogic.landing(for: .timedOut) == .rawFallback)
         check("bad output -> raw fallback", CleanupLogic.landing(for: .badOutput("empty")) == .rawFallback)
+        check("failed selection transform preserves its existing raw input",
+              CleanupLogic.inPlaceFailureLanding(for: .selection) == .leaveExistingText)
+        check("failed dictated email delivers its raw transcript instead of losing it",
+              CleanupLogic.inPlaceFailureLanding(for: .dictation) == .deliverRawTranscript)
 
         // Undo-eligibility: only a DISTINCT cleaned/transformed version is revertable.
         check("revertable when cleaned differs from raw", CleanupLogic.isRevertable(raw: "hello world", cleaned: "Hello, world."))

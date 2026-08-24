@@ -156,6 +156,29 @@ run_codex_isolation_selftest_gate() {
     return 0
 }
 
+# Mirrors run_codex_isolation_selftest_gate. A seatbelted worker gets EPERM for the two
+# `vm.global_*` sysctls (measured 2026-08-24) while `hw.memsize` and HOST_VM_INFO64 succeed, so an
+# environment that cannot read the kernel's wire ceiling reports UNVERIFIED rather than FAIL. The
+# pure slider mapping is asserted either way, and the unsandboxed review link proves the invariant.
+run_system_memory_selftest_gate() {
+    local log="$SCRATCH/system-memory-selftest.log"
+    banner deterministic "system memory facts and budget math selftest"
+    env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+        "$TEST_APP" --system-memory-selftest 2>&1 | tee "$log"
+    local rc=${PIPESTATUS[0]}
+    if [[ $rc -ne 0 ]]; then
+        record_failure deterministic "system memory facts and budget math selftest (exit $rc)"
+        return "$rc"
+    fi
+    if grep -Fq 'KERNEL WIRE FACTS UNAVAILABLE' "$log"; then
+        record_unverified deterministic \
+            "system memory facts: vm.global_* denied in this environment; the wire-ceiling invariant and budget mapping need the unsandboxed host"
+        return 0
+    fi
+    printf '[verify][deterministic][PASS] system memory facts and budget math selftest\n'
+    return 0
+}
+
 run_fresh_install_rehearsal() {
     local root="$SCRATCH/fresh-install"
     local home="$root/home"
@@ -367,6 +390,10 @@ tier_deterministic() {
         run_gate deterministic "Models & Power settings/storage selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --models-power-selftest || true
+        run_system_memory_selftest_gate || true
+        run_gate deterministic "local model capacity policy fixture selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --model-capacity-selftest || true
         run_gate deterministic "prompt overlay store selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --prompt-overlay-selftest || true
@@ -397,6 +424,9 @@ tier_deterministic() {
         run_gate deterministic "Gemini key section copy, save policy, and never-echo selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --gemini-key-setup-selftest || true
+        run_gate deterministic "local model budget rendering and LM Studio JIT reader selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-model-setup-selftest || true
         run_gate deterministic "secret-store resolution order and off-state selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --secret-store-selftest || true

@@ -1,14 +1,14 @@
 import Foundation
 
 /// Headless verification of the model-residency mechanism (interop ADR 0004, reversing ADR 0006's
-/// app-side idle timer): LM Studio — not the app — owns eviction, via the per-model `--ttl` set on each
+/// app-side idle timer): LM Studio — not the app — owns eviction, via the configured `--ttl` set on each
 /// `ensureReady` load. Run with `--residency-selftest`. Needs LM Studio.
 ///
 /// It runs the locked interleaved eviction acceptance test on the real app path, on qwen (the cleanup /
 /// retrieval model the acceptance test names), with a SHORT test TTL so eviction is observable in
-/// seconds instead of the production 15 minutes:
+/// seconds instead of the production setting:
 ///
-///   1. per-model TTL policy is the locked one (qwen 900s, gemma 300s)  [pure unit assert]
+///   1. one configured TTL applies to every model role and unknown model IDs  [pure unit assert]
 ///   2. clean slate: qwen unloaded
 ///   3. ViddyDictate cleanup-path load: `ensureReady(qwen, ttlOverride: short)` -> resident, and the
 ///      short TTL actually reached LM Studio (`lms ps --json` ttlMs)
@@ -25,7 +25,7 @@ enum ModelResidencySelfTest {
     /// A representative model loaded outside ViddyDictate. It must never be evicted as a side effect
     /// of loading or evicting the app's LLMs. Not a Settings model.
     private static let bgeEmbedder = "text-embedding-bge-m3"
-    /// Short idle TTL for the test so eviction happens in seconds, not the production 15 min. Comfortably
+    /// Short idle TTL for the test so eviction happens in seconds, not the production setting. Comfortably
     /// longer than the gap between the load and the idle wait so the model does not evict mid-test.
     private static let testTTL = 20
     /// How long to idle after last use before checking for eviction (TTL + margin).
@@ -38,15 +38,50 @@ enum ModelResidencySelfTest {
         let reporter = SelfTestReporter()
         let check = reporter
 
-        // 1. Per-model TTL policy is the locked one — pure, no LM Studio needed.
-        let qwenTTL = ModelManager.shared.ttl(for: Settings.cleanupModel)
-        let gemmaTTL = ModelManager.shared.ttl(for: Settings.emailModel)
-        check("per-model TTL policy (qwen 900 / gemma 300)", qwenTTL == 900 && gemmaTTL == 300,
-              "qwen=\(qwenTTL)s, gemma=\(gemmaTTL)s")
+        // 1. One persisted TTL applies to every model role — pure, no LM Studio needed.
+        let configuredTTL = Settings.modelIdleUnloadSeconds
+        let ttlSamples = [
+            "cleanup": ModelManager.shared.ttl(for: Settings.cleanupModel),
+            "email": ModelManager.shared.ttl(for: Settings.emailModel),
+            "search retrieval": ModelManager.shared.ttl(for: Settings.searchModel),
+            "search synthesis": ModelManager.shared.ttl(for: Settings.searchSynthModel),
+            "unknown": ModelManager.shared.ttl(for: "selftest/unknown-model"),
+        ]
+        let allUseConfiguredTTL = ttlSamples.values.allSatisfy { $0 == configuredTTL }
+        check("one configured idle TTL applies to every model", allUseConfiguredTTL,
+              "configured=\(configuredTTL)s; " + ttlSamples.sorted { $0.key < $1.key }
+                  .map { "\($0.key)=\($0.value)s" }.joined(separator: ", "))
 
         guard FileManager.default.isExecutableFile(atPath: "\(NSHomeDirectory())/.lmstudio/bin/lms") else {
             print("\n  [skip] lms CLI not found, cannot run the live eviction test")
             return false
+        }
+
+        // Codex can read HOST_VM_INFO64 but its seatbelt denies only the `vm.global_*` wire ceiling.
+        // Keep this TTL/interleave service test useful there by injecting ONLY an unbounded test
+        // budget; catalog, resident snapshot, wired facts, load, and unload all remain the live seams.
+        // Unsandboxed review runs the exact production dependencies.
+        let sandboxDependencies: ModelManager.CapacityDependencies? =
+            SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition) == nil
+            ? .init(
+                availableInstalledModels: { ModelResidency.availableInstalledModels() },
+                residentModels: { ModelResidency.residentModels() },
+                wiredBytes: { SystemMemory.wiredBytes },
+                budgetBytes: { _ in UInt64.max },
+                ensureLoaded: { ModelResidency.ensureLoaded($0, ttlSeconds: $1) },
+                unload: { ModelResidency.unload($0) })
+            : nil
+        if sandboxDependencies != nil {
+            print("  [info] vm.global_* unavailable; residency mechanism uses an injected test budget")
+        }
+        func ensureReady(ttlOverrideSeconds: Int? = nil) -> Bool {
+            if let sandboxDependencies {
+                return ModelManager.shared.ensureReady(
+                    model, ttlOverrideSeconds: ttlOverrideSeconds,
+                    dependencies: sandboxDependencies).isReady
+            }
+            return ModelManager.shared.ensureReady(
+                model, ttlOverrideSeconds: ttlOverrideSeconds).isReady
         }
 
         // Record bge-m3 residency up front; the invariant is that qwen's whole load/evict cycle does not
@@ -59,13 +94,30 @@ enum ModelResidencySelfTest {
         check("clean slate: qwen not resident", !ModelResidency.isLoaded(model), "isLoaded=\(b(ModelResidency.isLoaded(model)))")
 
         // 3. ViddyDictate cleanup-path load, with the short test TTL, via the real production path.
+        let installedSize = ModelResidency.availableInstalledModels()?
+            .first(where: { $0.modelID == model })?.sizeBytes
+        let wiredBeforeLoad = SystemMemory.wiredBytes
         let t0 = Date()
-        let ready = ModelManager.shared.ensureReady(model, ttlOverrideSeconds: testTTL)
+        let ready = ensureReady(ttlOverrideSeconds: testTTL)
         let residentAfterLoad = ModelResidency.isLoaded(model)
+        let wiredAfterLoad = SystemMemory.wiredBytes
         check("cleanup-path load makes qwen resident", ready && residentAfterLoad,
               String(format: "ensureReady=%@, isLoaded=%@, %.1fs", b(ready), b(residentAfterLoad), Date().timeIntervalSince(t0)))
+        if let installedSize, installedSize > 0,
+           let wiredBeforeLoad, let wiredAfterLoad, wiredAfterLoad >= wiredBeforeLoad {
+            let delta = wiredAfterLoad - wiredBeforeLoad
+            let ratio = Double(delta) / Double(installedSize)
+            print(String(
+                format: "  [measurement] cold-load wired delta=%llu installed size=%lld ratio=%.4f",
+                delta, installedSize, ratio))
+        } else {
+            print("  [measurement] cold-load footprint ratio unavailable "
+                + "(size=\(String(describing: installedSize)) "
+                + "wiredBefore=\(String(describing: wiredBeforeLoad)) "
+                + "wiredAfter=\(String(describing: wiredAfterLoad)))")
+        }
         let seenTTL = ModelResidency.loadedTTLSeconds(model)
-        check("per-model TTL reached LM Studio", seenTTL == testTTL, "lms ps ttl=\(seenTTL.map(String.init) ?? "nil")s (expected \(testTTL)s)")
+        check("TTL override reached LM Studio", seenTTL == testTTL, "lms ps ttl=\(seenTTL.map(String.init) ?? "nil")s (expected \(testTTL)s)")
 
         // 4. Shared-client seam: a real /v1 chat turn against the shared resident qwen. Also resets LM Studio's
         //    idle clock, so the idle window below is measured from here.
@@ -73,7 +125,7 @@ enum ModelResidencySelfTest {
         check("qwen /v1 chat turn succeeds", turn.ok, turn.detail)
 
         // 5. A second cleanup-path ensureReady reuses the SAME instance (resident -> no reload).
-        let reuse = ModelManager.shared.ensureReady(model)
+        let reuse = ensureReady()
         check("cleanup-path reuse hits the resident instance", reuse && ModelResidency.isLoaded(model),
               "ensureReady=\(b(reuse)), isLoaded=\(b(ModelResidency.isLoaded(model)))")
 
@@ -87,7 +139,7 @@ enum ModelResidencySelfTest {
               "bge-m3 before=\(b(bgeBefore)), after=\(b(bgeAfter))")
 
         // 7. JIT reload on the next request restores it (and leaves qwen resident with the production TTL).
-        let reloaded = ModelManager.shared.ensureReady(model)
+        let reloaded = ensureReady()
         check("next request JIT-reloads qwen", reloaded && ModelResidency.isLoaded(model),
               "ensureReady=\(b(reloaded)), isLoaded=\(b(ModelResidency.isLoaded(model)))")
 

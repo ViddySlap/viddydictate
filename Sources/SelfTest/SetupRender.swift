@@ -22,6 +22,15 @@ import Security
 ///                                (L9).
 ///   - `setup-gemini-environment.png`    - the one state that offers no delete at all: a key arriving from
 ///                                the environment override, with the reason on screen (L9).
+///   - `setup-local-models.png` - the Local models section as this Mac reports it: the budget slider at its
+///                                shipped default with the machine's own kernel ceiling under it, the idle
+///                                timer, and LM Studio's JIT timeout at the hour that pinned 28.7 GB.
+///   - `setup-local-models-floor.png` / `setup-local-models-ceiling.png` - the same section at slider 0 and
+///                                100, which is the proof a static capture cannot make on its own: the
+///                                gigabyte line is a function of the handle, not a caption beside it.
+///   - `setup-local-models-jit-ok.png`   - the LM Studio row when there is nothing to do.
+///   - `setup-local-models-no-facts.png` - the machine whose kernel ceiling is unreadable, where there is no
+///                                budget to state and the section says so instead of guessing one.
 /// The pair is the before/after proof that the surface is re-runnable rather than a first-run snapshot.
 enum SetupRender {
     private static var failures = 0
@@ -49,10 +58,20 @@ enum SetupRender {
         // re-rendering a cached verdict: a button that only redrew would leave this at 1.
         var observation = PreflightSelfTest.broken
         var calls = 0
-        let view = SetupSettingsView(width: 640) { completion in
+        // The Local models section measures two settings and one LM Studio file rather than the tab's
+        // observation, so it is driven separately. Its store is in-memory on purpose: this gate drags the
+        // budget slider across its whole range, and a capture must never write the settings of the app the
+        // user is running. Seeded from `Settings`, so what reaches the screen is still the SHIPPED default.
+        let store = LocalModelStore(position: Settings.modelMemoryBudgetSliderPosition,
+                                    seconds: Settings.modelIdleUnloadSeconds)
+        check("the shipped budget default reaches the section", store.position == 54, "\(store.position)")
+        check("the shipped idle timer reaches the section", store.seconds == 600, "\(store.seconds)")
+        // The hour that pinned 28.7 GB on 2026-08-21, which is what this machine's LM Studio still says.
+        var jit: LocalModelSetup.JITSettings? = .init(ttlSeconds: 3600, enabled: true)
+        let view = SetupSettingsView(width: 640, observer: { completion in
             calls += 1
             completion(observation)
-        }
+        }, localModels: .init(store: store.store, facts: { .live }, jit: { jit }))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 1200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -67,18 +86,31 @@ enum SetupRender {
         check("building the surface runs the check once", calls == 1, "calls=\(calls)")
         assertReport(view, Preflight.evaluate(observation), state: "warnings")
         assertLayout(view)
+        assertLocalModels(view, position: 54, facts: .live,
+                          status: .tooLong(ttlSeconds: 3600, appSeconds: 600), state: "warnings")
+        assertLocalModelsLayout(view, state: "warnings")
         capture(view, card: nil, to: outDir + "/setup-warnings.png", name: "warnings")
         capture(view, card: PreflightSurface.cardIdentifier(.textProvider),
                 to: outDir + "/setup-row-provider.png", name: "provider row")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models.png", name: "local models")
 
-        // Re-run against a machine that has since been fixed. Same view, same button, new reading.
+        // Re-run against a machine that has since been fixed. Same view, same button, new reading. LM Studio
+        // was fixed too, which is what proves Check again refreshes the JIT row along with everything else -
+        // it is measured on a different clock from the tab's observation and could easily have gone stale.
         observation = PreflightSelfTest.healthy
+        jit = .init(ttlSeconds: 600, enabled: true)
         let button = find(PreflightSurface.recheckIdentifier, in: view) as? NSButton
         check("Check again is offered once a check has finished", button?.isEnabled == true)
         button?.performClick(nil)
         check("Check again measures the machine again", calls == 2, "calls=\(calls)")
         assertReport(view, Preflight.evaluate(observation), state: "clean")
         assertLayout(view)
+        assertLocalModels(view, position: 54, facts: .live,
+                          status: .matched(ttlSeconds: 600), state: "clean")
+        assertLocalModelsLayout(view, state: "clean")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-jit-ok.png", name: "local models (LM Studio settled)")
         check("a fixed machine leaves no stale fix on screen",
               PreflightCheck.allCases.allSatisfy {
                   find(PreflightSurface.identifier(.remedy, $0), in: view) == nil
@@ -86,10 +118,287 @@ enum SetupRender {
               })
         capture(view, card: nil, to: outDir + "/setup-clean.png", name: "clean")
 
+        driveBudgetSlider(view, store: store, host: host, outDir: outDir)
+
         view.removeFromSuperview()
         driveGeminiKeySection(outDir: outDir)
+        driveLocalModelsWithoutKernelFacts(outDir: outDir)
         print("[setup-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
+    }
+
+    // MARK: - The local-model budget slider (item L5, LOCKED DECISION 6)
+
+    /// The one claim a still image cannot make for itself: that the gigabyte line is a READOUT of the handle
+    /// rather than a caption printed beside it.
+    ///
+    /// So the slider is dragged for real - the control's value is set and its action fired, which is the
+    /// same path a mouse takes - and the line is read back at each stop and compared against the budget
+    /// computed independently from `SystemMemory`. Two of the stops are photographed, so the proof is
+    /// legible in the PNGs as well as in this log.
+    private static func driveBudgetSlider(_ view: NSView, store: LocalModelStore, host: NSWindow,
+                                          outDir: String) {
+        guard let slider = find(LocalModelSetup.identifier(.budgetSlider), in: view) as? NSSlider else {
+            check("[budget] the section offers a slider", false)
+            return
+        }
+        check("[budget] the slider's face is 0 to 100, not a percentage of anything",
+              slider.minValue == 0 && slider.maxValue == 100,
+              "\(slider.minValue)...\(slider.maxValue)")
+
+        var seen: [String] = []
+        var wrong: [String] = []
+        var torn = false
+        for position in [0.0, 25.0, 54.0, 60.0, 100.0] {
+            drag(view, to: position)
+            let expected = LocalModelSetup.budgetLine(position: position, facts: .live)
+            let shown = label(LocalModelSetup.identifier(.budgetLine), in: view)?.stringValue
+            if shown != expected { wrong.append("\(Int(position)): \(shown ?? "missing")") }
+            if label(LocalModelSetup.identifier(.budgetLevel), in: view)?.stringValue
+                != String(Int(position)) { wrong.append("\(Int(position)).level") }
+            if store.position != position { wrong.append("\(Int(position)).stored=\(store.position)") }
+            // The slider is continuous, so its action fires on every mouse move of a real drag. If handling
+            // it rebuilds the card, the control the mouse is tracking is removed from under the pointer and
+            // the drag dies after the first pixel - while still reading perfectly here, because this gate
+            // sets a value and fires an action rather than holding a mouse down. So the identity of the
+            // control is asserted, which is the part a programmatic drive can actually see.
+            if find(LocalModelSetup.identifier(.budgetSlider), in: view) !== slider { torn = true }
+            seen.append(shown ?? "")
+            if position == 0 {
+                capture(view, card: LocalModelSetup.sectionIdentifier,
+                        to: outDir + "/setup-local-models-floor.png", name: "local models (slider 0)")
+            }
+            if position == 100 {
+                capture(view, card: LocalModelSetup.sectionIdentifier,
+                        to: outDir + "/setup-local-models-ceiling.png", name: "local models (slider 100)")
+            }
+        }
+        check("[budget] the gigabyte line tracks the handle at every stop", wrong.isEmpty,
+              wrong.joined(separator: ", "))
+        check("[budget] no two stops read the same, so the line is not a fixed caption",
+              Set(seen).count == seen.count, seen.joined(separator: " | "))
+        check("[budget] moving the handle refreshes the readout without replacing the slider under it",
+              !torn)
+
+        // A handle resting between two integers must not render one number above the gigabytes for another.
+        drag(view, to: 53.6)
+        check("[budget] a handle between stops rounds the level and the gigabytes together",
+              label(LocalModelSetup.identifier(.budgetLevel), in: view)?.stringValue == "54"
+                && label(LocalModelSetup.identifier(.budgetLine), in: view)?.stringValue
+                    == LocalModelSetup.budgetLine(position: 54, facts: .live))
+        check("[budget] nothing fractional is persisted", store.position == 54, "\(store.position)")
+
+        // The timer is the other half of the section, and the LM Studio row is measured against it. Raising
+        // it above LM Studio's own has to settle that row, which is what proves the two are wired together
+        // rather than each reporting its own constant.
+        guard let popup = find(LocalModelSetup.identifier(.timerControl), in: view) as? NSPopUpButton else {
+            check("[budget] the section offers an idle-timer control", false)
+            return
+        }
+        check("[budget] the timer is offered in minutes, showing the shipped 10",
+              popup.titleOfSelectedItem == "10 min", popup.titleOfSelectedItem ?? "nil")
+        choose(popup, "60 min")
+        check("[budget] choosing a timer stores its seconds", store.seconds == 3600, "\(store.seconds)")
+        check("[budget] the LM Studio row is measured against the app's own timer, not a constant",
+              label(LocalModelSetup.identifier(.jitStatus), in: view)?.stringValue == "OK",
+              label(LocalModelSetup.identifier(.jitStatus), in: view)?.stringValue ?? "missing")
+
+        // Put the section back the way it was photographed, so nothing downstream inherits a dragged state.
+        if let popup = find(LocalModelSetup.identifier(.timerControl), in: view) as? NSPopUpButton {
+            choose(popup, "10 min")
+        }
+        drag(view, to: 54)
+        _ = host
+    }
+
+    /// Move the handle the way a mouse does: set the value, then fire the control's action.
+    private static func drag(_ view: NSView, to position: Double) {
+        guard let slider = find(LocalModelSetup.identifier(.budgetSlider), in: view) as? NSSlider else {
+            return
+        }
+        slider.doubleValue = position
+        fire(slider)
+    }
+
+    /// Pick a menu item, then fire the action. Deliberately NOT `performClick`, which on an NSPopUpButton
+    /// opens the menu and enters a modal tracking runloop - a headless gate that calls it never returns.
+    private static func choose(_ popup: NSPopUpButton, _ title: String) {
+        popup.selectItem(withTitle: title)
+        fire(popup)
+    }
+
+    /// Send a control's action to its target, the way AppKit would once the user let go of it.
+    private static func fire(_ control: NSControl) {
+        guard let target = control.target, let action = control.action else { return }
+        _ = target.perform(action, with: control)
+    }
+
+    /// The machine whose kernel ceiling is unreadable. There is no budget to state, so the section must say
+    /// so rather than substitute `hw.memsize` - which would hand models the 12 GB macOS reserves and can
+    /// never lend out. Rendered on its own because the facts are fixed when the section is built.
+    private static func driveLocalModelsWithoutKernelFacts(outDir: String) {
+        let store = LocalModelStore(position: 54, seconds: 600)
+        let view = SetupSettingsView(width: 640, observer: { $0(PreflightSelfTest.healthy) },
+                                     geminiKeyWriter: { _ in errSecSuccess },
+                                     geminiKeyDeleter: { errSecSuccess },
+                                     localModels: .init(store: store.store,
+                                                        facts: { .init(userWireLimitBytes: nil,
+                                                                       noUserWireBytes: nil) },
+                                                        jit: { nil }))
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 2200),
+                            styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView?.addSubview(view)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        assertLocalModels(view, position: 54,
+                          facts: .init(userWireLimitBytes: nil, noUserWireBytes: nil),
+                          status: .unknown, state: "no kernel facts")
+        assertLocalModelsLayout(view, state: "no kernel facts")
+        check("[no kernel facts] the section states no budget at all",
+              label(LocalModelSetup.identifier(.budgetLine), in: view)?.stringValue.contains("GB of")
+                == false)
+        check("[no kernel facts] the reserved line is omitted rather than guessed",
+              find(LocalModelSetup.identifier(.reservedLine), in: view) == nil)
+        check("[no kernel facts] the slider is still offered, so the setting can still be chosen",
+              find(LocalModelSetup.identifier(.budgetSlider), in: view) is NSSlider)
+        check("[no kernel facts] an unreadable LM Studio file does not read as a warning",
+              label(LocalModelSetup.identifier(.jitStatus), in: view)?.stringValue == "NOT READ")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-no-facts.png", name: "local models (no kernel facts)")
+        view.removeFromSuperview()
+    }
+
+    /// Every line the pure layer says the section shows, on screen and reading exactly what it says. This is
+    /// what makes the PNGs trustworthy: a capture alone cannot tell a correct number from a plausible one.
+    private static func assertLocalModels(_ view: NSView, position: Double,
+                                          facts: LocalModelSetup.MemoryFacts,
+                                          status: LocalModelSetup.JITStatus, state: String) {
+        check("[local models \(state)] the section is on the Setup tab",
+              find(LocalModelSetup.cardIdentifier, in: view) != nil
+                && find(LocalModelSetup.jitCardIdentifier, in: view) != nil)
+
+        var wrong: [String] = []
+        let expected: [(LocalModelSetup.Part, String?)] = [
+            (.headline, LocalModelSetup.headline),
+            (.purpose, LocalModelSetup.purpose),
+            (.budgetTitle, LocalModelSetup.budgetTitle),
+            (.budgetLevel, LocalModelSetup.budgetLevelText(position)),
+            (.budgetLine, LocalModelSetup.budgetLine(position: position, facts: facts)),
+            (.reservedLine, LocalModelSetup.reservedLine(facts: facts)),
+            (.timerTitle, LocalModelSetup.timerTitle),
+            (.timerHint, LocalModelSetup.timerHint),
+            (.jitStatus, LocalModelSetup.jitStatusText(status)),
+            (.jitTitle, LocalModelSetup.jitTitle),
+            (.jitSummary, LocalModelSetup.jitSummary(status)),
+            (.jitRemedy, LocalModelSetup.jitRemedy(status)),
+            (.jitConsequence, LocalModelSetup.jitConsequence(status)),
+        ]
+        // Present exactly when the pure layer has one: a settled LM Studio row that rendered a "Fix:" line
+        // would be as wrong as a too-long row that dropped it.
+        for (part, value) in expected
+        where label(LocalModelSetup.identifier(part), in: view)?.stringValue != value {
+            wrong.append(part.rawValue)
+        }
+        check("[local models \(state)] every line is on screen and is the pure layer's own",
+              wrong.isEmpty, wrong.joined(separator: ","))
+
+        // The load-bearing rendering rule, asserted at the surface rather than only in the pure gate: the
+        // face is 0...100 but maps onto 25...90% of the wire ceiling, so a "%" here would state a falsehood.
+        let level = label(LocalModelSetup.identifier(.budgetLevel), in: view)?.stringValue ?? "?"
+        check("[local models \(state)] the slider's own number carries no percent sign",
+              !level.contains("%"), level)
+        check("[local models \(state)] the slider's own number carries no unit at all",
+              Int(level) != nil, level)
+        check("[local models \(state)] the gigabyte line is the only place a size is claimed",
+              !(label(LocalModelSetup.identifier(.reservedLine), in: view)?.stringValue.contains("of")
+                ?? false))
+
+        // No line in this section renders at tertiary, in ANY state. Measured on the composited render
+        // (`vdmg-REV`, 2026-08-24): tertiary body copy against this card's fill is 2.26:1, below the
+        // 3:1 floor for even large text, while secondary is 5.72:1. The colour constant looks perfectly
+        // reasonable in the source and only the render shows the problem, which is why this is asserted
+        // at the surface rather than left to a reading of the file.
+        let tertiary = LocalModelSetup.Part.allCases
+            .filter { !$0.isControl }
+            .filter { label(LocalModelSetup.identifier($0), in: view)?.textColor == .tertiaryLabelColor }
+            .map(\.rawValue)
+        check("[local models \(state)] no line in the section renders at tertiary",
+              tertiary.isEmpty, tertiary.joined(separator: ","))
+    }
+
+    /// The layout claims a screenshot cannot make for itself. This card holds two controls and the longest
+    /// line on the tab after the Gemini remedy, so a clipped line here hides a number and an overlapping
+    /// control puts the level under the handle.
+    private static func assertLocalModelsLayout(_ view: NSView, state: String) {
+        guard let card = find(LocalModelSetup.cardIdentifier, in: view),
+              let jitCard = find(LocalModelSetup.jitCardIdentifier, in: view),
+              let section = find(LocalModelSetup.sectionIdentifier, in: view) else {
+            check("[local models \(state)] the section has both of its cards", false)
+            return
+        }
+
+        var clipped: [String] = []
+        for part in LocalModelSetup.Part.allCases where !part.isControl {
+            guard let field = label(LocalModelSetup.identifier(part), in: view) else { continue }
+            let needed = field.sizeThatFits(
+                NSSize(width: field.frame.width, height: .greatestFiniteMagnitude)).height
+            if field.frame.height + 0.5 < needed { clipped.append(part.rawValue) }
+        }
+        check("[local models \(state)] no line of the section is clipped by its own frame",
+              clipped.isEmpty, clipped.joined(separator: ","))
+
+        for (name, box) in [("controls", card), ("LM Studio row", jitCard)] {
+            let contentBottom = box.subviews.map(\.frame.maxY).max() ?? 0
+            check("[local models \(state)] the \(name) card contains its own contents",
+                  box.frame.height + 0.5 >= contentBottom,
+                  "card=\(Int(box.frame.height)) content=\(Int(contentBottom))")
+            check("[local models \(state)] nothing in the \(name) card runs past its width",
+                  box.subviews.allSatisfy { $0.frame.maxX <= box.bounds.maxX + 0.5 },
+                  box.subviews.filter { $0.frame.maxX > box.bounds.maxX + 0.5 }
+                    .map { $0.identifier?.rawValue ?? "?" }.joined(separator: ","))
+        }
+        check("[local models \(state)] the two cards do not overlap",
+              jitCard.frame.minY >= card.frame.maxY - 0.5,
+              "controls end \(Int(card.frame.maxY)), row starts \(Int(jitCard.frame.minY))")
+        check("[local models \(state)] the section is tall enough to hold both cards",
+              section.frame.height + 0.5 >= jitCard.frame.maxY,
+              "section=\(Int(section.frame.height)) row ends \(Int(jitCard.frame.maxY))")
+
+        // The title, the slider and the level share a row, so a width change on any of them would silently
+        // overlap the next.
+        if let title = find(LocalModelSetup.identifier(.budgetTitle), in: view),
+           let slider = find(LocalModelSetup.identifier(.budgetSlider), in: view),
+           let level = find(LocalModelSetup.identifier(.budgetLevel), in: view) {
+            check("[local models \(state)] the budget title, slider and level do not overlap",
+                  title.frame.maxX <= slider.frame.minX + 0.5
+                    && slider.frame.maxX <= level.frame.minX + 0.5,
+                  "title ends \(Int(title.frame.maxX)), slider \(Int(slider.frame.minX))"
+                    + "..\(Int(slider.frame.maxX)), level starts \(Int(level.frame.minX))")
+        }
+        if let title = find(LocalModelSetup.identifier(.timerTitle), in: view),
+           let popup = find(LocalModelSetup.identifier(.timerControl), in: view) {
+            check("[local models \(state)] the timer title and its control do not overlap",
+                  title.frame.maxX <= popup.frame.minX + 0.5,
+                  "title ends \(Int(title.frame.maxX)), control starts \(Int(popup.frame.minX))")
+        }
+
+        // The section sits below the Gemini key section, not on top of it (one document view).
+        if let gemini = find(GeminiKeySetup.cardIdentifier, in: view) {
+            let above = gemini.convert(gemini.bounds, to: view)
+            let here = section.convert(section.bounds, to: view)
+            check("[local models \(state)] the section sits below the Gemini key section",
+                  here.minY >= above.maxY - 0.5,
+                  "gemini ends \(Int(above.maxY)), local models starts \(Int(here.minY))")
+        }
+        // ...and above the read-only preflight rows, which is where a setting belongs on this tab.
+        if let firstRow = find(PreflightSurface.cardIdentifier(.sttDaemon), in: view) {
+            let below = firstRow.convert(firstRow.bounds, to: view)
+            let here = section.convert(section.bounds, to: view)
+            check("[local models \(state)] the section sits above the read-only checks",
+                  here.maxY <= below.minY + 0.5,
+                  "local models ends \(Int(here.maxY)), first row starts \(Int(below.minY))")
+        }
     }
 
     // MARK: - The Gemini key section (L5, spec decision D7)
@@ -508,5 +817,28 @@ enum SetupRender {
 
     private static func label(_ id: String, in root: NSView) -> NSTextField? {
         SelfTestRenderCapture.label(id, in: root)
+    }
+}
+
+/// An in-memory stand-in for `Settings`, so this gate can drag the budget slider across its whole range and
+/// switch the idle timer without reaching the defaults of the app the user is running.
+///
+/// It is seeded from `Settings` rather than from a literal, so what the capture shows is still the SHIPPED
+/// default rather than a number this file chose.
+final class LocalModelStore {
+    var position: Double
+    var seconds: Int
+
+    init(position: Double, seconds: Int) {
+        self.position = position
+        self.seconds = seconds
+    }
+
+    var store: LocalModelsSectionView.Store {
+        LocalModelsSectionView.Store(
+            budgetPosition: { [self] in position },
+            setBudgetPosition: { [self] in position = $0 },
+            idleSeconds: { [self] in seconds },
+            setIdleSeconds: { [self] in seconds = $0 })
     }
 }

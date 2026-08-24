@@ -29,12 +29,42 @@ enum SettingsDefaultsSelfTest {
             "recent dictation audio retention defaults on for future debugging",
             Settings.retainDictationAudio
         )
+        checkLocalModelSettings(reporter)
         checkBundleIdentifierMigration(reporter)
         checkLaunchAgentIdentity(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "Settings defaults"))
         return reporter.passed
+    }
+
+    private static func checkLocalModelSettings(_ reporter: SelfTestReporter) {
+        print("--- local model defaults and persistence ---")
+        let originalIdleSeconds = Settings.modelIdleUnloadSeconds
+        let originalBudgetPosition = Settings.modelMemoryBudgetSliderPosition
+        defer {
+            Settings.modelIdleUnloadSeconds = originalIdleSeconds
+            Settings.modelMemoryBudgetSliderPosition = originalBudgetPosition
+        }
+
+        reporter.record("local model idle unload defaults to 600 seconds",
+                        originalIdleSeconds == 600)
+        reporter.record("local model memory budget slider defaults to position 54",
+                        originalBudgetPosition == 54)
+
+        Settings.modelIdleUnloadSeconds = 420
+        Settings.modelMemoryBudgetSliderPosition = 73.5
+        reporter.record("local model idle unload setting persists",
+                        Settings.modelIdleUnloadSeconds == 420)
+        reporter.record("local model memory budget slider position persists",
+                        Settings.modelMemoryBudgetSliderPosition == 73.5)
+
+        Settings.modelMemoryBudgetSliderPosition = -1
+        reporter.record("local model memory budget slider clamps below zero",
+                        Settings.modelMemoryBudgetSliderPosition == 0)
+        Settings.modelMemoryBudgetSliderPosition = 101
+        reporter.record("local model memory budget slider clamps above 100",
+                        Settings.modelMemoryBudgetSliderPosition == 100)
     }
 
     private static func checkBundleIdentifierMigration(_ reporter: SelfTestReporter) {

@@ -427,6 +427,26 @@ enum TextTransformClient {
         }
     }
 
+    struct FailurePresentation: Equatable {
+        let userMessage: String
+        let forceFullToast: Bool
+    }
+
+    /// Preserve only the two app-authored capacity sentences. Every arbitrary provider/transport
+    /// reason remains collapsed to the existing content-safe category, because it may contain user
+    /// input or service diagnostics. Capacity messages force the full HUD: the Final-only pill caps at
+    /// two lines and would truncate the long over-budget instruction once its mode-specific suffix is
+    /// added.
+    static func safeFailurePresentation(
+        for result: CleanupClient.Result
+    ) -> FailurePresentation? {
+        if let message = CleanupClient.capacityRefusalMessage(for: result) {
+            return FailurePresentation(userMessage: message, forceFullToast: true)
+        }
+        guard let failure = safeFailure(for: result) else { return nil }
+        return FailurePresentation(userMessage: failure.userMessage, forceFullToast: false)
+    }
+
     private static func armAsyncRetry(for request: TextTransformRequest,
                                       after result: CleanupClient.Result,
                                       expectedEpoch: UInt64,

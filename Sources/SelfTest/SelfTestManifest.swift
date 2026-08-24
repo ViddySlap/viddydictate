@@ -122,6 +122,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelsPowerSelftest: .init(tier: .deterministic) { _ in
         ModelsPowerSettingsSelfTest.run() ? 0 : 1
     },
+    .systemMemorySelftest: .init(tier: .deterministic) { _ in
+        SystemMemorySelfTest.run() ? 0 : 1
+    },
+    .modelCapacitySelftest: .init(tier: .deterministic) { _ in
+        ModelCapacitySelfTest.run() ? 0 : 1
+    },
     .promptOverlaySelftest: .init(tier: .deterministic) { _ in
         PromptOverlaySelfTest.run() ? 0 : 1
     },
@@ -167,6 +173,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     // hand-test step because an agent shell cannot perform one.
     .geminiKeySetupSelftest: .init(tier: .deterministic) { _ in
         GeminiKeySetupSelfTest.run() ? 0 : 1
+    },
+    // Pure: the slider's two renderings, the LM Studio JIT reader driven against fixtures in this run's own
+    // TMPDIR, and what each reading is reported as. No view and no real settings file.
+    .localModelSetupSelftest: .init(tier: .deterministic) { _ in
+        LocalModelSetupSelfTest.run() ? 0 : 1
     },
     .setupRender: .init(tier: .gui) { arguments in
         guard let i = arguments.firstIndex(of: "--setup-render") else { return 1 }
