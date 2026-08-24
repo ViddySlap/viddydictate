@@ -15,8 +15,53 @@ import Foundation
 /// No "is it loaded" cache: `ensureReady` re-checks `lms ps` every call (~0.16s), so it self-corrects
 /// if a model was evicted (its own TTL, an LM Studio restart, memory pressure) with no stale state.
 final class ModelManager {
+    enum CapacityRefusal: Equatable {
+        /// A required live fact (resident snapshot, installed size, wired reading, or wire budget)
+        /// could not be read. Refusing is failure-soft: callers keep their existing raw-output path.
+        case factsUnavailable
+        /// The incoming allocation still exceeds the selected budget after the one eviction pass.
+        case overBudget
+    }
+
+    enum ReadinessResult: Equatable {
+        case ready
+        case capacityRefused(CapacityRefusal)
+        case loadFailed
+
+        var isReady: Bool { self == .ready }
+    }
+
+    /// Closure injection keeps the kernel/LM Studio policy deterministic under the Codex seatbelt,
+    /// where the real wire ceiling is deliberately unreadable. Production uses `live` unchanged.
+    struct CapacityDependencies {
+        let availableInstalledModels: () -> [LMStudioInstalledModel]?
+        let residentModels: () -> [ModelResidency.ResidentModel]?
+        let wiredBytes: () -> UInt64?
+        let budgetBytes: (Double) -> UInt64?
+        let ensureLoaded: (String, Int) -> Bool
+        let unload: (String) -> Void
+
+        static let live = CapacityDependencies(
+            availableInstalledModels: { ModelResidency.availableInstalledModels() },
+            residentModels: { ModelResidency.residentModels() },
+            wiredBytes: { SystemMemory.wiredBytes },
+            budgetBytes: { SystemMemory.budgetBytes(forSliderPosition: $0) },
+            ensureLoaded: { ModelResidency.ensureLoaded($0, ttlSeconds: $1) },
+            unload: { ModelResidency.unload($0) })
+    }
+
     static let shared = ModelManager()
-    private init() {}
+
+    /// Conservative allowance for runtime allocation around the installed weights. L3 validates
+    /// this against a real cold load and records the measurement in the chain baton.
+    static let incomingFootprintFactor = 1.15
+
+    private let policyLock = NSLock()
+    /// Models whose cold load this process actually initiated. A model merely found resident is
+    /// never adopted, even when its identifier is one ViddyDictate commonly uses.
+    private var ownedModels = Set<String>()
+
+    init() {}
 
     /// The idle TTL handed to LM Studio at load time. One persisted setting governs every model role.
     func ttl(for _: String) -> Int {
@@ -28,9 +73,100 @@ final class ModelManager {
     /// load does not count against that request's timeout. Loads with the app's configured TTL so LM
     /// Studio owns the eviction; `ttlOverrideSeconds` is a test-only seam (the residency self-test uses
     /// a short TTL so eviction is observable without waiting for the configured interval). Returns
-    /// false if it could not be loaded.
+    /// a typed result so the client layer can distinguish a capacity refusal from an LM Studio load
+    /// failure. A same-signature Bool compatibility overload below preserves existing clients until
+    /// their dedicated wiring link maps the typed refusal onto user-facing fallback text.
+    @discardableResult
+    func ensureReady(_ model: String, ttlOverrideSeconds: Int? = nil) -> ReadinessResult {
+        ensureReady(model, ttlOverrideSeconds: ttlOverrideSeconds, dependencies: .live)
+    }
+
+    /// Existing call-site compatibility only. Capacity policy still runs; this overload deliberately
+    /// collapses the typed outcome until L4 wires the capacity refusal through the clients.
     @discardableResult
     func ensureReady(_ model: String, ttlOverrideSeconds: Int? = nil) -> Bool {
-        ModelResidency.ensureLoaded(model, ttlSeconds: ttlOverrideSeconds ?? ttl(for: model))
+        let result: ReadinessResult = ensureReady(
+            model, ttlOverrideSeconds: ttlOverrideSeconds, dependencies: .live)
+        return result.isReady
+    }
+
+    @discardableResult
+    func ensureReady(
+        _ model: String,
+        ttlOverrideSeconds: Int? = nil,
+        dependencies: CapacityDependencies
+    ) -> ReadinessResult {
+        policyLock.lock()
+        defer { policyLock.unlock() }
+
+        guard let residents = dependencies.residentModels() else {
+            return .capacityRefused(.factsUnavailable)
+        }
+
+        // Drop ownership as soon as a previously owned instance is observed absent (for example,
+        // after its LM Studio TTL fires). A later foreign load with that identifier is not adopted.
+        ownedModels.formIntersection(residents.map(\.identifier))
+
+        // A resident request allocates nothing new. Do not re-load it (LM Studio would create :2),
+        // and do not claim ownership if another caller made it resident.
+        if residents.contains(where: { $0.identifier == model }) { return .ready }
+
+        guard let installed = dependencies.availableInstalledModels(),
+              let size = installed.first(where: { $0.modelID == model })?.sizeBytes,
+              size > 0,
+              let estimatedIncoming = Self.estimatedIncomingBytes(sizeBytes: size),
+              let firstWired = dependencies.wiredBytes(),
+              let firstBudget = dependencies.budgetBytes(Settings.modelMemoryBudgetSliderPosition)
+        else { return .capacityRefused(.factsUnavailable) }
+
+        if !Self.fits(wiredBytes: firstWired, incomingBytes: estimatedIncoming,
+                      budgetBytes: firstBudget) {
+            // ONE bounded pass over one snapshot, LRU first. Only models cold-loaded by this process
+            // are candidates; an older/larger foreign model is never touched. Busy/loading owned
+            // models and the requested identifier are also excluded.
+            let candidates = residents
+                .filter {
+                    ownedModels.contains($0.identifier)
+                        && $0.identifier != model
+                        && $0.isIdle
+                }
+                .sorted {
+                    $0.lastUsedTime == $1.lastUsedTime
+                        ? $0.identifier < $1.identifier
+                        : $0.lastUsedTime < $1.lastUsedTime
+                }
+            for candidate in candidates {
+                dependencies.unload(candidate.identifier)
+                // Even a failed/no-op unload cannot justify a later, broader attempt. Forgetting the
+                // claim makes the safety boundary tighter; the live recheck below decides capacity.
+                ownedModels.remove(candidate.identifier)
+            }
+
+            guard let recheckedWired = dependencies.wiredBytes(),
+                  let recheckedBudget = dependencies.budgetBytes(
+                    Settings.modelMemoryBudgetSliderPosition)
+            else { return .capacityRefused(.factsUnavailable) }
+            guard Self.fits(wiredBytes: recheckedWired, incomingBytes: estimatedIncoming,
+                            budgetBytes: recheckedBudget)
+            else { return .capacityRefused(.overBudget) }
+        }
+
+        let loaded = dependencies.ensureLoaded(model, ttlOverrideSeconds ?? ttl(for: model))
+        guard loaded else { return .loadFailed }
+        ownedModels.insert(model)
+        return .ready
+    }
+
+    static func estimatedIncomingBytes(sizeBytes: Int64) -> UInt64? {
+        guard sizeBytes > 0 else { return nil }
+        let estimate = (Double(sizeBytes) * incomingFootprintFactor).rounded(.up)
+        guard estimate.isFinite, estimate > 0, estimate < Double(UInt64.max) else { return nil }
+        return UInt64(estimate)
+    }
+
+    private static func fits(wiredBytes: UInt64, incomingBytes: UInt64,
+                             budgetBytes: UInt64) -> Bool {
+        let (total, overflow) = wiredBytes.addingReportingOverflow(incomingBytes)
+        return !overflow && total <= budgetBytes
     }
 }

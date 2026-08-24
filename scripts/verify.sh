@@ -391,6 +391,9 @@ tier_deterministic() {
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --models-power-selftest || true
         run_system_memory_selftest_gate || true
+        run_gate deterministic "local model capacity policy fixture selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --model-capacity-selftest || true
         run_gate deterministic "prompt overlay store selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --prompt-overlay-selftest || true

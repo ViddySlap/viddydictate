@@ -28,6 +28,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case availabilityRoutingSelftest = "--availability-routing-selftest"
     case modelsPowerSelftest = "--models-power-selftest"
     case systemMemorySelftest = "--system-memory-selftest"
+    case modelCapacitySelftest = "--model-capacity-selftest"
     case promptOverlaySelftest = "--prompt-overlay-selftest"
     case promptWorkstationSelftest = "--prompt-workstation-selftest"
     case promptTestBenchSelftest = "--prompt-test-bench-selftest"

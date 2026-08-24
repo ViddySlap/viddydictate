@@ -15,6 +15,18 @@ import Foundation
 /// request clients already do their network work on background queues).
 enum ModelResidency {
 
+    /// One row from `lms ps --json`. Capacity policy needs the provider's live identifier, footprint,
+    /// recency, and state as one coherent snapshot: size and recency are not looked up through a
+    /// second command that could describe a different resident set.
+    struct ResidentModel: Equatable {
+        let identifier: String
+        let sizeBytes: UInt64
+        let lastUsedTime: UInt64
+        let status: String
+
+        var isIdle: Bool { status == "idle" }
+    }
+
     /// The LM Studio CLI (same path the RAG keep-alive uses).
     private static let lmsPath = "\(NSHomeDirectory())/.lmstudio/bin/lms"
     /// Installed-model discovery, deliberately distinct from the resident-only `lms ps` command.
@@ -67,15 +79,28 @@ enum ModelResidency {
     /// not resident / has no TTL. Reads `lms ps --json` (the `ttlMs` field). Used by the residency
     /// self-test to prove the per-model TTL actually reached LM Studio; production paths do not need it.
     static func loadedTTLSeconds(_ model: String) -> Int? {
-        guard let out = runLMS(["ps", "--json"]),
-              let data = out.data(using: .utf8),
-              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
-        else { return nil }
-        for entry in arr where (entry["identifier"] as? String) == model {
+        guard let rows = loadedModelRows() else { return nil }
+        for entry in rows where (entry["identifier"] as? String) == model {
             guard let ms = entry["ttlMs"] as? Double else { return nil }  // ttlMs is null when no TTL
             return Int(ms / 1000.0)
         }
         return nil
+    }
+
+    /// The complete resident snapshot reported by `lms ps --json`, or nil when the command or any
+    /// required capacity field is unreadable. This deliberately shares `loadedModelRows()` with
+    /// `loadedTTLSeconds`: one JSON decoder and one failure discipline own this provider surface.
+    static func residentModels() -> [ResidentModel]? {
+        guard let rows = loadedModelRows() else { return nil }
+        return parseResidentModels(rows)
+    }
+
+    /// Pure fixture seam for the live `lms ps --json` shape. Malformed JSON and incomplete rows are
+    /// unavailable rather than partially accepted: capacity policy must not mistake an incomplete
+    /// resident list for the whole machine's LM Studio set.
+    static func parseResidentModelsJSON(_ data: Data) -> [ResidentModel]? {
+        guard let rows = decodeLoadedModelRows(data) else { return nil }
+        return parseResidentModels(rows)
     }
 
     /// Ensure `model` is resident for an imminent inference, loaded with `ttlSeconds` of idle TTL so LM
@@ -123,6 +148,50 @@ enum ModelResidency {
         // A cold model load can take a few seconds; kill anything pathological at 90s.
         guard let run = runBounded(args, timeout: 90, standardError: .merge) else { return nil }
         return String(decoding: run.output, as: UTF8.self)
+    }
+
+    /// Shared `lms ps --json` decode path. Keep this as the single owner so TTL inspection and
+    /// capacity listing cannot drift into different parser/error semantics.
+    private static func loadedModelRows() -> [[String: Any]]? {
+        guard let out = runLMS(["ps", "--json"]),
+              let data = out.data(using: .utf8)
+        else { return nil }
+        return decodeLoadedModelRows(data)
+    }
+
+    private static func decodeLoadedModelRows(_ data: Data) -> [[String: Any]]? {
+        (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+    }
+
+    private static func parseResidentModels(_ rows: [[String: Any]]) -> [ResidentModel]? {
+        var residents: [ResidentModel] = []
+        residents.reserveCapacity(rows.count)
+        for row in rows {
+            guard let identifier = (row["identifier"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !identifier.isEmpty,
+                  let sizeBytes = unsignedInteger(row["sizeBytes"]),
+                  let lastUsedTime = unsignedInteger(row["lastUsedTime"]),
+                  let status = (row["status"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !status.isEmpty
+            else { return nil }
+            residents.append(ResidentModel(
+                identifier: identifier,
+                sizeBytes: sizeBytes,
+                lastUsedTime: lastUsedTime,
+                status: status))
+        }
+        return residents
+    }
+
+    private static func unsignedInteger(_ value: Any?) -> UInt64? {
+        guard let number = value as? NSNumber else { return nil }
+        let raw = number.stringValue
+        guard !raw.hasPrefix("-"), !raw.contains("."), !raw.lowercased().contains("e") else {
+            return nil
+        }
+        return UInt64(raw)
     }
 
     /// JSON-only command runner for catalog discovery. stdout stays separate from stderr so an LM
