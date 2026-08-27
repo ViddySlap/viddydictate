@@ -163,6 +163,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .bundledPythonSelftest: .init(tier: .deterministic) { arguments in
         BundledPythonSelfTest.run(arguments: arguments) ? 0 : 1
     },
+    .installerEngineSelftest: .init(tier: .deterministic) { _ in
+        InstallerEngineSelfTest.run() ? 0 : 1
+    },
     // Pure: every fixture is a synthetic observation, so no daemon, provider, keychain, or TCC grant is
     // consulted and the gate reports on the policy rather than on this machine's setup.
     .preflightSelftest: .init(tier: .deterministic) { _ in
