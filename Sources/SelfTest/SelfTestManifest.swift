@@ -113,6 +113,19 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .lmStudioInstallerSelftest: .init(tier: .deterministic) { _ in
         LMStudioInstallerSelfTest.run() ? 0 : 1
     },
+    // Pure: every machine it reasons about is synthesized from a recorded kernel ratio, so the picker's
+    // 8 GB and 16 GB verdicts are pinned on a developer machine that is neither.
+    .componentPickerSelftest: .init(tier: .deterministic) { _ in
+        ComponentPickerSelfTest.run() ? 0 : 1
+    },
+    .componentPickerRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--component-picker-render"), i + 1 < arguments.count
+        else {
+            print("[component-picker-render] FAIL: an output directory is required")
+            return 2
+        }
+        return ComponentPickerRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
     .lmStudioModelCatalogSelftest: .init(tier: .deterministic) { _ in
         LMStudioModelCatalogSelfTest.run() ? 0 : 1
     },
