@@ -381,6 +381,9 @@ tier_deterministic() {
         run_gate deterministic "network path awareness and download gate selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --network-path-selftest || true
+        run_gate deterministic "LM Studio bootstrap mechanism selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --lmstudio-installer-selftest || true
         run_gate deterministic "LM Studio installed-model catalog fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --lmstudio-model-catalog-selftest || true

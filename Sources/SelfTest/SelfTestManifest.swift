@@ -110,6 +110,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .networkPathSelftest: .init(tier: .deterministic) { _ in
         NetworkPathSelfTest.run() ? 0 : 1
     },
+    .lmStudioInstallerSelftest: .init(tier: .deterministic) { _ in
+        LMStudioInstallerSelfTest.run() ? 0 : 1
+    },
     .lmStudioModelCatalogSelftest: .init(tier: .deterministic) { _ in
         LMStudioModelCatalogSelfTest.run() ? 0 : 1
     },
