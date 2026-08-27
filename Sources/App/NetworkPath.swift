@@ -58,6 +58,10 @@ struct NetworkPathState: Equatable {
 enum NetworkPathCopy {
     static let waitForWiFiButton = "Wait for Wi-Fi"
     static let setUpLaterButton = "Set up later"
+    /// What the screen says while the queue is held. The gate releases itself on the first clear path,
+    /// so the line has to promise that rather than leave the user waiting for something to press.
+    static let waitingForWiFiMessage =
+        "Waiting for Wi-Fi. The download starts on its own the moment you are on one."
     static let noNetworkMessage =
         "No network connection. You can set up later and come back when you are online."
 }

@@ -270,8 +270,12 @@ final class ModelManager {
         return UInt64(estimate)
     }
 
-    private static func fits(wiredBytes: UInt64, incomingBytes: UInt64,
-                             budgetBytes: UInt64) -> Bool {
+    /// Internal rather than private so the first-run picker can ask the LOADER's question instead of
+    /// asking a copy of it. A picker that pre-ticks a model this predicate would refuse is exactly the
+    /// lie spec B5 exists to prevent, and the only way to guarantee they cannot drift is for there to
+    /// be one predicate.
+    static func fits(wiredBytes: UInt64, incomingBytes: UInt64,
+                     budgetBytes: UInt64) -> Bool {
         let (total, overflow) = wiredBytes.addingReportingOverflow(incomingBytes)
         return !overflow && total <= budgetBytes
     }
