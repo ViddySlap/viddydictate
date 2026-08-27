@@ -112,6 +112,7 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     },
     .lmStudioInstallerSelftest: .init(tier: .deterministic) { _ in
         LMStudioInstallerSelfTest.run() ? 0 : 1
+    },
     // Pure: every machine it reasons about is synthesized from a recorded kernel ratio, so the picker's
     // 8 GB and 16 GB verdicts are pinned on a developer machine that is neither.
     .componentPickerSelftest: .init(tier: .deterministic) { _ in
