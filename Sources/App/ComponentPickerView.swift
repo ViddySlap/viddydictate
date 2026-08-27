@@ -349,36 +349,71 @@ final class ComponentPickerView: NSView {
     @objc private func setUpLaterClicked() { onSetUpLater?() }
 }
 
-/// The window the picker lives in on first launch (B1, and the host L6's progress and permissions
-/// screens step into).
+/// The window the picker lives in on first launch, and the two screens after it (B1, B7, B19).
 ///
 /// It is an ordinary closable window on purpose. B1 says the gate is a picker and not a wall, and B9
 /// says dismissing setup cancels nothing, so nothing here is modal and nothing blocks the app. The
 /// rule that brings it BACK on every launch until the core is installed is B12, which belongs to the
 /// link that owns the degraded state; this type only knows how to show itself and how to report what
 /// the user chose.
+///
+/// **The flow is B19's, in B19's order.** Continue starts the download and the permissions screen
+/// appears IMMEDIATELY, with the download running underneath it in a strip - not before the grants and
+/// not after them. Once there is nothing left to grant, the same window becomes B7's full per-row
+/// list. The controller never waits for a grant before starting bytes, because that is the exact
+/// mistake B19 exists to prevent: a user fumbling in System Settings while nothing downloads.
 final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// Called with the plan the user assembled. The host runs it; this controller starts nothing, so
     /// there is one installer entered from here and from the point-of-use offer rather than two.
     var onContinue: ((ComponentPicker.InstallPlan) -> Void)?
     var onSetUpLater: (() -> Void)?
+    /// B10's Retry, forwarded to whatever owns the queue. Re-entering the same installer is the whole
+    /// point: a retry must not become a second install path.
+    var onRetry: ((ComponentPicker.RowID) -> Void)?
+
+    enum Step: Equatable {
+        case picker
+        case permissions
+        case progress
+    }
 
     private let facts: ComponentPicker.MachineFacts
     private let environment: ComponentPicker.Environment
     private let gate: NetworkDownloadGate
+    private let sampler: InstallByteSampling
+    private let readPermissions: () -> PermissionsStatus
+    private let now: () -> TimeInterval
     private var window: NSWindow?
     private var picker: ComponentPickerView?
+    private var permissionsView: PermissionsSetupView?
+    private var progressView: InstallProgressView?
+    private var scroll: NSScrollView?
+    private var poll: Timer?
+
+    private(set) var step: Step = .picker
+    private(set) var progress: InstallProgressState?
+    private(set) var permissions: PermissionsStatus
+    private var lastSnapshot: BootstrapSnapshot?
 
     private let contentWidth: CGFloat = 620
 
     init(facts: ComponentPicker.MachineFacts = .live,
          environment: ComponentPicker.Environment = .init(),
-         gate: NetworkDownloadGate = NetworkDownloadGate(monitor: NetworkPathMonitor())) {
+         gate: NetworkDownloadGate = NetworkDownloadGate(monitor: NetworkPathMonitor()),
+         sampler: InstallByteSampling = InstallCacheByteSampler(),
+         readPermissions: @escaping () -> PermissionsStatus = { .live },
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.facts = facts
         self.environment = environment
         self.gate = gate
+        self.sampler = sampler
+        self.readPermissions = readPermissions
+        self.now = now
+        self.permissions = readPermissions()
         super.init()
     }
+
+    deinit { poll?.invalidate() }
 
     func show() {
         if window == nil { build() }
@@ -425,6 +460,7 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         host.addSubview(scroll)
         w.contentView = host
         window = w
+        self.scroll = scroll
     }
 
     private func syncNetwork() {
@@ -440,12 +476,129 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         let plan = plan()
         // L4's gate decides whether this starts now, waits, or cannot start at all. The picker does not
         // second-guess the path it was handed.
-        _ = gate.startDownload { [weak self] in self?.onContinue?(plan) }
+        _ = gate.startDownload { [weak self] in self?.begin(plan) }
     }
 
     private func waitTapped() {
         let plan = plan()
-        _ = gate.waitForWiFi { [weak self] in self?.onContinue?(plan) }
+        _ = gate.waitForWiFi { [weak self] in self?.begin(plan) }
+    }
+
+    /// The moment bytes are allowed to start. The host is told first, so the download is genuinely
+    /// running by the time the permissions screen renders over it.
+    private func begin(_ plan: ComponentPicker.InstallPlan) {
+        onContinue?(plan)
+        progress = InstallProgressState(plan: plan)
+        refreshProgress()
+        showPermissions()
+    }
+
+    // MARK: - B19
+
+    private func showPermissions() {
+        step = .permissions
+        permissions = readPermissions()
+        let view = makePermissionsView()
+        install(view)
+        startPolling()
+    }
+
+    /// Exposed for the render gate, for the same reason `makeContentView` is: a screen built only
+    /// inside `show()` is one no gate can look at.
+    @discardableResult
+    func makePermissionsView() -> PermissionsSetupView {
+        let view = PermissionsSetupView(width: contentWidth, status: permissions,
+                                        progressRows: progress?.rows ?? [],
+                                        aggregate: progress?.aggregate
+                                            ?? InstallProgress.aggregate([]))
+        view.onGrant = { [weak self] in self?.grantTapped($0) }
+        view.onContinue = { [weak self] in self?.showProgress() }
+        permissionsView = view
+        return view
+    }
+
+    @discardableResult
+    func makeProgressView() -> InstallProgressView {
+        let view = InstallProgressView(width: contentWidth, style: .full,
+                                       rows: progress?.rows ?? [],
+                                       aggregate: progress?.aggregate
+                                           ?? InstallProgress.aggregate([]))
+        view.onRetry = { [weak self] in self?.onRetry?($0) }
+        progressView = view
+        return view
+    }
+
+    func showProgress() {
+        step = .progress
+        permissionsView = nil
+        install(makeProgressView())
+    }
+
+    private func grantTapped(_ permission: SetupPermission) {
+        let action = PermissionsGrant.action(for: permission,
+                                             microphoneAuthorization: Permissions.microphoneAuthorization())
+        PermissionsGrant.perform(action, completion: { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshPermissions() }
+        })
+    }
+
+    /// B19: each row flips green on its own as the grant lands. macOS sends no notification when a TCC
+    /// grant changes, so the only way to see it is to look - on a timer while the screen is up, and
+    /// again the instant the app is switched back to from System Settings.
+    private func startPolling() {
+        poll?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.refreshPermissions()
+            self?.refreshProgress()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        poll = timer
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appBecameActive),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func appBecameActive() { refreshPermissions() }
+
+    func refreshPermissions() {
+        let current = readPermissions()
+        guard current != permissions else { return }
+        permissions = current
+        permissionsView?.apply(status: current)
+        resize()
+    }
+
+    /// One cache measurement folded into the row states, then straight onto whichever screen is up.
+    func refreshProgress() {
+        guard var state = progress else { return }
+        if let snapshot = lastSnapshot {
+            state.apply(snapshot: snapshot, sampler: sampler, at: now())
+        }
+        progress = state
+        permissionsView?.apply(progress: state)
+        progressView?.apply(state)
+        resize()
+    }
+
+    /// Fed by whatever runs the queue, so this controller still starts nothing and owns no installer.
+    func apply(snapshot: BootstrapSnapshot) {
+        lastSnapshot = snapshot
+        refreshProgress()
+    }
+
+    private func install(_ view: NSView) {
+        scroll?.documentView = view
+        resize()
+    }
+
+    private func resize() {
+        guard let window, let document = scroll?.documentView else { return }
+        let height = min(760, max(320, document.frame.height))
+        guard abs(window.frame.height - height) > 1 else { return }
+        var frame = window.frame
+        frame.origin.y += frame.height - height
+        frame.size.height = height
+        window.setFrame(frame, display: true)
     }
 
     private func laterTapped() {
@@ -455,6 +608,12 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        // B9: closing is not cancelling. The gate stops watching the path and the screen stops polling,
+        // and neither of those is the download.
         gate.stopMonitoring()
+        poll?.invalidate()
+        poll = nil
+        NotificationCenter.default.removeObserver(
+            self, name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 }

@@ -379,13 +379,19 @@ struct InstallerPaths: Equatable {
     let python: URL
     let applicationSupport: URL
     let modelCache: URL
+    /// pip's own download and wheel cache, kept beside the model cache rather than left in
+    /// `~/Library/Caches/pip`. Two reasons, both of them the engine's own goals: B10's resume works off
+    /// a cache that survives a failed attempt, and a cache the app owns is one whose growth is the
+    /// honest byte source for B7's per-row progress (see `InstallProgress`).
+    let packageCache: URL
 
     static var live: InstallerPaths {
         let support = AppPaths.applicationSupportDirectory()
         return InstallerPaths(
             python: BundledPython.interpreterURL,
             applicationSupport: support,
-            modelCache: support.appendingPathComponent("model-cache", isDirectory: true))
+            modelCache: support.appendingPathComponent("model-cache", isDirectory: true),
+            packageCache: support.appendingPathComponent("package-cache", isDirectory: true))
     }
 }
 
@@ -430,6 +436,7 @@ final class InstallerEngine {
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HOME"] = paths.modelCache.path
         environment["HUGGINGFACE_HUB_CACHE"] = paths.modelCache.appendingPathComponent("hub").path
+        environment["PIP_CACHE_DIR"] = paths.packageCache.path
         environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
         environment["PYTHONNOUSERSITE"] = "1"
         self.environment = environment
