@@ -204,9 +204,7 @@ enum Preflight {
             return warn(.sttDaemon,
                         "Not installed: no LaunchAgent for \(DaemonClient.agentLabel) and nothing "
                             + "answering on 127.0.0.1:8765.",
-                        remedy: "run ./install-daemon.sh from the ViddyDictate repo - it creates the "
-                            + "Python venv, downloads the speech model on first run, and loads the "
-                            + "LaunchAgent",
+                        remedy: BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.sttDaemon),
                         reducedFunction: daemonReduced)
         case .unreachable(let detail):
             return warn(.sttDaemon,
@@ -349,8 +347,8 @@ enum Preflight {
     private static func webSearchHelperFinding(_ installed: Bool) -> PreflightFinding {
         guard !installed else { return ok(.webSearchHelper, "Installed (venv and helper both present).") }
         return warn(.webSearchHelper,
-                    "Not installed: the search venv or its helper script is missing.",
-                    remedy: "run ./install-websearch-helper.sh from the ViddyDictate repo",
+                    "Not installed: the search helper is missing.",
+                    remedy: BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch),
                     reducedFunction: "Local web search (Option+L) cannot retrieve results. Every other "
                         + "mode, including Gemini answers (Option+G), is unaffected.")
     }

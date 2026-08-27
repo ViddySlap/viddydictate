@@ -43,6 +43,15 @@ enum SearchClient {
 
     // MARK: - Pure helpers (unit-tested headlessly)
 
+    /// The missing-backend result points users at the shared in-app installer instead of a repository
+    /// script. Keep it as a pure message so the deterministic selftest can pin the user-facing seam
+    /// without probing the machine's real venv.
+    static var missingLocalBackendMessage: String {
+        "search backend not installed ("
+            + BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch)
+            + ")"
+    }
+
     /// The loop's hard cap: force the final (no-tools) turn once the search budget is spent.
     static func shouldForceFinalize(nSearches: Int, maxSearches: Int) -> Bool {
         nSearches >= maxSearches
@@ -372,7 +381,7 @@ enum SearchClient {
     static func localAnswerSync(question: String,
                                 retryCompletion: ((CleanupClient.Result) -> Void)? = nil) -> CleanupClient.Result {
         guard WebSearchBackend.isInstalled else {
-            return .unavailable("search backend not installed (run install-websearch-helper.sh)")
+            return .unavailable(missingLocalBackendMessage)
         }
         // Make the fixed Local retrieval model resident, plus the synthesis model only when this route's
         // selected provider is Local. Either Local model may have been TTL-evicted by LM Studio; loading
