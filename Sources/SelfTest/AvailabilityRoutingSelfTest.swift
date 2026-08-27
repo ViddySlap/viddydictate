@@ -16,6 +16,7 @@ enum AvailabilityRoutingSelfTest {
         let reporter = SelfTestReporter()
 
         checkPinPrecedence(reporter.record)
+        checkLocalModelFallback(reporter.record)
         checkPerRunFailureExclusions(reporter.record)
         checkSingleProviderFixtures(reporter.record)
         checkNoProviderFixture(reporter.record)
@@ -33,13 +34,19 @@ enum AvailabilityRoutingSelfTest {
     /// A scratch store with an explicit availability map. `present` lists the providers a fixture user has;
     /// everything else is off with a fixed, distinguishable reason.
     private static func fixture(present: Set<LLMProvider>,
-                                pin: LLMProvider) -> ModelsPowerSettingsStore {
+                                pin: LLMProvider,
+                                localModels: [LMStudioModelOption]? = nil) -> ModelsPowerSettingsStore {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("vd-p6-\(UUID().uuidString).json")
         let store = ModelsPowerSettingsStore(url: url, legacy: .empty)
         for provider in LLMProvider.allCases {
             store.setAvailabilityState(
                 present.contains(provider) ? .available : offState(for: provider), for: provider)
+        }
+        if let localModels {
+            store.setLocalAvailabilityState(
+                localModels.isEmpty ? .unavailable("no local models installed") : .available,
+                models: localModels)
         }
         for route in routes {
             try? store.selectProvider(pin, for: route)
@@ -113,7 +120,7 @@ enum AvailabilityRoutingSelfTest {
         let claudeAndLocal = fixture(present: [.claude, .local], pin: .codex)
         defer { discard(claudeAndLocal) }
         let degradedToLadderHead = routes.allSatisfy { route in
-            guard case .degraded(let bundle, let from, _) = claudeAndLocal.resolveRoute(route) else {
+            guard case .degraded(let bundle, let from, _, _) = claudeAndLocal.resolveRoute(route) else {
                 return false
             }
             return bundle.provider == .claude && from == .codex
@@ -124,7 +131,7 @@ enum AvailabilityRoutingSelfTest {
         let codexAndLocal = fixture(present: [.codex, .local], pin: .claude)
         defer { discard(codexAndLocal) }
         let skipsAbsentLadderHead = routes.allSatisfy { route in
-            guard case .degraded(let bundle, let from, _) = codexAndLocal.resolveRoute(route) else {
+            guard case .degraded(let bundle, let from, _, _) = codexAndLocal.resolveRoute(route) else {
                 return false
             }
             return bundle.provider == .codex && from == .claude
@@ -135,14 +142,15 @@ enum AvailabilityRoutingSelfTest {
     private static func checkSingleProviderFixtures(_ check: (String, Bool) -> Void) {
         print("--- only-Codex and only-Claude fixtures resolve and run every route ---")
         for present: LLMProvider in [.codex, .claude] {
-            let store = fixture(present: [present], pin: .local)
+            let pin: LLMProvider = present == .claude ? .codex : .claude
+            let store = fixture(present: [present], pin: pin)
             defer { discard(store) }
             var everyRouteRan = true
             var everyRouteUsedItsOwnBundle = true
             for route in routes {
                 let resolution = store.resolveRoute(route)
-                guard case .degraded(let bundle, let from, _) = resolution,
-                      bundle.provider == present, from == .local else {
+                guard case .degraded(let bundle, let from, _, _) = resolution,
+                      bundle.provider == present, from == pin else {
                     everyRouteRan = false
                     continue
                 }
@@ -162,6 +170,40 @@ enum AvailabilityRoutingSelfTest {
             check("only \(present.rawValue) present: each route executes \(present.rawValue)'s own bundle",
                   everyRouteUsedItsOwnBundle)
         }
+    }
+
+    private static func checkLocalModelFallback(_ check: (String, Bool) -> Void) {
+        print("--- a missing preferred Local model uses the best installed model and offers an upgrade ---")
+        let preferred = LLMProviderDefaults.testedBundle(for: .local, route: .cleanupL1)!
+        let alternate = LMStudioModelOption(modelID: "google/gemma-4-e4b", label: "Gemma")
+        let store = fixture(present: [.local], pin: .local, localModels: [alternate])
+        defer { discard(store) }
+
+        let resolution = store.resolveRoute(.cleanupL1)
+        guard case .degraded(let bundle, let from, let reason, let offer) = resolution else {
+            check("a missing preferred model degrades to an installed Local model", false)
+            check("the Local substitution carries an adjacent upgrade offer", false)
+            return
+        }
+        let run = dispatch(resolution, route: .cleanupL1)
+        check("a missing preferred model degrades to an installed Local model",
+              bundle.provider == .local && bundle.modelID == alternate.modelID
+                && from == .local && run.ran == [.local]
+                && run.modelIDs == [alternate.modelID]
+                && reason.contains(preferred.modelID))
+        check("the Local substitution carries an adjacent upgrade offer",
+              offer == LLMRouteUpgradeOffer(
+                  preferredModelID: preferred.modelID, runningModelID: alternate.modelID)
+                && resolution.upgradeOffer == offer
+                && offer?.message.contains(preferred.modelID) == true)
+
+        let pinned = fixture(
+            present: [.local], pin: .local,
+            localModels: [LMStudioModelOption(modelID: preferred.modelID, label: "Preferred")])
+        defer { discard(pinned) }
+        check("an installed preferred model remains pinned without an upgrade offer",
+              pinned.resolveRoute(.cleanupL1) == .pinned(preferred)
+                && pinned.resolveRoute(.cleanupL1).upgradeOffer == nil)
     }
 
     private static func checkPerRunFailureExclusions(_ check: (String, Bool) -> Void) {
@@ -195,7 +237,7 @@ enum AvailabilityRoutingSelfTest {
 
     private static func checkNoProviderFixture(_ check: (String, Bool) -> Void) {
         print("--- no provider available: every mode reports off and the transcript still lands raw ---")
-        let store = fixture(present: [], pin: .local)
+        let store = fixture(present: [], pin: .claude)
         defer { discard(store) }
         var everyRouteOff = true
         var noAdapterRan = true
@@ -240,11 +282,12 @@ enum AvailabilityRoutingSelfTest {
         try? store.selectProvider(.local, for: .cleanupL1)
         let pinBefore = store.selectedBundle(for: .cleanupL1)
         let resolution = store.resolveRoute(.cleanupL1)
-        _ = dispatch(resolution, route: .cleanupL1)
+        let run = dispatch(resolution, route: .cleanupL1)
         let pinAfter = store.selectedBundle(for: .cleanupL1)
-        check("a degraded run leaves the durable pin byte-for-byte unchanged",
+        check("an unavailable Local pin stays off instead of hopping to cloud",
               pinBefore == pinAfter && pinAfter.provider == .local
-                && resolution.bundle?.provider == .claude)
+                && resolution.bundle == nil && run.ran.isEmpty
+                && resolution.offReason?.contains("automatic cloud fallback is disabled") == true)
 
         // The pin is honored again the moment its provider comes back: no sticky hop.
         store.setAvailabilityState(.available, for: .local)
@@ -254,6 +297,15 @@ enum AvailabilityRoutingSelfTest {
         let reopened = ModelsPowerSettingsStore(url: url, legacy: .empty)
         check("nothing about a provider hop is persisted across a reopen",
               reopened.selectedBundle(for: .cleanupL1) == pinBefore)
+
+        let zeroLocal = fixture(
+            present: [.claude, .codex], pin: .local, localModels: [])
+        defer { discard(zeroLocal) }
+        let zeroResolution = zeroLocal.resolveRoute(.cleanupL1)
+        let zeroRun = dispatch(zeroResolution, route: .cleanupL1)
+        check("zero installed Local models cannot automatically invoke either cloud adapter",
+              zeroResolution.bundle == nil && zeroRun.ran.isEmpty
+                && zeroResolution.offReason?.contains("no local models installed") == true)
     }
 
     private static func checkOffReasonSpecificity(_ check: (String, Bool) -> Void) {

@@ -817,6 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureCloudUpdateChecks() {
         hydrateClaudeAvailability()
+        hydrateLocalAvailability()
         codexSchedule.launched(
             enabled: Settings.cloudUpdateAutoCheck,
             now: Date().timeIntervalSince1970)
@@ -873,6 +874,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            }) {
             Settings.modelsPower.setAvailabilityState(
                 .unavailable("last live alias probe failed"), for: .claude)
+        }
+    }
+
+    /// Local availability must begin fail-closed and become runnable only after LM Studio and its
+    /// installed-model catalog have both answered. The probe is off the main thread because it shells out
+    /// to `lms`; the catalog remains runtime-only and is never written under LM Studio or into durable app
+    /// settings.
+    private func hydrateLocalAvailability() {
+        DispatchQueue.global(qos: .utility).async {
+            let measured = LLMProviderDetection.observeLocal()
+            DispatchQueue.main.async {
+                Settings.modelsPower.setLocalAvailabilityState(
+                    measured.presence.state, models: measured.models)
+            }
         }
     }
 

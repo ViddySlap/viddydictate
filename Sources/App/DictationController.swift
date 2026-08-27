@@ -1181,6 +1181,9 @@ final class DictationController {
                         self.finalize(delivered: cleaned, raw: raw, cleaned: cleaned, mode: .cleanup,
                                       level: effectiveLevel.rawValue, historyID: takeID,
                                       lateRecovery: recovered)
+                        if let offer = resolution.upgradeOffer {
+                            self.hud.toast(offer.message)
+                        }
                     }
                 case .unavailable, .timedOut, .badOutput:
                     let failure = TextTransformClient.safeFailure(for: result)!

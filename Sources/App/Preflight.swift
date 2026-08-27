@@ -391,6 +391,12 @@ extension Preflight {
     static func observe(completion: @escaping (PreflightObservation) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let providers = LLMProviderDetection.observeAll()
+            if let local = providers[.local] {
+                // Keep the execution resolver on the same measured Local state and catalog shown by this
+                // preflight pass. The catalog is runtime-only; no model inventory enters durable settings.
+                Settings.modelsPower.setLocalAvailabilityState(
+                    local.state, models: local.availableLocalModels)
+            }
             let helperInstalled = WebSearchBackend.isInstalled
             let keySource = SecretStore.resolveSource(.geminiAPIKey)
             let agentInstalled = FileManager.default.isReadableFile(atPath: daemonAgentPlistPath)

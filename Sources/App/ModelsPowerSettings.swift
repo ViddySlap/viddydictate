@@ -156,10 +156,15 @@ final class ModelsPowerSettingsStore {
     private var mutationBlockDetail: String?
     private var pendingLegacyCustomRememberedBundles: [LLMProvider: LLMProviderBundle]
     private var availability: [LLMProvider: LLMProviderAvailabilityState] = [
-        .local: .available,
+        // Local must start fail-closed. A live LM Studio server and an installed local model are separate
+        // facts, so no route may assume a model exists before the catalog has been measured.
+        .local: .unavailable("local model availability not measured"),
         .claude: .available,
         .codex: .disconnected,
     ]
+    /// Runtime-only installed Local catalog. nil means discovery has not answered yet; an empty list is a
+    /// measured zero-model state and is intentionally different from nil.
+    private var localModelOptions: [LMStudioModelOption]?
 
     init(url: URL, legacy: ModelsPowerLegacyState = .empty,
          writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter) {
@@ -316,6 +321,10 @@ final class ModelsPowerSettingsStore {
         lock.withLock { availability[provider] ?? .unavailable("availability unknown") }
     }
 
+    func availableLocalModelOptions() -> [LMStudioModelOption]? {
+        lock.withLock { localModelOptions }
+    }
+
     /// Resolve who actually runs `route` right now (locked decision 4). Read-only by contract: a provider
     /// hop is an execution decision, never a durable one, so `selectedBundle` keeps returning the user's
     /// pin and the route snaps back to it the moment that provider is available again.
@@ -332,6 +341,7 @@ final class ModelsPowerSettingsStore {
                     ?? LLMProviderDefaults.testedBundle(for: provider, route: route)
             },
             availability: { availabilityState(for: $0) },
+            localModels: availableLocalModelOptions(),
             failedProviders: failedProviders)
     }
 
@@ -565,8 +575,26 @@ final class ModelsPowerSettingsStore {
 
     func setAvailabilityState(_ state: LLMProviderAvailabilityState, for provider: LLMProvider) {
         let changed = lock.withLock { () -> Bool in
-            guard availability[provider] != state else { return false }
+            let modelsChanged = provider == .local && localModelOptions != nil
+            if provider == .local { localModelOptions = nil }
+            guard availability[provider] != state || modelsChanged else { return false }
             availability[provider] = state
+            return true
+        }
+        guard changed else { return }
+        NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    /// Publish one measured Local state and its catalog together. The catalog is runtime-only and never
+    /// enters Models & Power's durable JSON, while the state drives all execution-time route decisions.
+    func setLocalAvailabilityState(_ state: LLMProviderAvailabilityState,
+                                   models: [LMStudioModelOption]?) {
+        let changed = lock.withLock { () -> Bool in
+            let stateChanged = availability[.local] != state
+            let modelsChanged = localModelOptions != models
+            guard stateChanged || modelsChanged else { return false }
+            availability[.local] = state
+            localModelOptions = models
             return true
         }
         guard changed else { return }

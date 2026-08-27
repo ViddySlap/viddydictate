@@ -302,7 +302,7 @@ enum TextTransformClient {
         case .off(let reason):
             completion(resultMap(offDispatch(reason: reason, resolution: resolution, route: route,
                                              arming: arming)))
-        case .pinned(let bundle), .degraded(let bundle, _, _):
+        case .pinned(let bundle), .degraded(let bundle, _, _, _):
             logResolution(resolution, route: route)
             transform(requestForBundle(bundle), local: local, claude: claude, codex: codex,
                       resultMap: resultMap, arming: arming, retryRequest: requestForBundle,
@@ -322,7 +322,7 @@ enum TextTransformClient {
         switch resolution {
         case .off(let reason):
             return resultMap(offDispatch(reason: reason, resolution: resolution, route: route))
-        case .pinned(let bundle), .degraded(let bundle, _, _):
+        case .pinned(let bundle), .degraded(let bundle, _, _, _):
             logResolution(resolution, route: route)
             return transformSync(requestForBundle(bundle), local: local, claude: claude, codex: codex,
                                  resultMap: resultMap, retryRequest: requestForBundle,

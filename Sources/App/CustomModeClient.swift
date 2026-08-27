@@ -42,6 +42,8 @@ struct CustomModeRunProvider: Equatable {
     let degradedFrom: LLMProvider?
     /// Why the pin could not run. Non-nil only alongside `degradedFrom`.
     let degradedReason: String?
+    /// A local preferred-model substitution is offered beside the result rather than blocking the run.
+    let upgradeOffer: LLMRouteUpgradeOffer?
 
     /// nil when the route resolved `.off`: no provider executed, so there is nothing to report.
     init?(_ resolution: LLMRouteResolution) {
@@ -51,11 +53,13 @@ struct CustomModeRunProvider: Equatable {
             modelID = bundle.modelID
             degradedFrom = nil
             degradedReason = nil
-        case .degraded(let bundle, let from, let reason):
+            upgradeOffer = nil
+        case .degraded(let bundle, let from, let reason, let offer):
             provider = bundle.provider
             modelID = bundle.modelID
             degradedFrom = from
             degradedReason = reason
+            upgradeOffer = offer
         case .off:
             return nil
         }

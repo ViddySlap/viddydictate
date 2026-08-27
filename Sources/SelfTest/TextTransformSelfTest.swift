@@ -207,6 +207,11 @@ enum TextTransformSelfTest {
             .appendingPathComponent("vd-retry-settings-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: settingsURL) }
         let settings = ModelsPowerSettingsStore(url: settingsURL, legacy: .empty)
+        // Local availability starts fail-closed in production. This retry fixture explicitly supplies a
+        // measured installed model so the expected Local alternative is intentional rather than assumed.
+        settings.setLocalAvailabilityState(
+            .available,
+            models: [LMStudioModelOption(modelID: Settings.cleanupModel, label: "synthetic local")])
         let unavailableChoices = pending.map {
             TextTransformRetryCenter.eligibleProviderBundles(for: $0, settings: settings).map { $0.0 }
         } ?? []

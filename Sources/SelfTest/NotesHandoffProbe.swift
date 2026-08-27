@@ -239,7 +239,8 @@ extension NotesProbe {
               && pinned?.isDegraded == false && pinned?.shortLabel == "Codex")
 
         let degraded = CustomModeRunProvider(
-            .degraded(.claude("claude-sonnet-5"), from: .codex, reason: "not connected"))
+            .degraded(.claude("claude-sonnet-5"), from: .codex, reason: "not connected",
+                      upgradeOffer: nil))
         check("note-to-handoff: a rerouted run names BOTH the provider that ran and the skipped pin",
               degraded?.provider == .claude && degraded?.degradedFrom == .codex
               && degraded?.isDegraded == true
