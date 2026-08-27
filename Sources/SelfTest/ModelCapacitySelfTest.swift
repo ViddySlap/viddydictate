@@ -32,11 +32,20 @@ enum ModelCapacitySelfTest {
         """.utf8)
         let parsed = ModelResidency.parseResidentModelsJSON(fixture)
         reporter.record(
-            "lms ps parser retains identifier, size, last-use time, and status",
+            "lms ps parser retains identifier, size, last-use time, status, and TTL",
             parsed == [
                 resident("foreign/embed", 634_553_760, 1_787_551_824_934, "idle"),
-                resident("owned/busy", 17_190_793_452, 1_787_551_825_999, "loading"),
+                resident("owned/busy", 17_190_793_452, 1_787_551_825_999, "loading", ttl: 600),
             ])
+        // `ttlMs: null` is a model LM Studio holds with no timeout at all - the state that pinned 28.7 GB
+        // for an hour on 2026-08-21. It is a FACT about the row, not a hole in it, so it must not fail the
+        // snapshot the way a missing size does.
+        reporter.record(
+            "a model loaded with no TTL parses as resident without one, rather than failing the snapshot",
+            parsed?.first?.ttlSeconds == nil && parsed?.count == 2)
+        reporter.record(
+            "the TTL comes from the same row as the size, not a second lms ps",
+            parsed?.last?.ttlSeconds == 600, "\(parsed?.last?.ttlSeconds as Int? ?? -1)")
         reporter.record(
             "lms ps parser fails closed on malformed JSON",
             ModelResidency.parseResidentModelsJSON(Data("not json".utf8)) == nil)
@@ -485,10 +494,11 @@ enum ModelCapacitySelfTest {
     }
 
     private static func resident(
-        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64, _ status: String
+        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64, _ status: String,
+        ttl: Int? = nil
     ) -> ModelResidency.ResidentModel {
         .init(identifier: identifier, sizeBytes: sizeBytes,
-              lastUsedTime: lastUsedTime, status: status)
+              lastUsedTime: lastUsedTime, status: status, ttlSeconds: ttl)
     }
 
     private static func installedModel(_ id: String, size: Int64?) -> LMStudioInstalledModel {

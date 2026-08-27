@@ -71,6 +71,13 @@ final class SetupSettingsView: NSView {
         // preflight row below it too, and it is what keeps a Delete button from claiming Option+G is off
         // when something else is still supplying a key.
         geminiKey.onStored = { [weak self] in self?.check() }
+        // The Local models section carries a LIVE readout that grows and shrinks with LM Studio's resident
+        // set, so its height changes on a timer rather than only when this tab rebuilds. The tab lays it
+        // out by running from its `maxY`, so a height change has to reflow what is below or the read-only
+        // preflight rows end up sitting on top of it. Re-laying out, NOT re-measuring: the machine has not
+        // been asked anything new here.
+        // `self.` because the initialiser parameter of the same name shadows the property here.
+        self.localModels.onHeightChanged = { [weak self] in self?.rebuild() }
         check()
     }
 

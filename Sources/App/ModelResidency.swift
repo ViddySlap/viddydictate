@@ -23,6 +23,24 @@ enum ModelResidency {
         let sizeBytes: UInt64
         let lastUsedTime: UInt64
         let status: String
+        /// The idle TTL LM Studio is currently holding this model with, or nil when it carries none.
+        /// `ttlMs: null` is a legitimate row, not a broken one: a model loaded by hand in the LM Studio
+        /// GUI, or by another app, has no TTL and stays resident until something unloads it.
+        ///
+        /// Read from the SAME row as the fields above rather than through a second `lms ps` call, so a
+        /// readout cannot pair one command's TTL with another command's resident set.
+        let ttlSeconds: Int?
+
+        /// `ttlSeconds` is defaulted so callers that only care about the capacity fields - the policy
+        /// gate and its fixtures - are not forced to state a TTL they do not read.
+        init(identifier: String, sizeBytes: UInt64, lastUsedTime: UInt64, status: String,
+             ttlSeconds: Int? = nil) {
+            self.identifier = identifier
+            self.sizeBytes = sizeBytes
+            self.lastUsedTime = lastUsedTime
+            self.status = status
+            self.ttlSeconds = ttlSeconds
+        }
 
         var isIdle: Bool { status == "idle" }
     }
@@ -142,6 +160,24 @@ enum ModelResidency {
         _ = runLMS(["unload", model])
     }
 
+    /// Unload every model LM Studio is holding, including ones ViddyDictate never loaded.
+    ///
+    /// The Setup tab's Unload all button is the only caller, and it is what lets a lowered budget be made
+    /// true immediately rather than at the next cold load. Deliberately broader than `unload(_:)`: the
+    /// budget counts every wired byte on the Mac, so a button that freed only this app's own models would
+    /// leave the number it is meant to fix unchanged.
+    ///
+    /// Synchronous like every other primitive here. Callers must run it OFF the main thread.
+    static func unloadAll() {
+        guard FileManager.default.isExecutableFile(atPath: lmsPath) else { return }
+        Log.write("residency: unloading all models")
+        _ = runLMS(unloadAllArguments)
+    }
+
+    /// Pinned so a gate can assert the button reaches `lms unload --all` and not a per-model loop, which
+    /// would miss exactly the foreign models the budget is complaining about.
+    static let unloadAllArguments = ["unload", "--all"]
+
     /// Run the LM Studio CLI synchronously, returning combined stdout+stderr (nil on launch failure).
     /// Exit status is deliberately ignored: every caller reads the text.
     private static func runLMS(_ args: [String]) -> String? {
@@ -180,9 +216,21 @@ enum ModelResidency {
                 identifier: identifier,
                 sizeBytes: sizeBytes,
                 lastUsedTime: lastUsedTime,
-                status: status))
+                status: status,
+                ttlSeconds: ttlSeconds(row["ttlMs"])))
         }
         return residents
+    }
+
+    /// `ttlMs` as whole seconds. Deliberately optional-on-absence rather than required like the fields
+    /// above: `null` means "loaded without a TTL", which is a fact about the model rather than a hole in
+    /// the row, and failing the whole snapshot on it would blind capacity policy to a resident set that
+    /// LM Studio described perfectly well.
+    private static func ttlSeconds(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        let milliseconds = number.doubleValue
+        guard milliseconds.isFinite, milliseconds > 0 else { return nil }
+        return Int((milliseconds / 1000.0).rounded())
     }
 
     private static func unsignedInteger(_ value: Any?) -> UInt64? {

@@ -24,6 +24,7 @@ enum LocalModelSetupSelfTest {
         checkSliderRendering(reporter)
         checkBudgetLine(reporter)
         checkTimerCopy(reporter)
+        checkResidencyReadout(reporter)
         checkJITReader(reporter)
         checkJITStatus(reporter)
         checkJITCopy(reporter)
@@ -132,6 +133,151 @@ enum LocalModelSetupSelfTest {
               LocalModelSetup.duration(600) == "10 min" && LocalModelSetup.duration(3600) == "60 min")
         check("a value that is not whole minutes is said in seconds rather than rounded silently",
               LocalModelSetup.duration(90) == "90 sec" && LocalModelSetup.duration(45) == "45 sec")
+    }
+
+    // MARK: - the live residency readout (LOCKED DECISION 2)
+
+    /// A fixed clock. Every TTL below is measured against it rather than against `Date()`, so the gate
+    /// asserts the arithmetic instead of racing the wall.
+    private static let clock = Date(timeIntervalSince1970: 1_787_849_000)
+
+    private static func model(_ identifier: String, gb: Double, status: String = "idle",
+                              ttl: Int? = 600, usedSecondsAgo: Double = 0)
+        -> ModelResidency.ResidentModel {
+        .init(identifier: identifier,
+              sizeBytes: UInt64(gb * 1_000_000_000),
+              lastUsedTime: UInt64((clock.timeIntervalSince1970 - usedSecondsAgo) * 1000),
+              status: status,
+              ttlSeconds: ttl)
+    }
+
+    private static func checkResidencyReadout(_ check: SelfTestReporter) {
+        // The sentence the whole item exists for, pinned verbatim rather than by keyword. Ben lost a hand
+        // test on 2026-08-27 to its absence: he dragged the budget to 0 with a 17.19 GB model resident,
+        // the next dictation ran with no refusal, and nothing ever said why.
+        check("the section states that lowering the budget does not evict what is already loaded",
+              LocalModelSetup.residencyNote
+                == "Lowering the budget applies to the next model load. Models already in memory keep "
+                    + "running.",
+              LocalModelSetup.residencyNote)
+
+        // --- what a row says ---
+        let coder = model("qwen3-coder-30b-a3b-instruct-mlx", gb: 17.19, usedSecondsAgo: 120)
+        check("a row names the model, its size, its state and when it goes",
+              LocalModelSetup.residencyRow(coder, nameWidth: 0, now: clock)
+                == "qwen3-coder-30b-a3b-instruct-mlx   17.2 GB  idle  unloads in 8 min",
+              LocalModelSetup.residencyRow(coder, nameWidth: 0, now: clock))
+        check("a busy model reads as busy rather than idle",
+              LocalModelSetup.residencyRow(model("m", gb: 1, status: "loading"), nameWidth: 0, now: clock)
+                .contains("busy"))
+
+        // --- the TTL, which is idle-based and can be absent ---
+        check("a model LM Studio holds with no TTL says so rather than rendering blank",
+              LocalModelSetup.residencyTTL(model("m", gb: 1, ttl: nil), now: clock) == "no timeout")
+        check("the countdown runs from the model's LAST USE, not from its load",
+              LocalModelSetup.residencyTTL(model("m", gb: 1, ttl: 600, usedSecondsAgo: 540), now: clock)
+                == "unloads in 1 min")
+        check("a TTL that has already run out reads as due rather than as a negative countdown",
+              LocalModelSetup.residencyTTL(model("m", gb: 1, ttl: 600, usedSecondsAgo: 900), now: clock)
+                == "due to unload")
+        check("less than a minute left is said in words rather than rounded to zero",
+              LocalModelSetup.residencyTTL(model("m", gb: 1, ttl: 600, usedSecondsAgo: 570), now: clock)
+                == "unloads in under a minute")
+        // A machine whose clock moved (timezone change, NTP step) must not be able to promise more time
+        // than LM Studio ever granted.
+        check("a last-use time in the future cannot promise more than the TTL itself",
+              LocalModelSetup.residencyTTL(model("m", gb: 1, ttl: 600, usedSecondsAgo: -9_000),
+                                           now: clock) == "unloads in 10 min")
+
+        // --- the list ---
+        let set = LocalModelSetup.Residency.models([
+            model("small-model", gb: 0.63, ttl: nil),
+            model("huge-model", gb: 17.19, usedSecondsAgo: 120),
+        ])
+        let rendered = LocalModelSetup.residencyList(set, now: clock)
+        check("the list puts the biggest model first, because that is the one holding the memory",
+              rendered.hasPrefix("huge-model"), rendered.replacingOccurrences(of: "\n", with: " / "))
+        // Two names of different lengths, two sizes of different lengths: the "GB" has to land on the same
+        // column in both rows, or the padding is decorative rather than structural.
+        let rows = rendered.split(separator: "\n")
+        let gbColumns = Set(rows.map { row -> Int in
+            guard let found = row.range(of: "GB") else { return -1 }
+            return row.distance(from: row.startIndex, to: found.lowerBound)
+        })
+        check("the list pads the names so the size column lines up across rows",
+              rows.count == 2 && gbColumns.count == 1 && !gbColumns.contains(-1),
+              rendered.replacingOccurrences(of: "\n", with: " / "))
+
+        // Three different facts, three different sentences. An app that could not ask LM Studio has not
+        // learned that nothing is loaded.
+        check("a machine with nothing loaded says so",
+              LocalModelSetup.residencyList(.models([]), now: clock)
+                .hasPrefix("Nothing is loaded right now."))
+        check("a reading that has not landed yet reads as pending, not as an empty machine",
+              LocalModelSetup.residencyList(.pending, now: clock) == "Reading LM Studio...")
+        check("an unreadable LM Studio says it could not ask, not that nothing is loaded",
+              LocalModelSetup.residencyList(.unavailable, now: clock).contains("could not ask LM Studio")
+                && !LocalModelSetup.residencyList(.unavailable, now: clock).contains("Nothing is loaded"))
+        check("only a non-empty resident set is rendered as columns",
+              LocalModelSetup.residencyIsTabular(set)
+                && !LocalModelSetup.residencyIsTabular(.models([]))
+                && !LocalModelSetup.residencyIsTabular(.pending)
+                && !LocalModelSetup.residencyIsTabular(.unavailable))
+
+        // --- Unload all ---
+        check("Unload all is offered only when there is something resident to unload",
+              LocalModelSetup.canUnloadAll(set)
+                && !LocalModelSetup.canUnloadAll(.models([]))
+                && !LocalModelSetup.canUnloadAll(.pending)
+                && !LocalModelSetup.canUnloadAll(.unavailable))
+        // It has to reach `lms unload --all` rather than a loop over this app's own models: the budget
+        // counts every wired byte on the Mac, so freeing only ViddyDictate's models would leave the very
+        // number the button exists to fix unchanged.
+        check("Unload all unloads everything LM Studio holds, not just this app's own models",
+              ModelResidency.unloadAllArguments == ["unload", "--all"],
+              ModelResidency.unloadAllArguments.joined(separator: " "))
+
+        // --- the summary ---
+        // The numerator is whole-machine WIRED memory, which is exactly what `ModelManager` compares
+        // against the budget. Anything else and this line could read comfortable while a load was refused.
+        check("the in-use summary reads in the established GB-of-GB style",
+              LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts,
+                                               wiredBytes: 21_400_000_000)
+                == "21.4 GB of 33.9 GB budget in use",
+              LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts,
+                                               wiredBytes: 21_400_000_000) ?? "nil")
+        check("the summary's denominator is the slider position, not a constant",
+              LocalModelSetup.residencySummary(position: 0, facts: fixtureFacts, wiredBytes: 21_400_000_000)
+                != LocalModelSetup.residencySummary(position: 100, facts: fixtureFacts,
+                                                    wiredBytes: 21_400_000_000))
+        check("the summary's denominator is the SAME budget the capacity policy compares against",
+              LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts, wiredBytes: 1)
+                == "0.0 GB of "
+                    + SystemMemory.formatGB(SystemMemory.budgetBytes(forSliderPosition: 54) ?? 0)
+                    + " budget in use")
+        check("a fractional handle rounds the summary the way it rounds the gigabyte line",
+              LocalModelSetup.residencySummary(position: 53.6, facts: fixtureFacts, wiredBytes: 1)
+                == LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts, wiredBytes: 1))
+        check("the summary is omitted rather than stated against a ceiling nobody could read",
+              LocalModelSetup.residencySummary(position: 54, facts: noFacts,
+                                               wiredBytes: 21_400_000_000) == nil)
+        check("the summary is omitted rather than guessed when the wired total is unreadable",
+              LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts, wiredBytes: nil) == nil)
+
+        // Over budget is a READING, not a refusal: a resident model allocates nothing new, which is why
+        // the policy correctly let Ben's dictation run at 07:40 on 2026-08-27. The section says it; it
+        // does not act on it.
+        check("a budget set below what is already in use reads as over",
+              LocalModelSetup.residencyOverBudget(position: 0, facts: fixtureFacts,
+                                                  wiredBytes: 21_400_000_000))
+        check("a budget with room to spare does not read as over",
+              !LocalModelSetup.residencyOverBudget(position: 100, facts: fixtureFacts,
+                                                   wiredBytes: 21_400_000_000))
+        check("a machine whose ceiling or wired total is unreadable claims nothing about being over",
+              !LocalModelSetup.residencyOverBudget(position: 0, facts: noFacts,
+                                                   wiredBytes: 21_400_000_000)
+                && !LocalModelSetup.residencyOverBudget(position: 0, facts: fixtureFacts,
+                                                        wiredBytes: nil))
     }
 
     // MARK: - reading LM Studio's settings
@@ -278,7 +424,16 @@ enum LocalModelSetupSelfTest {
                           LocalModelSetup.timerHint, LocalModelSetup.jitTitle,
                           LocalModelSetup.budgetLine(position: 54, facts: fixtureFacts),
                           LocalModelSetup.budgetLine(position: 54, facts: noFacts),
-                          LocalModelSetup.reservedLine(facts: fixtureFacts) ?? ""]
+                          LocalModelSetup.reservedLine(facts: fixtureFacts) ?? "",
+                          LocalModelSetup.residencyTitle, LocalModelSetup.unloadAllTitle,
+                          LocalModelSetup.unloadingTitle, LocalModelSetup.residencyNote,
+                          LocalModelSetup.residencyList(.pending, now: clock),
+                          LocalModelSetup.residencyList(.unavailable, now: clock),
+                          LocalModelSetup.residencyList(.models([]), now: clock),
+                          LocalModelSetup.residencyList(
+                            .models([model("m", gb: 1), model("n", gb: 2, ttl: nil)]), now: clock),
+                          LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts,
+                                                           wiredBytes: 21_400_000_000) ?? ""]
             + states.map(LocalModelSetup.jitStatusText)
             + states.map(LocalModelSetup.jitSummary)
             + states.compactMap(LocalModelSetup.jitRemedy)

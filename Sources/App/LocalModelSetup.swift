@@ -81,6 +81,154 @@ enum LocalModelSetup {
                    max(Settings.modelMemoryBudgetSliderRange.lowerBound, position.rounded()))
     }
 
+    // MARK: - The live residency readout (LOCKED DECISION 2)
+
+    /// What is loaded right now and how much room is left, directly under the knob that governs it.
+    ///
+    /// This exists because the budget was correct and silent. On 2026-08-27 the slider was dragged from 54
+    /// to 0 with a 17.19 GB model already resident; `ModelManager.prepareCapacity` returns `.alreadyResident`
+    /// before any budget check, so the next dictation ran with no refusal and nothing on screen ever said
+    /// why. The policy is right - a resident model allocates nothing new, and the kernel-panic risk is at
+    /// wire time - so what this section adds is the telling, not a change of mind.
+    ///
+    /// LOCKED DECISION 2 puts it here rather than on a tab of its own: the only control it explains is the
+    /// budget slider, and separating the number from the knob is what made the budget feel like a lie.
+
+    static let residencyTitle = "Loaded now"
+
+    static let unloadAllTitle = "Unload all"
+
+    /// The button's own title while the unload is running. `lms unload --all` is a subprocess and is not
+    /// instant, so the control says what it is doing rather than sitting dead for a second.
+    static let unloadingTitle = "Unloading..."
+
+    /// The sentence the whole item is for. Ben lost a hand test to its absence: the app knew a lowered
+    /// budget would not evict anything and told nobody.
+    static let residencyNote =
+        "Lowering the budget applies to the next model load. Models already in memory keep running."
+
+    /// What the app currently knows about LM Studio's resident set.
+    ///
+    /// `pending` and `unavailable` are separate cases for the same reason `JITStatus` separates `unknown`
+    /// from the rest: a reading that has not arrived yet, a reading that could not be taken, and a machine
+    /// with nothing loaded are three different facts, and only one of them means "nothing is loaded".
+    enum Residency: Equatable {
+        /// No reading has come back yet. `lms ps` costs about a sixth of a second and is run off the main
+        /// thread, so this state is always on screen for a moment rather than being a theoretical one.
+        case pending
+        /// `lms ps` could not be read: LM Studio is not installed, its server is not up, or the CLI failed.
+        case unavailable
+        case models([ModelResidency.ResidentModel])
+    }
+
+    /// The resident set as one block, biggest first.
+    ///
+    /// Sorted by footprint rather than by whatever order the CLI happened to print, because the question
+    /// this readout answers is "what is holding my memory" and the answer should be on the first line.
+    /// Ties break on the identifier so the order cannot flicker between two refreshes of an unchanged set.
+    static func residencyList(_ reading: Residency, now: Date) -> String {
+        switch reading {
+        case .pending:
+            return "Reading LM Studio..."
+        case .unavailable:
+            return "ViddyDictate could not ask LM Studio what is loaded, so it cannot say what is holding "
+                + "memory right now. The budget still applies to every load it attempts."
+        case .models(let models):
+            guard !models.isEmpty else {
+                return "Nothing is loaded right now. The budget applies to the next model load."
+            }
+            let sorted = models.sorted {
+                $0.sizeBytes == $1.sizeBytes ? $0.identifier < $1.identifier : $0.sizeBytes > $1.sizeBytes
+            }
+            let nameWidth = sorted.map(\.identifier.count).max() ?? 0
+            return sorted.map { residencyRow($0, nameWidth: nameWidth, now: now) }
+                .joined(separator: "\n")
+        }
+    }
+
+    /// One model: what it is called, what it costs, whether it is working, and whether anything will take
+    /// it away on its own.
+    ///
+    /// Padded to the widest name in THIS set rather than to a constant, so the columns line up without a
+    /// cap that could truncate the one part of the row that identifies the model. A set holding an unusually
+    /// long identifier wraps instead of hiding it.
+    static func residencyRow(_ model: ModelResidency.ResidentModel, nameWidth: Int,
+                             now: Date) -> String {
+        let name = model.identifier.padding(toLength: max(nameWidth, model.identifier.count),
+                                            withPad: " ", startingAt: 0)
+        let size = SystemMemory.formatGB(model.sizeBytes)
+        let padded = String(repeating: " ", count: max(0, 8 - size.count)) + size
+        let state = (model.isIdle ? "idle" : "busy").padding(toLength: 4, withPad: " ", startingAt: 0)
+        return "\(name)  \(padded)  \(state)  \(residencyTTL(model, now: now))"
+    }
+
+    /// How long LM Studio will keep this model without further use.
+    ///
+    /// LM Studio's TTL is idle-based, so it is measured from the model's last use rather than from its
+    /// load. A model with no TTL is the state that pinned 28.7 GB for an hour on 2026-08-21 and is said
+    /// plainly rather than left blank.
+    static func residencyTTL(_ model: ModelResidency.ResidentModel, now: Date) -> String {
+        guard let ttl = model.ttlSeconds else { return "no timeout" }
+        let lastUsed = Date(timeIntervalSince1970: Double(model.lastUsedTime) / 1000.0)
+        // Clamped to the TTL itself: a `lastUsedTime` in the future (clock skew, or a machine that just
+        // moved timezone) must not be able to promise more time than LM Studio ever granted.
+        let remaining = min(Double(ttl), Double(ttl) - now.timeIntervalSince(lastUsed))
+        if remaining <= 0 { return "due to unload" }
+        if remaining < 60 { return "unloads in under a minute" }
+        return "unloads in \(Int((remaining / 60).rounded(.up))) min"
+    }
+
+    /// What the machine is currently spending against the budget the slider just set.
+    ///
+    /// The numerator is whole-machine WIRED memory, not the sum of the rows above, and that is deliberate:
+    /// it is the exact quantity `ModelManager` compares against the budget before a cold load, so this line
+    /// and a capacity refusal can never disagree. The card's own purpose copy states the rule this rests on
+    /// - the budget counts everything on the Mac holding wired memory, not just ViddyDictate's models - so
+    /// a total larger than the listed models is the truth rather than an arithmetic error.
+    ///
+    /// Omitted rather than guessed when the kernel ceiling is unreadable, exactly like `reservedLine`:
+    /// `budgetLine` has already said there is no budget, and a lone "in use" figure against nothing would
+    /// be the second half of a sentence whose first half does not exist.
+    static func residencySummary(position: Double, facts: MemoryFacts, wiredBytes: UInt64?) -> String? {
+        guard facts.isAvailable,
+              let wired = wiredBytes,
+              let budget = SystemMemory.budgetBytes(forSliderPosition: normalized(position))
+        else { return nil }
+        return "\(SystemMemory.formatGB(wired)) of \(SystemMemory.formatGB(budget)) budget in use"
+    }
+
+    /// Whether what is in use has already passed the budget the handle is set to.
+    ///
+    /// This is exactly the state Ben was in at 07:40 on 2026-08-27 and could not see: a 17.19 GB model
+    /// resident, the slider dragged down to 14.1 GB, and nothing anywhere saying the machine was over.
+    /// It is NOT a refusal and NOT an error - a resident model allocates nothing new, which is why the
+    /// policy correctly let the dictation run - so this earns the card's existing "needs attention"
+    /// orange, the same one the LM Studio row and the unreadable-ceiling line already use, and nothing
+    /// stronger.
+    static func residencyOverBudget(position: Double, facts: MemoryFacts, wiredBytes: UInt64?) -> Bool {
+        guard facts.isAvailable,
+              let wired = wiredBytes,
+              let budget = SystemMemory.budgetBytes(forSliderPosition: normalized(position))
+        else { return false }
+        return wired > budget
+    }
+
+    /// Whether the block is COLUMNS or a SENTENCE. The rows are padded to a common width and only line up
+    /// in a monospaced face; the pending, unreadable and empty states are ordinary prose and read as a code
+    /// dump in one. The view asks this rather than deciding for itself, so the padding and the font that
+    /// makes the padding mean anything stay one decision.
+    static func residencyIsTabular(_ reading: Residency) -> Bool {
+        guard case .models(let models) = reading else { return false }
+        return !models.isEmpty
+    }
+
+    /// Whether Unload all has anything to act on. A button that cannot change the machine is disabled
+    /// rather than hidden, so the section does not change shape between two refreshes.
+    static func canUnloadAll(_ reading: Residency) -> Bool {
+        guard case .models(let models) = reading else { return false }
+        return !models.isEmpty
+    }
+
     // MARK: - The idle-unload timer
 
     static let timerTitle = "Unload idle models after"
@@ -236,6 +384,11 @@ enum LocalModelSetup {
         case budgetLevel
         case budgetLine
         case reservedLine
+        case residencyTitle
+        case residencyList
+        case residencySummary
+        case residencyNote
+        case unloadAll
         case timerTitle
         case timerControl
         case timerHint
@@ -249,7 +402,7 @@ enum LocalModelSetup {
         /// clipped; controls are fixed-height by design and would red that check for no reason.
         var isControl: Bool {
             switch self {
-            case .budgetSlider, .timerControl: return true
+            case .budgetSlider, .timerControl, .unloadAll: return true
             default: return false
             }
         }
