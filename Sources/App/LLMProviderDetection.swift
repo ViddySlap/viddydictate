@@ -37,10 +37,15 @@ enum LLMProviderDetection {
     struct Presence: Equatable {
         let installed: Bool
         let state: LLMProviderAvailabilityState
+        /// Local-only installed model catalog. nil means discovery could not answer; an empty list is a
+        /// measured zero-model state. Cloud presences leave this nil.
+        let availableLocalModels: [LMStudioModelOption]?
 
-        init(installed: Bool, state: LLMProviderAvailabilityState) {
+        init(installed: Bool, state: LLMProviderAvailabilityState,
+             availableLocalModels: [LMStudioModelOption]? = nil) {
             self.installed = installed
             self.state = state
+            self.availableLocalModels = availableLocalModels
         }
     }
 
@@ -215,10 +220,61 @@ enum LLMProviderDetection {
 
     /// Local is the optional post-V1 power path (locked decision 1), so "not installed" is an ordinary
     /// state rather than a defect. The two reasons are distinct because they have distinct remedies.
-    static func localState(lmsInstalled: Bool, serverResponding: Bool) -> LLMProviderAvailabilityState {
+    /// A running LM Studio server without a registered LLM is not a runnable Local provider.
+    static func localState(lmsInstalled: Bool,
+                           serverResponding: Bool)
+        -> LLMProviderAvailabilityState {
         if !lmsInstalled { return .unavailable("LM Studio is not installed") }
         if !serverResponding { return .unavailable("LM Studio is not running") }
         return .available
+    }
+
+    /// Catalog-aware Local state. A nil catalog means the measuring apparatus did not answer; an empty
+    /// catalog is a measured zero-model state. Both are unavailable for text execution.
+    static func localState(lmsInstalled: Bool,
+                           serverResponding: Bool,
+                           availableModels: [LMStudioModelOption]?)
+        -> LLMProviderAvailabilityState {
+        if !lmsInstalled { return .unavailable("LM Studio is not installed") }
+        if !serverResponding { return .unavailable("LM Studio is not running") }
+        if let availableModels, availableModels.isEmpty {
+            return .unavailable("no local models installed")
+        }
+        if availableModels == nil {
+            return .unavailable("local model catalog unavailable")
+        }
+        return .available
+    }
+
+    /// Measure Local once, retaining the catalog beside the provider state so execution can distinguish a
+    /// missing preferred model from a machine with no local model at all. Synchronous and process-spawning;
+    /// callers must invoke it off the main thread.
+    struct LocalObservation: Equatable {
+        let presence: Presence
+        let models: [LMStudioModelOption]?
+    }
+
+    static func observeLocal() -> LocalObservation {
+        let lmsInstalled = ModelResidency.isInstalled
+        guard lmsInstalled else {
+            let state = localState(lmsInstalled: false, serverResponding: false)
+            return LocalObservation(
+                presence: Presence(installed: false, state: state), models: nil)
+        }
+
+        let serverResponding = ModelResidency.serverResponds()
+        guard serverResponding else {
+            let state = localState(lmsInstalled: true, serverResponding: false)
+            return LocalObservation(
+                presence: Presence(installed: true, state: state), models: nil)
+        }
+
+        let models = ModelResidency.availableModels()
+        let state = localState(
+            lmsInstalled: true, serverResponding: true, availableModels: models)
+        return LocalObservation(
+            presence: Presence(installed: true, state: state, availableLocalModels: models),
+            models: models)
     }
 
     // MARK: - Live measurement
@@ -241,14 +297,11 @@ enum LLMProviderDetection {
             ? availability(from: codexState())
             : .unavailable("the codex CLI is not installed")
 
-        let lmsInstalled = ModelResidency.isInstalled
+        let local = observeLocal()
         return [
             .claude: claude,
             .codex: Presence(installed: codexInstalled, state: codexAvailability),
-            .local: Presence(
-                installed: lmsInstalled,
-                state: localState(lmsInstalled: lmsInstalled,
-                                  serverResponding: lmsInstalled && ModelResidency.serverResponds())),
+            .local: local.presence,
         ]
     }
 
