@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Entitlements for the Python runtime bundled inside ViddyDictate.app, and for nothing else.
+	     The app's own entitlements are in ViddyDictate.entitlements and deliberately stay minimal;
+	     these three are hardened-runtime EXCEPTIONS that the interpreter genuinely cannot run
+	     without, and each one is here because a specific thing the app does would otherwise fail at
+	     a stranger's first dictation rather than at build time.
+
+	     None of them needs a provisioning profile: all three are accepted on a Developer ID
+	     signature, which is what release.sh produces. -->
+
+	<!-- The venvs the app builds are full of third-party compiled extensions (mlx, numpy, numba,
+	     llvmlite, scipy, tiktoken). Their .so files are signed by whoever built the wheel, not by
+	     this app's Team ID, and library validation refuses to load a library signed by anyone else.
+	     Without this, `import mlx_whisper` fails inside the daemon on every notarized build.
+	     Measured: with it, a pip-installed compiled wheel loads under the hardened runtime. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- numba/llvmlite compile at runtime, and the findings note measured both of them loaded during
+	     a real transcribe. llvmlite's MCJIT maps writable-executable memory the old way, so the
+	     MAP_JIT entitlement alone is not enough; both are needed to cover both code paths. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

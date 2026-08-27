@@ -153,6 +153,13 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .secretStoreSelftest: .init(tier: .deterministic) { _ in
         SecretStoreSelfTest.run() ? 0 : 1
     },
+    // Offline and home-free: it inspects a built app bundle and runs the interpreter inside it. The
+    // venv it creates goes to TMPDIR, and `venv` installs pip from the stdlib's own wheel rather than
+    // from the network. Takes `--app <bundle>` so the same checks can be pointed at the DEPLOYED app
+    // in ~/Applications, which is the placement that actually has to work.
+    .bundledPythonSelftest: .init(tier: .deterministic) { arguments in
+        BundledPythonSelfTest.run(arguments: arguments) ? 0 : 1
+    },
     // Pure: every fixture is a synthetic observation, so no daemon, provider, keychain, or TCC grant is
     // consulted and the gate reports on the policy rather than on this machine's setup.
     .preflightSelftest: .init(tier: .deterministic) { _ in

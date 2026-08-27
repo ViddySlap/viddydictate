@@ -5,3 +5,6 @@ node_modules/
 
 # manual pre-git source backups (superseded by git history)
 Sources-backup-*/
+
+# vendored, hash-pinned build inputs (the bundled Python runtime); re-fetched by build.sh
+vendor/
