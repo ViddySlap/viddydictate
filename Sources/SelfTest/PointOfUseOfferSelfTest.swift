@@ -368,7 +368,8 @@ enum PointOfUseOfferSelfTest {
         return InstallerEngine(
             paths: InstallerPaths(python: URL(fileURLWithPath: "/nonexistent/python"),
                                   applicationSupport: scratch,
-                                  modelCache: scratch.appendingPathComponent("cache")),
+                                  modelCache: scratch.appendingPathComponent("cache"),
+                                  packageCache: scratch.appendingPathComponent("package-cache")),
             lmStudio: performer,
             sleep: { _ in })
     }
