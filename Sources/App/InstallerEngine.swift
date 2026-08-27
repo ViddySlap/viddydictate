@@ -106,6 +106,13 @@ enum BootstrapInstallPlan {
         packages: [ddgs])
 
     static let mandatoryCore = [sttDaemon, webSearch]
+
+    /// The user-facing entry point for installing a component. Keep this beside the descriptors so
+    /// remedies name the same component the in-app installer presents, rather than drifting into a
+    /// repository-only command that a DMG user cannot run.
+    static func installPrompt(for component: InstallerComponentDescriptor) -> String {
+        "open Settings > Setup and choose Install now for \(component.title)"
+    }
 }
 
 /// A command result that keeps the vendor's real stderr/stdout available to the row that failed.

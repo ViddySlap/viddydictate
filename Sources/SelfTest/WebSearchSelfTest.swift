@@ -166,6 +166,12 @@ enum WebSearchSelfTest {
         check("tool has a query property", props?["query"] != nil)
         check("tool requires query", required == ["query"])
 
+        check("missing local backend points to the in-app installer",
+              SearchClient.missingLocalBackendMessage
+                == "search backend not installed ("
+                    + BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch) + ")"
+                && !SearchClient.missingLocalBackendMessage.contains("install-websearch-helper.sh"))
+
         // Loop 2-search cap logic.
         check("cap: 0 searches does not force finalize", !SearchClient.shouldForceFinalize(nSearches: 0, maxSearches: 2))
         check("cap: 1 search does not force finalize", !SearchClient.shouldForceFinalize(nSearches: 1, maxSearches: 2))
@@ -229,7 +235,7 @@ enum WebSearchSelfTest {
     private static func runOutputTests() -> (Bool, [OutputResult]) {
         print("--- end-to-end output test (real SearchClient local pipeline -> LM Studio + DuckDuckGo) ---")
         guard WebSearchBackend.isInstalled else {
-            print("  search backend NOT installed — run ./install-websearch-helper.sh. Cannot run E2E.")
+            print("  search backend NOT installed — open Settings > Setup and choose Install now for Web search. Cannot run E2E.")
             return (false, [])
         }
         var results: [OutputResult] = []

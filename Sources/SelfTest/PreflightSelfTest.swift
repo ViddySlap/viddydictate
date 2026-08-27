@@ -211,8 +211,8 @@ enum PreflightSelfTest {
         // "Actionable" means it names a command, a place, or an explicit thing to do - not that it is
         // merely non-empty. Waiting for a load and re-running the check is a concrete instruction; a
         // remedy that matches nothing here is prose, and prose does not fix a machine.
-        let actionTokens = ["./install-daemon.sh", "launchctl kickstart", "System Settings",
-                            "./install-websearch-helper.sh", "claude auth login", "Connect",
+        let actionTokens = ["Settings > Setup", "launchctl kickstart", "System Settings",
+                            "claude auth login", "Connect",
                             "./scripts/set-gemini-key.sh", "LM Studio", "approve",
                             "run this check again"]
         check("every remedy names a command, a place, or an explicit thing to do",
@@ -222,9 +222,11 @@ enum PreflightSelfTest {
     private static func checkDaemonMessages(_ check: SelfTestReporter) {
         print("--- the daemon's three failures send the user to three different places ---")
         let notInstalled = finding(.sttDaemon, observation(daemon: .notInstalled))
-        check("a daemon that was never installed is told to install it",
-              notInstalled.remedy?.contains("./install-daemon.sh") == true
+        check("a daemon that was never installed is sent to the in-app installer",
+              notInstalled.remedy == BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.sttDaemon)
                 && notInstalled.summary.contains(DaemonClient.agentLabel))
+        check("the daemon remedy does not cite a repository script",
+              notInstalled.remedy?.contains(".sh") != true)
 
         let unreachable = finding(.sttDaemon, observation(daemon: .unreachable("Could not connect.")))
         check("an installed daemon that is not answering is told to kickstart it, with its real domain",
@@ -236,7 +238,7 @@ enum PreflightSelfTest {
         let loading = finding(.sttDaemon, observation(daemon: .loading("loading")))
         check("a daemon that is still loading is told to wait, not to reinstall",
               loading.remedy?.contains("wait") == true
-                && loading.remedy?.contains("./install-daemon.sh") != true)
+                && loading.remedy?.contains(".sh") != true)
 
         check("every daemon failure says recording still works and only transcription is lost",
               [notInstalled, unreachable, loading].allSatisfy {
@@ -351,8 +353,10 @@ enum PreflightSelfTest {
         print("--- the two web-search halves fail independently ---")
         var noHelper = healthy; noHelper.webSearchHelperInstalled = false
         let helper = finding(.webSearchHelper, noHelper)
-        check("a missing helper is told to run the installer",
-              helper.remedy?.contains("./install-websearch-helper.sh") == true)
+        check("a missing helper is sent to the in-app installer",
+              helper.remedy == BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch))
+        check("the helper remedy does not cite a repository script",
+              helper.remedy?.contains(".sh") != true)
         check("a missing helper says Option+L is lost and Option+G is not",
               helper.reducedFunction?.contains("Option+L") == true
                 && helper.reducedFunction?.contains("Option+G), is unaffected") == true)
