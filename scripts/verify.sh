@@ -424,6 +424,9 @@ tier_deterministic() {
         run_gate deterministic "headless installer engine and retry/hash policy selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --installer-engine-selftest || true
+        run_gate deterministic "point-of-use install offer and zero-local cloud-button selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --point-of-use-offer-selftest || true
         run_gate deterministic "bootstrap lifecycle and degraded-state selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --bootstrap-state-selftest || true
@@ -695,6 +698,7 @@ tier_gui() {
         run_gui_gate "Setup tab preflight offscreen render" "${gui_env[@]}" "$TEST_APP" --setup-render "$SCRATCH/setup-render" || true
         run_gui_gate "provider onboarding offscreen render" "${gui_env[@]}" "$TEST_APP" --provider-onboarding-render "$SCRATCH/provider-onboarding-render" || true
         run_gui_gate "first-run component picker offscreen render" "${gui_env[@]}" "$TEST_APP" --component-picker-render "$SCRATCH/component-picker-render" || true
+        run_gui_gate "point-of-use install offer offscreen render" "${gui_env[@]}" "$TEST_APP" --point-of-use-render "$SCRATCH/point-of-use-render" || true
         run_gui_gate "Models & Power settings UI probe" "${gui_env[@]}" "$TEST_APP" --models-power-ui-probe || true
         run_gui_gate "Models & Power prompt-override offscreen render" "${gui_env[@]}" "$TEST_APP" --models-power-render "$SCRATCH/models-power-render" || true
         run_gui_gate "consolidated Hotkeys tab offscreen render" "${gui_env[@]}" "$TEST_APP" --hotkeys-tab-render "$SCRATCH/hotkeys-tab-render" || true

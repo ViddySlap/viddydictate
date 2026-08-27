@@ -183,10 +183,15 @@ enum ProviderOnboardingSelfTest {
                   absent.opening.contains("is not installed")
                     && absent.step.lowercased().contains("install ")
                     && !absent.step.lowercased().contains("signs in with"))
-            // W4: re-running the check IS the transition between the two states, and no second mechanism is
-            // built for it, so the absent row has to say that is what makes the button appear.
+            // W4: re-measuring IS the transition between the two states, and no second mechanism is built
+            // for it, so the absent row has to say that is what makes the button appear. B17 changed WHO
+            // does the re-measuring - the panel now does it on regaining focus - so the row must promise
+            // that rather than send the user to a button.
             check("\(provider.rawValue): not installed says re-checking is what turns it into the other state",
-                  absent.step.contains("check again") && absent.step.contains("appears once it is here"))
+                  absent.step.contains("re-checks by itself")
+                    && absent.step.contains("appears once it is here"))
+            check("\(provider.rawValue): not installed no longer tells the user to check again by hand",
+                  !absent.step.contains("then check again"))
         }
         check("the two providers do not read as each other",
               step(.claude, .signedOut).opening != step(.codex, .signedOut).opening

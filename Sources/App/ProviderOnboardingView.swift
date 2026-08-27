@@ -136,6 +136,57 @@ final class ProviderOnboardingView: NSView {
             y += field.frame.height + 3
         }
 
+        // B17: the not-installed row carries the one thing that closes the gap - a sentence, a command the
+        // user can copy in one click, and the vendor's own docs. It sits ABOVE the (absent) action button
+        // because for this row it IS the action.
+        if let guidance = step.installGuidance {
+            let summary = wrapped(guidance.summary, x: textX, y: y, width: textW, size: 10.5,
+                                  weight: .regular, color: .labelColor)
+            summary.identifier = NSUserInterfaceItemIdentifier(
+                ProviderOnboarding.identifier(.installSummary, step.provider))
+            summary.toolTip = guidance.summary
+            card.addSubview(summary)
+            y += summary.frame.height + 5
+
+            if let command = guidance.command {
+                let field = NSTextField(labelWithString: command)
+                field.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
+                field.textColor = .labelColor
+                field.isSelectable = true
+                field.lineBreakMode = .byTruncatingTail
+                field.identifier = NSUserInterfaceItemIdentifier(
+                    ProviderOnboarding.identifier(.installCommand, step.provider))
+                field.toolTip = command
+                let copyW: CGFloat = 60
+                field.frame = NSRect(x: textX, y: y + 3, width: max(40, textW - copyW - 8), height: 18)
+                card.addSubview(field)
+
+                let copy = NSButton(title: "Copy", target: self, action: #selector(copyClicked(_:)))
+                copy.bezelStyle = .rounded
+                copy.font = .systemFont(ofSize: 11)
+                copy.identifier = NSUserInterfaceItemIdentifier(
+                    ProviderOnboarding.identifier(.installCommand, step.provider) + "|copy")
+                copy.frame = NSRect(x: textX + max(40, textW - copyW - 8) + 8, y: y, width: copyW,
+                                    height: 24)
+                card.addSubview(copy)
+                y += 28
+            }
+
+            for link in guidance.links {
+                let button = NSButton(title: link.title, target: self,
+                                      action: #selector(documentationClicked(_:)))
+                button.bezelStyle = .inline
+                button.font = .systemFont(ofSize: 11)
+                button.identifier = NSUserInterfaceItemIdentifier(
+                    ProviderOnboarding.identifier(.installDocs, step.provider))
+                button.toolTip = link.url.absoluteString
+                button.frame = NSRect(origin: NSPoint(x: textX, y: y),
+                                      size: NSSize(width: min(textW, 220), height: 22))
+                card.addSubview(button)
+                y = button.frame.maxY + 4
+            }
+        }
+
         if step.action != nil, let title = step.actionTitle {
             let button = NSButton(title: title, target: self, action: #selector(actionClicked(_:)))
             button.bezelStyle = .rounded
@@ -153,6 +204,33 @@ final class ProviderOnboardingView: NSView {
 
         card.frame.size.height = y + 9
         return originY + card.frame.height + 8
+    }
+
+    /// Put the command on the pasteboard. Copying a string ViddyDictate itself authored is not a dictation
+    /// landing, so it does not go through the delivery machinery and never touches the user's snapshot
+    /// restore path.
+    @objc private func copyClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue,
+              let provider = LLMProvider.allCases.first(where: {
+                  raw == ProviderOnboarding.identifier(.installCommand, $0) + "|copy"
+              }),
+              let command = ProviderOnboarding.installGuidance(for: provider)?.command else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(command, forType: .string)
+        sender.title = "Copied"
+        Log.write("onboarding: copied the \(provider.rawValue) install command")
+    }
+
+    @objc private func documentationClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue,
+              let provider = LLMProvider.allCases.first(where: {
+                  raw == ProviderOnboarding.identifier(.installDocs, $0)
+              }),
+              let url = ProviderOnboarding.installGuidance(for: provider)?.links.first(where: {
+                  $0.title == sender.title
+              })?.url else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// The provider comes from the clicked control's own identifier, so one selector serves every row and the

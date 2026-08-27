@@ -72,6 +72,16 @@ final class HotkeyMonitor {
     var onLevelCommit: (() -> Void)?
     var onLevelCancel: (() -> Void)?
 
+    /// The point-of-use install offer (B13/B14). Same keyboard-over-the-tap pattern as the two pickers
+    /// above, and for a sharper reason: this panel appears immediately after a raw transcript has been
+    /// pasted into the user's document, so taking key focus would leave their next keystroke going
+    /// somewhere they did not expect.
+    var installOfferActive = false
+    var onInstallOfferLeft: (() -> Void)?
+    var onInstallOfferRight: (() -> Void)?
+    var onInstallOfferCommit: (() -> Void)?
+    var onInstallOfferCancel: (() -> Void)?
+
     /// One-shot clipboard restore for the click-away delivery fallback. When a dictation can't reach a
     /// field it is parked on the clipboard; while `pasteRestoreArmed` the tap OBSERVES (never swallows)
     /// the next Cmd+V and reports it, so the controller can snap the clipboard back to its pre-dictation
@@ -325,6 +335,16 @@ final class HotkeyMonitor {
                 onRight: onLevelRight,
                 onCommit: onLevelCommit,
                 onCancel: onLevelCancel
+            ),
+            // Last in priority. The offer only ever appears after a flow has finished and released the
+            // stage, so it cannot be up at the same time as either picker; declaring it last means that
+            // if the invariant were ever broken, the in-flight transform's pick still wins.
+            ModalPicker(
+                active: installOfferActive,
+                onLeft: onInstallOfferLeft,
+                onRight: onInstallOfferRight,
+                onCommit: onInstallOfferCommit,
+                onCancel: onInstallOfferCancel
             ),
         ]
 

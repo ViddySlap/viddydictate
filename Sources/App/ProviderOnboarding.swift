@@ -98,6 +98,10 @@ struct ProviderOnboardingStep: Equatable {
     /// place and read as one section. An unsupported logged-in method and an absent CLI get none: neither
     /// would do anything, and a button that changes nothing is worse than no button.
     let action: ProviderOnboardingAction?
+    /// B17: present ONLY for `notInstalled`. An absent CLI still cannot be signed in to, so it gains no
+    /// action - what it gains is the one thing that closes the gap, in front of the user, instead of the
+    /// bare instruction to go find it.
+    let installGuidance: ProviderOnboarding.InstallGuidance?
 
     /// Whether this row carries a button at all. Derived from the situation through
     /// `ProviderOnboarding.offersAction`; nothing stores it.
@@ -112,6 +116,54 @@ struct ProviderOnboardingStep: Equatable {
 }
 
 enum ProviderOnboarding {
+
+    /// B17's guided panel, for the one state that used to end in "then check again": the CLI is simply
+    /// not on this Mac.
+    ///
+    /// This is the deliberate, narrow Terminal exception, and it is a different animal from the one the
+    /// no-Terminal rule exists to prevent. The original sin is the app's OWN core feature failing with an
+    /// error citing a repository the user does not have. This is an optional third-party tool the user
+    /// actively chose from a menu, with the exact command in front of them and the app watching for them
+    /// to finish. Do not widen it: nothing else in ViddyDictate may send a user to a shell.
+    struct InstallGuidance: Equatable {
+        struct Link: Equatable {
+            let title: String
+            let url: URL
+        }
+
+        /// The one line to copy and run, or nil where the product is not installed by a command. Codex is
+        /// the nil case ON PURPOSE: ViddyDictate runs the `codex` that ships INSIDE ChatGPT.app, so a
+        /// plausible-looking npm line would install a different binary than the one it would then use.
+        let command: String?
+        /// One sentence naming what the command or link actually gets them.
+        let summary: String
+        let links: [Link]
+    }
+
+    /// Verified 2026-08-27: the npm package resolves on the public registry, and the docs URL answers 200.
+    /// If either rots, this is the single place to correct it.
+    static func installGuidance(for provider: LLMProvider) -> InstallGuidance? {
+        switch provider {
+        case .claude:
+            return InstallGuidance(
+                command: "npm install -g @anthropic-ai/claude-code",
+                summary: "Claude Code installs with one command. Run it in Terminal, then run claude once "
+                    + "to sign in - ViddyDictate notices by itself.",
+                links: [InstallGuidance.Link(
+                    title: "Claude Code setup docs",
+                    url: URL(string: "https://docs.claude.com/en/docs/claude-code/setup")!)])
+        case .codex:
+            return InstallGuidance(
+                command: nil,
+                summary: "ViddyDictate uses the codex command inside ChatGPT.app, so installing that app "
+                    + "is the whole step. Once it is in /Applications, the connect button appears here.",
+                links: [InstallGuidance.Link(
+                    title: "Codex docs",
+                    url: URL(string: "https://developers.openai.com/codex/")!)])
+        case .local:
+            return nil
+        }
+    }
 
     // MARK: - Which providers onboarding covers
 
@@ -209,7 +261,8 @@ enum ProviderOnboarding {
             step: nextStep(situation, provider),
             detail: detail(presence),
             // W4, D3 and D4, in one place: which situations act, decided once above.
-            action: offersAction(situation) ? .connect(provider) : nil)
+            action: offersAction(situation) ? .connect(provider) : nil,
+            installGuidance: situation == .notInstalled ? installGuidance(for: provider) : nil)
     }
 
     private static func opening(_ situation: ProviderOnboardingSituation, _ name: String) -> String {
@@ -259,11 +312,17 @@ enum ProviderOnboarding {
             return "Review the reported Codex connection state or use Claude instead."
         case (.unavailable, .local):
             return "Review the reported LM Studio state."
+        // B17 removed the "then check again" from both of these. The panel now re-measures whenever it
+        // regains focus, so the user coming back from Terminal or the Applications folder sees the row
+        // change by itself. Leaving the old sentence would send them looking for a button that is no
+        // longer the mechanism - the same defect D5 fixed on the signed-out row.
         case (.notInstalled, .claude):
-            return "Install Claude Code, then check again - the sign-in button appears once it is here."
+            return "Install Claude Code and the sign-in button appears once it is here - ViddyDictate "
+                + "re-checks by itself whenever you come back to this window."
         case (.notInstalled, .codex):
-            return "Install ChatGPT.app, which ships the codex command ViddyDictate signs in through, "
-                + "then check again - the connect button appears once it is here."
+            return "Install ChatGPT.app, which ships the codex command ViddyDictate signs in through. "
+                + "The connect button appears once it is here - ViddyDictate re-checks by itself "
+                + "whenever you come back to this window."
         case (.notInstalled, .local):
             return "Install LM Studio, then check again."
         }
@@ -294,6 +353,14 @@ enum ProviderOnboarding {
 
         func step(_ provider: LLMProvider) -> ProviderOnboardingStep? {
             steps.first { $0.provider == provider }
+        }
+
+        /// The same plan narrowed to one provider, for the window opened by a "Set up Claude" or
+        /// "Set up Codex" button. It is a FILTER, not a second measurement: the user asked about one
+        /// provider, so showing them the other one's row would be answering a question they did not ask.
+        func focused(on provider: LLMProvider) -> Plan {
+            Plan(steps: steps.filter { $0.provider == provider },
+                 otherProviderCanRun: otherProviderCanRun)
         }
 
         /// Content-safe one-line record for the app log: which provider is in which state, and nothing else.
@@ -379,6 +446,10 @@ enum ProviderOnboarding {
         case step
         case detail
         case action
+        /// B17's three: the sentence, the copy-able command, and the docs link.
+        case installSummary
+        case installCommand
+        case installDocs
     }
 
     static let headlineIdentifier = "onboarding-headline"

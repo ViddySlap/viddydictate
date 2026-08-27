@@ -53,28 +53,54 @@ struct InstallerModelArtifact: Equatable {
     }
 }
 
+/// One bounded LM Studio operation a descriptor performs, expressed as DATA for the same reason the
+/// package list is: adding a model row is one entry in a list, not a second installer.
+///
+/// The mechanism itself stays in `LMStudioInstaller`, which owns the DMG verification and the `lms`
+/// delegation and deliberately owns no queue, retry policy, or progress. This enum is the only thing
+/// that binds the two together, so there is one engine driving every row rather than a python queue
+/// beside an LM Studio queue.
+enum InstallerLMStudioStep: Equatable {
+    /// Acquire, verify, and install LM Studio itself. Never overwrites an existing install.
+    case application
+    /// Delegate acquisition of one exact model id to LM Studio's own catalog-aware CLI.
+    case model(String)
+}
+
 /// One independent row in the first-run bootstrap queue.
 ///
 /// The engine has one execution shape for every descriptor: create/reuse the venv, install the
-/// descriptor's package list, then download and verify its model artifacts. An empty list means the
-/// step is not part of that row; it does not create a hidden hardcoded special case.
+/// descriptor's package list, download and verify its model artifacts, then run its LM Studio steps.
+/// An empty list (or a nil venv path) means the step is not part of that row; it does not create a
+/// hidden hardcoded special case.
 struct InstallerComponentDescriptor: Equatable {
     let id: String
     let title: String
     let detail: String
-    let virtualEnvironmentRelativePath: String
+    /// nil for a row that owns no python environment at all - an LM Studio row. Required whenever the
+    /// row installs packages or downloads model artifacts, because both run through the venv.
+    let virtualEnvironmentRelativePath: String?
     let packages: [InstallerPackage]
     let modelArtifacts: [InstallerModelArtifact]
+    let lmStudioSteps: [InstallerLMStudioStep]
+    /// What this row costs to download, MEASURED, or nil when nobody has measured it. Never a guess:
+    /// O1 is explicit that an estimate must not ship as a user-facing byte count, so a nil here makes
+    /// every surface omit the number rather than invent one.
+    let downloadBytes: Int64?
 
     init(id: String, title: String, detail: String = "",
-         virtualEnvironmentRelativePath: String,
-         packages: [InstallerPackage], modelArtifacts: [InstallerModelArtifact] = []) {
+         virtualEnvironmentRelativePath: String? = nil,
+         packages: [InstallerPackage] = [], modelArtifacts: [InstallerModelArtifact] = [],
+         lmStudioSteps: [InstallerLMStudioStep] = [],
+         downloadBytes: Int64? = nil) {
         self.id = id
         self.title = title
         self.detail = detail
         self.virtualEnvironmentRelativePath = virtualEnvironmentRelativePath
         self.packages = packages
         self.modelArtifacts = modelArtifacts
+        self.lmStudioSteps = lmStudioSteps
+        self.downloadBytes = downloadBytes
     }
 }
 
@@ -106,6 +132,42 @@ enum BootstrapInstallPlan {
         packages: [ddgs])
 
     static let mandatoryCore = [sttDaemon, webSearch]
+
+    /// LM Studio itself. It has no venv and no pip line: its whole execution is the DMG mechanism L3
+    /// exposed. Its download size is deliberately nil - the DMG's byte count is not known until its URL
+    /// is resolved at run time (O4), and quoting a guess is exactly what O1 forbids.
+    static let lmStudio = InstallerComponentDescriptor(
+        id: "lm-studio",
+        title: "LM Studio",
+        detail: "The local model runner the optional modes use",
+        lmStudioSteps: [.application])
+
+    /// The two optional local models, by the exact identifiers O3 resolved. `downloadBytes` is MEASURED,
+    /// not estimated: `lms ls --llm --json` reported these `sizeBytes` for the two model keys on
+    /// 2026-08-27, which is the same measurement O1 asks for and the same figure the component picker
+    /// row carries. If the picker ships its own copy of these numbers, collapse the two into this
+    /// descriptor rather than keeping a second owner - the spec's "~4 GB" for gemma was out by 1.7x, and
+    /// the way that gets found again is two places disagreeing.
+    static let gemma = InstallerComponentDescriptor(
+        id: "model:\(LMStudioInstaller.gemmaModelID)",
+        title: LMStudioInstaller.gemmaModelID,
+        detail: "The local model email mode runs on",
+        lmStudioSteps: [.model(LMStudioInstaller.gemmaModelID)],
+        downloadBytes: 6_861_935_454)
+
+    static let qwen = InstallerComponentDescriptor(
+        id: "model:\(LMStudioInstaller.qwenModelID)",
+        title: LMStudioInstaller.qwenModelID,
+        detail: "The local model cleanup and prompt prep prefer",
+        lmStudioSteps: [.model(LMStudioInstaller.qwenModelID)],
+        downloadBytes: 17_190_793_452)
+
+    /// LM Studio first: a model row cannot run before the CLI that fetches it exists.
+    static let optionalLocalModels = [lmStudio, gemma, qwen]
+
+    /// Every component the app can install, in one list. The durable bootstrap state is keyed off this,
+    /// so a surface that installs an optional row records it in the same file the core rows use.
+    static let allComponents = mandatoryCore + optionalLocalModels
 
     /// The user-facing entry point for installing a component. Keep this beside the descriptors so
     /// remedies name the same component the in-app installer presents, rather than drifting into a
@@ -213,6 +275,44 @@ final class FoundationInstallerProcessRunner: InstallerProcessRunning {
     }
 }
 
+/// The engine's seam onto the LM Studio mechanism. Production drives `LMStudioInstaller`; the
+/// deterministic rail injects a double, so no gate ever attaches a disk image, writes to `/Applications`,
+/// or spends a gigabyte of Ben's bandwidth to prove the queue works.
+protocol InstallerLMStudioPerforming {
+    /// Acquire, verify, and install LM Studio. An existing install is reported, never replaced.
+    func installApplication() throws
+    func installModel(_ modelID: String) throws
+}
+
+/// The production adapter. It adds no policy of its own: resolution, verification, the no-overwrite
+/// guard, and the `lms` delegation all stay in `LMStudioInstaller`, and retry/backoff stays in the
+/// engine that calls this.
+struct LiveInstallerLMStudioPerformer: InstallerLMStudioPerforming {
+    let downloadDirectory: URL
+    private let fileManager: FileManager
+
+    init(downloadDirectory: URL, fileManager: FileManager = .default) {
+        self.downloadDirectory = downloadDirectory
+        self.fileManager = fileManager
+    }
+
+    func installApplication() throws {
+        // A per-attempt filename, because `downloadDMG` refuses to write over anything that already
+        // exists - including a half-finished file from a previous attempt. The disk image is scratch:
+        // it is removed whether the install succeeds or fails.
+        let dmg = downloadDirectory
+            .appendingPathComponent("LMStudio-\(UUID().uuidString).dmg", isDirectory: false)
+        defer { try? fileManager.removeItem(at: dmg) }
+        let source = try LMStudioInstaller.resolveOfficialDMG()
+        _ = try LMStudioInstaller.downloadDMG(source: source, to: dmg)
+        _ = try LMStudioInstaller.installDMG(at: dmg, expectedBytes: source.expectedBytes)
+    }
+
+    func installModel(_ modelID: String) throws {
+        _ = try LMStudioInstaller.installModel(modelID)
+    }
+}
+
 enum InstallerFailureCategory: Equatable {
     case invalidPlan
     case process
@@ -309,16 +409,22 @@ final class InstallerEngine {
 
     private let paths: InstallerPaths
     private let runner: InstallerProcessRunning
+    private let lmStudio: InstallerLMStudioPerforming
     private let sleep: Sleep
     private let fileManager: FileManager
     private let environment: [String: String]
 
     init(paths: InstallerPaths = .live,
          runner: InstallerProcessRunning = FoundationInstallerProcessRunner(),
+         lmStudio: InstallerLMStudioPerforming? = nil,
          sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
          fileManager: FileManager = .default) {
         self.paths = paths
         self.runner = runner
+        self.lmStudio = lmStudio ?? LiveInstallerLMStudioPerformer(
+            downloadDirectory: paths.applicationSupport
+                .appendingPathComponent("downloads", isDirectory: true),
+            fileManager: fileManager)
         self.sleep = sleep
         self.fileManager = fileManager
         var environment = ProcessInfo.processInfo.environment
@@ -337,57 +443,63 @@ final class InstallerEngine {
             try validate(descriptor)
             try fileManager.createDirectory(at: paths.applicationSupport,
                                              withIntermediateDirectories: true)
-            let venv = paths.applicationSupport
-                .appendingPathComponent(descriptor.virtualEnvironmentRelativePath, isDirectory: true)
-            let venvPython = venv.appendingPathComponent("bin/python", isDirectory: false)
-            if !fileManager.isExecutableFile(atPath: venvPython.path) {
-                let outcome = try runWithRetry(
-                    executable: paths.python,
-                    arguments: ["-m", "venv", venv.path])
-                attempts += outcome.attempts
-                guard outcome.result.succeeded else {
-                    throw failure(for: outcome.result)
-                }
-                guard fileManager.isExecutableFile(atPath: venvPython.path) else {
-                    throw InstallerFailure(
-                        category: .process,
-                        message: "python -m venv completed, but the environment has no executable at "
-                            + venvPython.path)
-                }
-            }
-
-            if !descriptor.packages.isEmpty {
-                let outcome = try runWithRetry(
-                    executable: venvPython,
-                    arguments: Self.pipArguments(for: descriptor.packages))
-                attempts += outcome.attempts
-                guard outcome.result.succeeded else {
-                    throw failure(for: outcome.result)
-                }
-            }
-
-            for artifact in descriptor.modelArtifacts {
-                try fileManager.createDirectory(at: paths.modelCache,
-                                                 withIntermediateDirectories: true)
-                let outcome = try runWithRetry(
-                    executable: venvPython,
-                    arguments: Self.modelDownloadArguments(for: artifact,
-                                                           cacheDirectory: paths.modelCache))
-                attempts += outcome.attempts
-                guard outcome.result.succeeded else {
-                    throw failure(for: outcome.result)
-                }
-                if artifact.verifyPublishedHashes {
-                    guard Self.snapshotPath(from: outcome.result.stdout, inside: paths.modelCache) != nil,
-                          outcome.result.stdout.contains("VIDDYDICTATE_HASHES=") else {
+            if let venvPath = descriptor.virtualEnvironmentRelativePath {
+                let venv = paths.applicationSupport
+                    .appendingPathComponent(venvPath, isDirectory: true)
+                let venvPython = venv.appendingPathComponent("bin/python", isDirectory: false)
+                if !fileManager.isExecutableFile(atPath: venvPython.path) {
+                    let outcome = try runWithRetry(
+                        executable: paths.python,
+                        arguments: ["-m", "venv", venv.path])
+                    attempts += outcome.attempts
+                    guard outcome.result.succeeded else {
+                        throw failure(for: outcome.result)
+                    }
+                    guard fileManager.isExecutableFile(atPath: venvPython.path) else {
                         throw InstallerFailure(
-                            category: .checksumMismatch,
-                            message: "huggingface_hub did not return its published SHA-256 manifest")
+                            category: .process,
+                            message: "python -m venv completed, but the environment has no executable at "
+                                + venvPython.path)
                     }
                 }
-                try verifyExpectedFiles(artifact.expectedFiles,
-                                        snapshotRoot: Self.snapshotPath(from: outcome.result.stdout,
-                                                                        inside: paths.modelCache))
+
+                if !descriptor.packages.isEmpty {
+                    let outcome = try runWithRetry(
+                        executable: venvPython,
+                        arguments: Self.pipArguments(for: descriptor.packages))
+                    attempts += outcome.attempts
+                    guard outcome.result.succeeded else {
+                        throw failure(for: outcome.result)
+                    }
+                }
+
+                for artifact in descriptor.modelArtifacts {
+                    try fileManager.createDirectory(at: paths.modelCache,
+                                                     withIntermediateDirectories: true)
+                    let outcome = try runWithRetry(
+                        executable: venvPython,
+                        arguments: Self.modelDownloadArguments(for: artifact,
+                                                               cacheDirectory: paths.modelCache))
+                    attempts += outcome.attempts
+                    guard outcome.result.succeeded else {
+                        throw failure(for: outcome.result)
+                    }
+                    if artifact.verifyPublishedHashes {
+                        guard Self.snapshotPath(from: outcome.result.stdout, inside: paths.modelCache) != nil,
+                              outcome.result.stdout.contains("VIDDYDICTATE_HASHES=") else {
+                            throw InstallerFailure(
+                                category: .checksumMismatch,
+                                message: "huggingface_hub did not return its published SHA-256 manifest")
+                        }
+                    }
+                    try verifyExpectedFiles(artifact.expectedFiles,
+                                            snapshotRoot: Self.snapshotPath(from: outcome.result.stdout,
+                                                                            inside: paths.modelCache))
+                }
+            }
+
+            for step in descriptor.lmStudioSteps {
+                attempts += try runLMStudioWithRetry(step)
             }
 
             return InstallerComponentResult(componentID: descriptor.id, title: descriptor.title,
@@ -486,11 +598,88 @@ final class InstallerEngine {
         }
     }
 
+    /// The LM Studio twin of `runWithRetry`. Same policy object, same three attempts, same backoff:
+    /// O5's rule is a property of the engine, not of the transport, so an `lms get` that died on a dead
+    /// socket is retried and a 404 is not.
+    private func runLMStudioWithRetry(_ step: InstallerLMStudioStep) throws -> Int {
+        var attempt = 1
+        while true {
+            if attempt > 1 { sleep(InstallerRetryPolicy.delayBeforeAttempt(attempt)) }
+            do {
+                switch step {
+                case .application: try lmStudio.installApplication()
+                case .model(let modelID): try lmStudio.installModel(modelID)
+                }
+                return attempt
+            } catch {
+                let failure = Self.failure(forLMStudio: error)
+                if !InstallerRetryPolicy.shouldRetry(failure, attempt: attempt) {
+                    throw AttemptedFailure(failure: failure, attempts: attempt)
+                }
+                attempt += 1
+            }
+        }
+    }
+
+    /// Classify an LM Studio failure through the SAME rule the pip and model-download rows use.
+    ///
+    /// A CLI failure is handed to `failure(for:)` as a command result rather than pattern-matched here,
+    /// because "was this transport or a 4xx" is one question with one answer in this file. What this
+    /// function decides is only the part `LMStudioInstaller` already answered with a typed case: a
+    /// refused download endpoint, an unverifiable disk image, or a signature that did not check out is a
+    /// TRUST failure, and repeating it three times cannot turn it into a pass.
+    static func failure(forLMStudio error: Error) -> InstallerFailure {
+        guard let installerError = error as? LMStudioInstaller.InstallerError else {
+            return InstallerFailure(category: .process, message: String(describing: error))
+        }
+        let message = installerError.description
+        switch installerError {
+        case .network:
+            return InstallerFailure(category: .transport, message: message)
+        case .httpStatus(let status):
+            if (500...599).contains(status) {
+                return InstallerFailure(category: .server(status), message: message)
+            }
+            return InstallerFailure(category: .client(status), message: message)
+        case .invalidPublishedResponse, .invalidDMG, .invalidMountedImage, .invalidApplication:
+            return InstallerFailure(category: .checksumMismatch, message: message)
+        case .invalidModelIdentifier:
+            return InstallerFailure(category: .invalidPlan, message: message)
+        case .command(_, let result):
+            let classified = InstallerCommandResult(
+                exitCode: result.status, stdout: result.stdout, stderr: result.stderr)
+            return InstallerFailure(category: Self.category(forOutput: classified.output),
+                                    message: message)
+        case .commandLaunch, .destinationExists, .operation:
+            return InstallerFailure(category: .process, message: message)
+        }
+    }
+
     private func validate(_ descriptor: InstallerComponentDescriptor) throws {
         guard !descriptor.id.isEmpty, !descriptor.title.isEmpty,
-              Self.isSafeRelativePath(descriptor.virtualEnvironmentRelativePath) else {
+              descriptor.virtualEnvironmentRelativePath.map(Self.isSafeRelativePath) ?? true else {
             throw InstallerFailure(category: .invalidPlan,
                                    message: "installer component has an invalid identity or venv path")
+        }
+        // Packages and model artifacts both execute through the venv, so a row that asks for either
+        // without one is a plan bug, not a runtime failure to discover halfway through a download.
+        guard descriptor.virtualEnvironmentRelativePath != nil
+                || (descriptor.packages.isEmpty && descriptor.modelArtifacts.isEmpty) else {
+            throw InstallerFailure(
+                category: .invalidPlan,
+                message: "installer component has packages or model artifacts but no environment")
+        }
+        // A row that does nothing would report itself installed. That is the one outcome a first-run
+        // queue must never produce, because every surface downstream reads "installed" as usable.
+        guard descriptor.virtualEnvironmentRelativePath != nil || !descriptor.lmStudioSteps.isEmpty else {
+            throw InstallerFailure(category: .invalidPlan,
+                                   message: "installer component has no work to do")
+        }
+        for step in descriptor.lmStudioSteps {
+            if case .model(let modelID) = step, modelID.isEmpty {
+                throw InstallerFailure(category: .invalidPlan,
+                                       message: "installer component has an empty model identifier")
+            }
         }
         let packageNames = descriptor.packages.map(\.name)
         guard descriptor.packages.allSatisfy({ !$0.name.isEmpty && !$0.pipRequirement.contains("\n") }),
@@ -532,21 +721,23 @@ final class InstallerEngine {
 
     private func failure(for result: InstallerCommandResult) -> InstallerFailure {
         let output = result.output
-        if output.contains("VIDDYDICTATE_HASH_MISMATCH") {
-            return InstallerFailure(category: .checksumMismatch, message: output)
-        }
-        if let status = Self.httpStatus(in: output) {
-            if (500...599).contains(status) {
-                return InstallerFailure(category: .server(status), message: output)
-            }
-            if (400...499).contains(status) {
-                return InstallerFailure(category: .client(status), message: output)
-            }
-        }
-        if result.timedOut || Self.looksLikeTransportFailure(output) {
+        if result.timedOut {
             return InstallerFailure(category: .transport, message: output)
         }
-        return InstallerFailure(category: .process, message: output)
+        return InstallerFailure(category: Self.category(forOutput: output), message: output)
+    }
+
+    /// O5's rule, in one place: a hash mismatch is a trust failure, an HTTP status decides itself, a
+    /// recognizable transport symptom retries, and everything else is an ordinary non-retryable process
+    /// failure. Shared by the pip/model rows and the LM Studio CLI rows so the two cannot drift.
+    static func category(forOutput output: String) -> InstallerFailureCategory {
+        if output.contains("VIDDYDICTATE_HASH_MISMATCH") { return .checksumMismatch }
+        if let status = httpStatus(in: output) {
+            if (500...599).contains(status) { return .server(status) }
+            if (400...499).contains(status) { return .client(status) }
+        }
+        if looksLikeTransportFailure(output) { return .transport }
+        return .process
     }
 
     private static func httpStatus(in text: String) -> Int? {
