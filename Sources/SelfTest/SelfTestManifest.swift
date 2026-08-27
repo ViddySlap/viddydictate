@@ -166,6 +166,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .installerEngineSelftest: .init(tier: .deterministic) { _ in
         InstallerEngineSelfTest.run() ? 0 : 1
     },
+    .bootstrapStateSelftest: .init(tier: .deterministic) { _ in
+        BootstrapStateSelfTest.run() ? 0 : 1
+    },
     // Pure: every fixture is a synthetic observation, so no daemon, provider, keychain, or TCC grant is
     // consulted and the gate reports on the policy rather than on this machine's setup.
     .preflightSelftest: .init(tier: .deterministic) { _ in

@@ -39,6 +39,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case secretStoreSelftest = "--secret-store-selftest"
     case bundledPythonSelftest = "--bundled-python-selftest"
     case installerEngineSelftest = "--installer-engine-selftest"
+    case bootstrapStateSelftest = "--bootstrap-state-selftest"
     case preflightSelftest = "--preflight-selftest"
     case preflightSurfaceSelftest = "--preflight-surface-selftest"
     case providerOnboardingSelftest = "--provider-onboarding-selftest"

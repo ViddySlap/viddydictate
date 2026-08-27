@@ -421,6 +421,9 @@ tier_deterministic() {
         run_gate deterministic "headless installer engine and retry/hash policy selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --installer-engine-selftest || true
+        run_gate deterministic "bootstrap lifecycle and degraded-state selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --bootstrap-state-selftest || true
         run_gate deterministic "first-run preflight message and never-block selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --preflight-selftest || true
