@@ -357,6 +357,17 @@ final class OneShotRegistry {
         busy = false
         pending = nil
         defer { context.note(context.readyHint) }
+        // B13: the landing below is unchanged - the text still lands, or the selection is still left
+        // alone - and then the thing that was missing explains itself in place and offers to install
+        // itself. Only `.unavailable` qualifies: a timeout or a rejected output means a model DID run.
+        defer {
+            // Keyed on the mode's own `routeID`, so there is ONE mapping from route to feature rather
+            // than a second table here that could disagree with it. The search routes and custom modes
+            // map to nothing: neither has a local component this panel could install.
+            if case .unavailable = result, let feature = PointOfUseFeature.forRoute(entry.mode.routeID) {
+                PointOfUseOfferPresenter.shared.presentOffer(for: feature)
+            }
+        }
         switch entry.mode.landing {
         case .inPlace(let wireUndo):
             context.landInPlaceTransform(result, input: input, mode: entry.mode.historyMode,

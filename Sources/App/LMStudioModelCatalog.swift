@@ -118,25 +118,29 @@ enum LMStudioModelCatalog {
             }
     }
 
+    /// The app's one byte formatter for a download or an on-disk model, in the decimal units `lms ls`
+    /// itself uses. It is shared rather than re-derived per surface: the picker label and the
+    /// point-of-use install offer quote the same model and must not disagree about how big it is.
+    static func decimalSize(_ sizeBytes: Int64) -> String {
+        let bytes = Double(sizeBytes)
+        if sizeBytes < 1_000 {
+            return "\(sizeBytes) B"
+        } else if sizeBytes < 1_000_000 {
+            return String(format: "%.2f KB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000)
+        } else if sizeBytes < 1_000_000_000 {
+            return String(format: "%.2f MB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000_000)
+        } else if sizeBytes < 1_000_000_000_000 {
+            return String(format: "%.2f GB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000_000_000)
+        }
+        return String(format: "%.2f TB", locale: Locale(identifier: "en_US_POSIX"),
+                      bytes / 1_000_000_000_000)
+    }
+
     /// Matches the decimal units used by `lms ls`. Invalid size metadata is ignored so the label
     /// remains byte-for-byte today's presentation and the row stays selectable.
     private static func pickerLabel(_ label: String, sizeBytes: Int64?) -> String {
         guard let sizeBytes, sizeBytes >= 0 else { return label }
-
-        let bytes = Double(sizeBytes)
-        let size: String
-        if sizeBytes < 1_000 {
-            size = "\(sizeBytes) B"
-        } else if sizeBytes < 1_000_000 {
-            size = String(format: "%.2f KB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000)
-        } else if sizeBytes < 1_000_000_000 {
-            size = String(format: "%.2f MB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000_000)
-        } else if sizeBytes < 1_000_000_000_000 {
-            size = String(format: "%.2f GB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000_000_000)
-        } else {
-            size = String(format: "%.2f TB", locale: Locale(identifier: "en_US_POSIX"), bytes / 1_000_000_000_000)
-        }
-        return "\(label) (\(size))"
+        return "\(label) (\(decimalSize(sizeBytes)))"
     }
 
     /// A missing, malformed, or empty live catalog must never empty or disable the Local picker.

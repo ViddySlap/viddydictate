@@ -185,9 +185,14 @@ final class BootstrapStateStore {
     private let writer: Writer
     private var state: BootstrapSnapshot
 
+    /// Defaults to EVERY shipped component, not just the mandatory core. The store rebuilds its row list
+    /// from the descriptors it is handed, so two stores opened with different lists would take turns
+    /// deleting each other's rows out of the same file. The mandatory SET is unchanged - it comes from
+    /// `BootstrapSnapshot.mandatoryCoreIDs` - so what an optional row gains here is progress bookkeeping,
+    /// never a vote on whether setup is complete.
     init(url: URL = AppPaths.applicationSupportDirectory()
             .appendingPathComponent(BootstrapStateStore.fileName, isDirectory: false),
-         descriptors: [InstallerComponentDescriptor] = BootstrapInstallPlan.mandatoryCore,
+         descriptors: [InstallerComponentDescriptor] = BootstrapInstallPlan.allComponents,
          writer: @escaping Writer = BootstrapStateStore.atomicWriter) {
         self.url = url
         self.writer = writer
@@ -277,6 +282,15 @@ final class BootstrapInstallCoordinator {
     typealias SnapshotHandler = (BootstrapSnapshot) -> Void
     typealias Completion = ([InstallerComponentResult]) -> Void
 
+    /// One queue for the whole app. The setup surface and the point-of-use install panel are two entry
+    /// points into ONE installer, which is what B13 requires; two coordinators would be two queues that
+    /// could run the same descriptor at the same time against the same venv.
+    static let shared = BootstrapInstallCoordinator()
+
+    /// Posted after every durable state change, so more than one surface can watch the same queue. The
+    /// `onChange` closure remains for the single owner that constructed a coordinator itself.
+    static let didChange = Notification.Name("ViddyDictate.bootstrapInstallDidChange")
+
     private let engine: InstallerEngine
     private let store: BootstrapStateStore
     private let worker = DispatchQueue(label: AppIdentity.queueLabel("bootstrap-install"),
@@ -362,5 +376,6 @@ final class BootstrapInstallCoordinator {
             lock.withLock { setupPresented = false }
         }
         onChange?(current)
+        NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 }

@@ -508,6 +508,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenu()
         setupEditMenu()
         _ = controller   // Force the lazy required-callback graph before any controller-dependent setup.
+        // B17: "Set up Claude" / "Set up Codex" at the point of use open the SAME guided window the first
+        // run and the Setup tab drive, narrowed to the provider the user asked about. Wired here rather
+        // than inside `onboardingWC`'s own initialiser, which would only ever run if something else had
+        // already opened that window - and on the machine this matters for, nothing has.
+        PointOfUseOfferPresenter.shared.onOpenProviderSetup = { [weak self] provider in
+            self?.onboardingWC.show(focus: provider)
+        }
         // Re-bless the stable signing identity if a macOS update wiped trust settings (background,
         // never main-thread). Keeps future builds from ever ad-hoc-signing and voiding TCC grants.
         SigningTrustGuard.healIfNeeded()

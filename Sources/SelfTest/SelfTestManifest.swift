@@ -110,6 +110,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .networkPathSelftest: .init(tier: .deterministic) { _ in
         NetworkPathSelfTest.run() ? 0 : 1
     },
+    // Pure: synthetic provider presences, a synthetic bootstrap snapshot, and an injected LM Studio
+    // performer. It never attaches a disk image, writes to /Applications, runs `lms`, or downloads a byte.
+    .pointOfUseOfferSelftest: .init(tier: .deterministic) { _ in
+        PointOfUseOfferSelfTest.run() ? 0 : 1
+    },
     .lmStudioInstallerSelftest: .init(tier: .deterministic) { _ in
         LMStudioInstallerSelfTest.run() ? 0 : 1
     },
@@ -207,6 +212,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         guard let i = arguments.firstIndex(of: "--setup-render") else { return 1 }
         let out = arguments.count > i + 1 ? arguments[i + 1] : "build/setup-render"
         return SetupRender.run(outDir: out) ? 0 : 1
+    },
+    .pointOfUseRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--point-of-use-render") else { return 1 }
+        let out = arguments.count > i + 1 ? arguments[i + 1] : "build/point-of-use-render"
+        return PointOfUseOfferRender.run(outDir: out) ? 0 : 1
     },
     .providerOnboardingRender: .init(tier: .gui) { arguments in
         guard let i = arguments.firstIndex(of: "--provider-onboarding-render") else { return 1 }

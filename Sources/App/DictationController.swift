@@ -200,6 +200,14 @@ final class DictationController {
         hotkey.onLevelRight = { [weak self] in self?.oneShot.pickerMoveRight() }
         hotkey.onLevelCommit = { [weak self] in self?.oneShot.commitLevelPick() }
         hotkey.onLevelCancel = { [weak self] in self?.oneShot.cancelLevelPick() }
+        // B13/B14's panel, on the same keyboard-over-the-tap contract as the two pickers above.
+        let offers = PointOfUseOfferPresenter.shared
+        hotkey.onInstallOfferLeft = { offers.moveLeft() }
+        hotkey.onInstallOfferRight = { offers.moveRight() }
+        hotkey.onInstallOfferCommit = { offers.commit() }
+        hotkey.onInstallOfferCancel = { offers.dismiss() }
+        offers.onActiveChanged = { [weak self] active in self?.hotkey.installOfferActive = active }
+        offers.onNotice = { [weak self] message in self?.hud.toast(message) }
         hotkey.onPasteWhileArmed = { [weak self] in self?.restoreParkedClipboard() }
         hotkey.onCancelTake = { [weak self] in self?.cancelTake() }   // BT5: Esc aborts the in-progress take
         let liveHotkeyMap = HotkeyMap.load()
@@ -1191,6 +1199,12 @@ final class DictationController {
                     Log.write("cleanup fallback classification=\(failure.logToken) → raw")
                     self.hud.toast(
                         "⚠️ \(presentation.userMessage) — pasted raw. Retry under Models on the Hotkeys tab.")
+                    // B13: the raw transcript still lands exactly as before, and THEN the missing piece
+                    // explains itself and offers to install itself. Only for `.unavailable`: a timeout or
+                    // a bad output means the model ran, and there is nothing to install.
+                    if case .unavailable = result {
+                        PointOfUseOfferPresenter.shared.presentOffer(for: .cleanup)
+                    }
                     self.finalize(
                         delivered: raw, raw: raw, cleaned: nil, mode: .raw,
                         historyID: takeID, keepHUD: true, lateRecovery: recovered
