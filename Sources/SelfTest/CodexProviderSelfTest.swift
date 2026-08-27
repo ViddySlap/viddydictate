@@ -257,13 +257,20 @@ enum CodexProviderSelfTest {
         {"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"clean\\"}"}}
         {"type":"turn.completed"}
         """
-        let tool = valid.replacingOccurrences(
+        let bookkeeping = valid.replacingOccurrences(
+            of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
+            with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"todo_list\"}}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}")
+        let noAgent = valid.replacingOccurrences(
             of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
             with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"todo_list\"}}")
         let partial = valid.replacingOccurrences(of: "{\"type\":\"turn.completed\"}", with: "")
-        check("tool/bookkeeping JSONL is rejected",
+        check("non-agent item JSONL is ignored when one agent result completes",
+              success(CodexProviderRuntime.classifyCapturedForTest(
+                status: 0, stdout: Data(bookkeeping.utf8))) == "clean")
+        check("ignored non-agent items cannot replace the required agent result",
               isRejected(CodexProviderRuntime.classifyCapturedForTest(
-                status: 0, stdout: Data(tool.utf8))))
+                status: 0, stdout: Data(noAgent.utf8))))
         check("partial JSONL is rejected",
               isRejected(CodexProviderRuntime.classifyCapturedForTest(
                 status: 0, stdout: Data(partial.utf8))))
@@ -323,6 +330,11 @@ enum CodexProviderSelfTest {
     private static func isRejected(_ outcome: CodexRuntimeOutcome) -> Bool {
         if case .rejected = outcome { return true }
         return false
+    }
+
+    private static func success(_ outcome: CodexRuntimeOutcome) -> String? {
+        if case .success(let success) = outcome { return success.result }
+        return nil
     }
 
     private static func isUnavailable(_ outcome: CodexRuntimeOutcome) -> Bool {

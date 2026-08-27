@@ -373,7 +373,7 @@ private func throwsContractError(_ body: () throws -> Void) -> Bool {
     do { try body(); return false } catch { return true }
 }
 
-private func auditJSONLRejectionContract() throws -> Int {
+private func auditJSONLContract() throws -> (ignoredItems: Int, rejectedStructures: Int) {
     let valid = """
     {"type":"thread.started","thread_id":"synthetic"}
     {"type":"turn.started"}
@@ -384,32 +384,44 @@ private func auditJSONLRejectionContract() throws -> Int {
         throw AuditError.failed("strict JSONL positive control failed")
     }
 
-    var rejected = 0
+    var ignoredItems = 0
     for itemType in ["todo_list", "reasoning", "command_execution", "file_change", "mcp_tool_call",
                      "web_search", "browser_action", "computer_use", "plugin_call", "unknown"] {
-        let bad = valid.replacingOccurrences(
+        let advisory = valid.replacingOccurrences(
             of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
-            with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"\(itemType)\"}}"
+            with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"\(itemType)\"}}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}"
         )
-        guard throwsContractError({ _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8)) }) else {
-            throw AuditError.failed("strict JSONL accepted a tool/bookkeeping fixture")
+        guard try CodexTransformOutputContract.parseAcceptedResult(Data(advisory.utf8)) == "clean" else {
+            throw AuditError.failed("strict JSONL rejected a non-agent item fixture")
         }
-        rejected += 1
+        ignoredItems += 1
     }
+    let noAgent = valid.replacingOccurrences(
+        of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
+        with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\"}}")
     let structuralFailures = [
         valid.replacingOccurrences(of: "{\"type\":\"turn.completed\"}", with: ""),
         valid + "\n{\"type\":\"turn.completed\"}",
         valid.replacingOccurrences(of: "{\\\"result\\\":\\\"clean\\\"}",
                                    with: "{\\\"result\\\":\\\"clean\\\",\\\"extra\\\":true}"),
+        noAgent,
+        valid.replacingOccurrences(
+            of: "{\"type\":\"turn.completed\"}",
+            with: "{\"type\":\"turn.failed\",\"error\":{\"message\":\"synthetic\"}}"),
+        valid.replacingOccurrences(
+            of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
+            with: "{\"type\":\"error\",\"message\":\"synthetic\"}"),
         "not-json\n",
     ]
+    var rejectedStructures = 0
     for bad in structuralFailures {
         guard throwsContractError({ _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8)) }) else {
             throw AuditError.failed("strict JSONL accepted a malformed/ambiguous fixture")
         }
-        rejected += 1
+        rejectedStructures += 1
     }
-    return rejected
+    return (ignoredItems, rejectedStructures)
 }
 
 private func isAuthMaterial(_ url: URL) -> Bool {
@@ -4730,7 +4742,7 @@ private func runAuditLocked(
         throw AuditError.failed("external filesystem/network/timeout containment gate was not exact PASS")
     }
 
-    let rejectedFixtures = try auditJSONLRejectionContract()
+    let jsonlFixtures = try auditJSONLContract()
 
     let runID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
     let userMarker = "SYNTHETIC_STDIN_ONLY_\(runID)"
@@ -4786,7 +4798,7 @@ private func runAuditLocked(
     print("[codex-s2][PASS] inventory \(CodexIsolationFoundation.featureInventoryPinStatus) skills=receipt-bound mcp=empty plugins=empty")
     print("[codex-s2][PASS] prompt roles=\(roles.joined(separator: ",")) route_marker=developer-only user_marker=user-only")
     print("[codex-s2][PASS] containment filesystem=denied_outside network=allowlist_only timeout_group_kill=pass synthetic_descendant=none")
-    print("[codex-s2][PASS] jsonl rejected_fixtures=\(rejectedFixtures) \(summary)")
+    print("[codex-s2][PASS] jsonl ignored_non_agent_items=\(jsonlFixtures.ignoredItems) rejected_structural_fixtures=\(jsonlFixtures.rejectedStructures) \(summary)")
     print("[codex-s2][PASS] argv samples=\(transform.process.argvSamples) max_group_members=\(transform.process.maximumGroupMembers) prompt_on_argv=false descendants_after_exit=0")
     print("[codex-s2][PASS] state changed_files=\(stateEvidence.changedFiles) scanned_bytes=\(stateEvidence.scannedBytes) marker_hits=0 pinned_runtime_aliases=\(after.pinnedRuntimeAliasCount) auth_material=excluded_without_inspection")
     print("[codex-s2][PASS] input_sha256=\(inputHash) result_sha256=\(resultHash) jsonl_bytes=\(transform.stdout.count) stderr_bytes=\(transform.stderrBytes) elapsed_ms=\(transform.elapsedMilliseconds)")
