@@ -430,6 +430,9 @@ tier_deterministic() {
         run_gate deterministic "first-run component picker sizes, RAM tiers, and running total" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --component-picker-selftest || true
+        run_gate deterministic "first-run progress bytes, speed, no-ETA pin, and permission anchors" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --install-progress-selftest || true
         run_gate deterministic "first-run preflight message and never-block selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --preflight-selftest || true
@@ -695,6 +698,7 @@ tier_gui() {
         run_gui_gate "Setup tab preflight offscreen render" "${gui_env[@]}" "$TEST_APP" --setup-render "$SCRATCH/setup-render" || true
         run_gui_gate "provider onboarding offscreen render" "${gui_env[@]}" "$TEST_APP" --provider-onboarding-render "$SCRATCH/provider-onboarding-render" || true
         run_gui_gate "first-run component picker offscreen render" "${gui_env[@]}" "$TEST_APP" --component-picker-render "$SCRATCH/component-picker-render" || true
+        run_gui_gate "first-run progress and permissions offscreen render" "${gui_env[@]}" "$TEST_APP" --install-progress-render "$SCRATCH/install-progress-render" || true
         run_gui_gate "Models & Power settings UI probe" "${gui_env[@]}" "$TEST_APP" --models-power-ui-probe || true
         run_gui_gate "Models & Power prompt-override offscreen render" "${gui_env[@]}" "$TEST_APP" --models-power-render "$SCRATCH/models-power-render" || true
         run_gui_gate "consolidated Hotkeys tab offscreen render" "${gui_env[@]}" "$TEST_APP" --hotkeys-tab-render "$SCRATCH/hotkeys-tab-render" || true

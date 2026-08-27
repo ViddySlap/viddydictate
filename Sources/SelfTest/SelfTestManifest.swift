@@ -118,6 +118,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .componentPickerSelftest: .init(tier: .deterministic) { _ in
         ComponentPickerSelfTest.run() ? 0 : 1
     },
+    // Pure: the byte sampler is a stub and the clock is a number, so a download that takes minutes on a
+    // real network is stepped through here in microseconds.
+    .installProgressSelftest: .init(tier: .deterministic) { _ in
+        InstallProgressSelfTest.run() ? 0 : 1
+    },
     .componentPickerRender: .init(tier: .gui) { arguments in
         guard let i = arguments.firstIndex(of: "--component-picker-render"), i + 1 < arguments.count
         else {
@@ -125,6 +130,14 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
             return 2
         }
         return ComponentPickerRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
+    .installProgressRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--install-progress-render"), i + 1 < arguments.count
+        else {
+            print("[install-progress-render] FAIL: an output directory is required")
+            return 2
+        }
+        return InstallProgressRender.run(outDir: arguments[i + 1]) ? 0 : 1
     },
     .lmStudioModelCatalogSelftest: .init(tier: .deterministic) { _ in
         LMStudioModelCatalogSelfTest.run() ? 0 : 1

@@ -134,7 +134,8 @@ enum InstallerEngineSelfTest {
         InstallerPaths(
             python: URL(fileURLWithPath: "/bin/sh"),
             applicationSupport: root.appendingPathComponent("support", isDirectory: true),
-            modelCache: root.appendingPathComponent("model-cache", isDirectory: true))
+            modelCache: root.appendingPathComponent("model-cache", isDirectory: true),
+            packageCache: root.appendingPathComponent("package-cache", isDirectory: true))
     }
 
     private final class FakeInstallerRunner: InstallerProcessRunning {

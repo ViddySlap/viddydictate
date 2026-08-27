@@ -48,6 +48,8 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case localModelSetupSelftest = "--local-model-setup-selftest"
     case componentPickerSelftest = "--component-picker-selftest"
     case componentPickerRender = "--component-picker-render"
+    case installProgressSelftest = "--install-progress-selftest"
+    case installProgressRender = "--install-progress-render"
     case localModelsReadoutLive = "--local-models-readout-live"
     case setupRender = "--setup-render"
     case providerOnboardingRender = "--provider-onboarding-render"
