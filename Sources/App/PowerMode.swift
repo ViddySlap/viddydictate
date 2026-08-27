@@ -47,11 +47,11 @@ enum BatteryAdvisoryReason: Equatable {
     var message: String {
         switch self {
         case .lowBattery:
-            return "Battery is at 30% or below — try Final-only, or open Models in Settings."
+            return "Battery is at 30% or below — try Final-only, or open Models on the Hotkeys tab."
         case .macOSLowPowerMode:
-            return "macOS Low Power Mode is on — try Final-only, or open Models in Settings."
+            return "macOS Low Power Mode is on — try Final-only, or open Models on the Hotkeys tab."
         case .lowBatteryAndMacOSLowPowerMode:
-            return "Battery is low and macOS Low Power Mode is on — try Final-only, or open Models in Settings."
+            return "Battery is low and macOS Low Power Mode is on — try Final-only, or open Models on the Hotkeys tab."
         }
     }
 }

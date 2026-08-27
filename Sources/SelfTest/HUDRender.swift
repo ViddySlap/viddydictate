@@ -296,7 +296,94 @@ enum HUDRender {
         chk("answer-stays-full", ans > 700, "answer width=\(fmt(Double(ans)))")
         chk("toast-short-legible", (centers["toast-short"] ?? 0) > 20, "center-green=\(fmt(centers["toast-short"] ?? 0))")
         chk("toast-long-legible", (centers["toast-long"] ?? 0) > 20, "center-green=\(fmt(centers["toast-long"] ?? 0))")
+
+        // `snapshot` restores hudLowPowerScale, so the contract pass may move the pill size freely.
+        if !renderFailureToastContract(hud: hud, outDir: outDir, chk: chk) { pass = false }
         return pass
+    }
+
+    /// LD3: every PROVIDER FAILURE toast rides in the compact pill, so the pill must carry every one of
+    /// those app-authored sentences whole. Crossing the four allowlisted sentences and the three generic
+    /// category sentences with every suffix the call sites append is the real contract; checking one
+    /// hand-picked string would pass while a sibling clipped. Run at the smallest, floored, and default
+    /// pill sizes, because the toast font floors at 12pt and a width cap that kept shrinking past that
+    /// is exactly how a small pill used to truncate a message a large pill rendered fine.
+    ///
+    /// Deliberately NOT covered: AppDelegate's high-salience advisories (failed save, blocked quit,
+    /// battery, update notices). Those pass `forceFull: true` and render in the full box by design, so
+    /// asserting they fit this capsule would pin a path they never take.
+    private static func renderFailureToastContract(
+        hud: HUDPanel, outDir: String, chk: (String, Bool, String) -> Void
+    ) -> Bool {
+        let sentences: [(String, String)] = [
+            ("over-budget", CleanupClient.overBudgetMessage),
+            ("memory-facts", CleanupClient.memoryFactsUnavailableMessage),
+            ("spend-cap", CleanupClient.geminiSpendCapMessage),
+            ("rejected-key", CleanupClient.geminiRejectedKeyMessage),
+            ("unavailable", TextTransformRetryDescriptor.Failure.unavailable.userMessage),
+            ("timed-out", TextTransformRetryDescriptor.Failure.timedOut.userMessage),
+            ("bad-output", TextTransformRetryDescriptor.Failure.badOutput.userMessage),
+        ]
+        // The mode nouns the built-in call sites prepend (`landUINoun`), plus the bare form.
+        let nouns = ["", "Transform: ", "Email writer: "]
+        // Every suffix a failure call site appends, verbatim from DictationController / OneShotRegistry.
+        let suffixes = [
+            " — text left as-is. Retry under Models on the Hotkeys tab.",
+            " — pasted raw. Retry under Models on the Hotkeys tab.",
+            " — raw text left unchanged. Retry under Models on the Hotkeys tab.",
+            " — no output inserted. Retry under Models on the Hotkeys tab.",
+            " — no answer inserted.",
+        ]
+        var messages: [(String, String)] = []
+        for (key, sentence) in sentences {
+            for (n, noun) in nouns.enumerated() {
+                for (x, suffix) in suffixes.enumerated() {
+                    messages.append(("\(key)/n\(n)/s\(x)", "⚠️ " + noun + sentence + suffix))
+                }
+            }
+        }
+        // The LD3 scene: the longest allowlisted sentence, a real mode noun, and a recovery suffix. This
+        // is the exact toast that used to escape to the full HUD box while its siblings rode the pill.
+        let canonicalScene = "\u{26a0}\u{fe0f} Email writer: " + CleanupClient.overBudgetMessage
+            + " \u{2014} pasted raw. Retry under Models on the Hotkeys tab."
+
+        var ok = true
+        // 0.5 is the REAL low end of `Settings.hudPillScaleRange` and the only scale where the pre-LD3
+        // pill actually truncated. Note 0.9 is `InfoPillPanel.minScale`, which floors the sibling INFO
+        // pill, not this one — the toast pill has no such floor, which is why 0.5 has to be tested.
+        for scale in [0.5, Double(InfoPillPanel.minScale), 1.0] {
+            Settings.hudPillScale = scale
+            var clipped: [String] = []
+            var widest: (String, String, CGFloat) = ("", "", 0)
+            for (key, message) in messages {
+                _ = hud.renderToastForSeam(message: message, forceFull: false)
+                if hud.pillToastTruncatedForTesting { clipped.append(key) }
+                let h = hud.frameForTesting.height
+                if h > widest.2 { widest = (key, message, h) }
+            }
+            let label = "pill-carries-every-failure-sentence@\(fmt(scale))"
+            chk(label, clipped.isEmpty,
+                "\(messages.count) message(s), clipped=\(clipped.isEmpty ? "none" : clipped.joined(separator: ",")); "
+                + "tallest \(widest.0) at \(fmt(Double(widest.2)))pt")
+            if !clipped.isEmpty { ok = false }
+
+            let suffix = fmt(scale).replacingOccurrences(of: ".", with: "_")
+            // Two PNGs per size, because they answer different questions. The ADAPTIVE one is whichever
+            // message is currently worst — it follows the copy as it changes, so it stays the real worst
+            // case. The FIXED one is always the same sentence, so two runs are directly comparable and a
+            // reviewer can diff this release's image against the last one.
+            if let img = hud.renderToastForSeam(message: widest.1, forceFull: false) {
+                let name = "toast-failure-tallest-\(suffix)"
+                writePNG(img, to: outDir + "/\(name).png")
+                print("  wrote \(name).png (\(widest.0), panel \(fmtRect(hud.frameForTesting)))")
+            }
+            if let img = hud.renderToastForSeam(message: canonicalScene, forceFull: false) {
+                let name = "toast-failure-canonical-\(suffix)"
+                writePNG(img, to: outDir + "/\(name).png")
+                print("  wrote \(name).png (panel \(fmtRect(hud.frameForTesting)))")
+            }
+        }
+        return ok
     }
 
     // MARK: Item B — the content-gated info pill

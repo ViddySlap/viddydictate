@@ -60,6 +60,14 @@ final class HUDPanel: NSObject {
     /// Low-power pill-toast text: a short status `toast()` renders INSIDE a pill-styled capsule grown
     /// to fit the message (the scope is hidden for the dwell) instead of popping the full box.
     private let pillToastLabel = NSTextField(wrappingLabelWithString: "")
+    /// How tall the in-pill toast may grow before it ellipsizes. Three, not two, because EVERY failure
+    /// toast rides in this capsule now (LD3) and the longest allowlisted capacity sentence plus its
+    /// mode noun and recovery suffix needs a third line. The cap is still a cap: a custom mode's
+    /// user-supplied name is unbounded, and the capsule must stay a pill rather than become the box.
+    static let pillToastMaxLines = 3
+    /// Whether the last `layoutPillToast()` had to clip the message at the line cap. Read by the
+    /// offscreen render gate so "the pill carries this sentence whole" is an assertion, not an opinion.
+    private(set) var pillToastTruncatedForTesting = false
     private let lockButton: GlassButton
     private let stopButton: GlassButton
 
@@ -174,13 +182,13 @@ final class HUDPanel: NSObject {
         // body stays green whichever path AppKit takes. (The single-line status label is unaffected.)
         transcription.textColor = Phosphor.green.withAlphaComponent(0.9)
 
-        // The low-power pill-toast text: centered, up to two lines, truncating tail. Pin textColor to
+        // The low-power pill-toast text: centered, up to `pillToastMaxLines`, truncating tail. Pin textColor to
         // phosphor green (same reason as `transcription` above — the wrapping-label path can otherwise
         // drop the attributed foreground color).
-        pillToastLabel.maximumNumberOfLines = 2
+        pillToastLabel.maximumNumberOfLines = HUDPanel.pillToastMaxLines
         pillToastLabel.alignment = .center
-        pillToastLabel.lineBreakMode = .byWordWrapping     // wrap up to two lines...
-        pillToastLabel.cell?.truncatesLastVisibleLine = true   // ...then ellipsize the tail of line 2
+        pillToastLabel.lineBreakMode = .byWordWrapping     // wrap up to `pillToastMaxLines`...
+        pillToastLabel.cell?.truncatesLastVisibleLine = true   // ...then ellipsize the tail of the last line
         pillToastLabel.cell?.wraps = true
         pillToastLabel.cell?.isScrollable = false
         pillToastLabel.textColor = Phosphor.green.withAlphaComponent(0.92)
@@ -582,7 +590,8 @@ final class HUDPanel: NSObject {
     }
 
     /// Phosphor-green attributed text for the low-power pill-toast — centered, with the same soft green
-    /// glow as the full-box body, truncating tail so an over-long message clips gracefully at two lines.
+    /// glow as the full-box body, truncating tail so an over-long message clips gracefully at the
+    /// `pillToastMaxLines` cap.
     private func pillToastAttr(_ s: String, size: CGFloat) -> NSAttributedString {
         let shadow = NSShadow()
         shadow.shadowColor = Phosphor.green.withAlphaComponent(0.5)
@@ -590,7 +599,7 @@ final class HUDPanel: NSObject {
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         para.lineSpacing = 2
-        para.lineBreakMode = .byWordWrapping   // measure + render wrap up to two lines (see label config)
+        para.lineBreakMode = .byWordWrapping   // measure + render wrap up to the line cap (see label config)
         return NSAttributedString(string: s, attributes: [
             .font: NSFont(name: Phosphor.font, size: size) ?? .systemFont(ofSize: size, weight: .regular),
             .foregroundColor: Phosphor.green.withAlphaComponent(0.92),
@@ -599,10 +608,16 @@ final class HUDPanel: NSObject {
     }
 
     /// The low-power IN-PILL status toast: a pill-styled capsule (same phosphor CRT look as the scope
-    /// pill) grown ONLY as much as the message needs — wider for a longer line, taller up to ~2 lines —
-    /// with the oscilloscope + info pill hidden for the dwell. It floors at the scope pill's own size so
-    /// a short notice ("Nothing heard") is the same capsule the scope lived in (no jarring jump), and it
-    /// homes to the same anchor as the scope pill so the anchored edge never moves as it grows.
+    /// pill) grown ONLY as much as the message needs — wider for a longer line, taller up to
+    /// `pillToastMaxLines` — with the oscilloscope + info pill hidden for the dwell. It floors at the
+    /// scope pill's own size so a short notice ("Nothing heard") is the same capsule the scope lived in
+    /// (no jarring jump), and it homes to the same anchor as the scope pill so the anchored edge never
+    /// moves as it grows.
+    ///
+    /// LD3: this capsule carries the whole provider-failure family, including the longest allowlisted
+    /// capacity sentence, so no member of that family needs to escape to the full box to stay readable.
+    /// Callers that pass `forceFull: true` (paragraph-length answers, high-salience advisories) are a
+    /// separate, deliberate choice and are unaffected.
     private func layoutPillToast() {
         let ps = CGFloat(Settings.hudPillScale)
         let baseW = round(HUDPillMetrics.baseWidth * ps)          // scope-pill width — the floor
@@ -610,8 +625,12 @@ final class HUDPanel: NSObject {
         let padX = round(26 * ps)
         let padY = round(12 * ps)
         let fontSize = max(12, round(15 * ps))
+        // The font floors at 12pt (below ps 0.8 it stops shrinking), so the WIDTH cap has to floor with
+        // it. Scaling the cap by `ps` while the glyphs stayed 12pt is what made a small pill truncate a
+        // message a large pill rendered fine — the text needed the same columns in a narrower capsule.
+        let textScale = fontSize / 15
         let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let maxW = min(round(660 * ps), vf.width - 96)   // cap so the toast stays pill-ish, never the full box
+        let maxW = min(round(660 * textScale), vf.width - 96)   // cap so the toast stays pill-ish, never the full box
 
         let attr = pillToastAttr(currentText.isEmpty ? "…" : currentText, size: fontSize)
         let naturalW = ceil(attr.size().width)           // unconstrained single-line width
@@ -622,15 +641,18 @@ final class HUDPanel: NSObject {
         } else if naturalW <= innerMaxW {
             capW = naturalW + 2 * padX; textW = naturalW // one line, grown wider than the base
         } else {
-            capW = maxW; textW = innerMaxW               // wraps to <=2 lines at the max width
+            capW = maxW; textW = innerMaxW               // wraps within the line cap at the max width
         }
 
-        // Wrapped height within textW, capped to two lines.
+        // Wrapped height within textW, capped to `pillToastMaxLines`.
         let lineH = ceil(attr.size().height)
-        let twoLineH = lineH * 2 + 2                      // + lineSpacing
+        let maxTextH = lineH * CGFloat(HUDPanel.pillToastMaxLines)
+            + 2 * CGFloat(HUDPanel.pillToastMaxLines - 1)     // + lineSpacing between lines
         let bounds = attr.boundingRect(with: NSSize(width: textW, height: .greatestFiniteMagnitude),
                                        options: [.usesLineFragmentOrigin, .usesFontLeading])
-        let textH = min(ceil(bounds.height), twoLineH)
+        let wrappedH = ceil(bounds.height)
+        let textH = min(wrappedH, maxTextH)
+        pillToastTruncatedForTesting = wrappedH > maxTextH
         let capH = max(baseH, textH + 2 * padY)
 
         presentBox(panelSize: NSSize(width: capW, height: capH), cornerRadius: capH / 2)

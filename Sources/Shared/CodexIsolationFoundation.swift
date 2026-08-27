@@ -1988,8 +1988,9 @@ enum CodexIsolationFoundation {
     }
 }
 
-/// Fail-closed JSONL + nested schema parser. It intentionally accepts no reasoning, plan, command,
-/// filesystem, MCP, web, browser, app, plugin, skill, hook, or unknown event.
+/// Fail-closed JSONL + nested schema parser. Non-agent item events are advisory bookkeeping; the
+/// read-only sandbox and never-approve execution arguments own the no-tools guarantee. Lifecycle,
+/// terminal, agent-message, size, and nested result-schema contracts remain strict.
 enum CodexTransformOutputContract {
     static let maxJSONLBytes = 1_048_576
     static let maxLineBytes = 262_144
@@ -2025,18 +2026,24 @@ enum CodexTransformOutputContract {
                 guard state == .thread else { throw CodexIsolationError.failed("duplicate/out-of-order turn.started") }
                 state = .turn
             case "item.started":
-                guard state == .turn, !agentMessageStarted,
-                      let item = object["item"] as? [String: Any],
-                      item["type"] as? String == "agent_message" else {
-                    throw CodexIsolationError.failed("tool/bookkeeping item.started rejected")
+                guard let item = object["item"] as? [String: Any],
+                      let itemType = item["type"] as? String else {
+                    throw CodexIsolationError.failed("malformed item.started rejected")
+                }
+                if itemType != "agent_message" { continue }
+                guard state == .turn, !agentMessageStarted else {
+                    throw CodexIsolationError.failed("duplicate/out-of-order agent item.started")
                 }
                 agentMessageStarted = true
             case "item.completed":
+                guard let item = object["item"] as? [String: Any],
+                      let itemType = item["type"] as? String else {
+                    throw CodexIsolationError.failed("malformed item.completed rejected")
+                }
+                if itemType != "agent_message" { continue }
                 guard state == .turn, messageText == nil,
-                      let item = object["item"] as? [String: Any],
-                      item["type"] as? String == "agent_message",
                       let value = item["text"] as? String else {
-                    throw CodexIsolationError.failed("tool/bookkeeping or duplicate item.completed rejected")
+                    throw CodexIsolationError.failed("duplicate/out-of-order agent item.completed")
                 }
                 messageText = value
                 state = .message

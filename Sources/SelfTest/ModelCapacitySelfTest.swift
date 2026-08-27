@@ -9,7 +9,9 @@ enum ModelCapacitySelfTest {
 
         parserChecks(reporter)
         factorAndMissingFactChecks(reporter)
+        residentBypassLoggingChecks(reporter)
         clientWiringAndGeminiOrderingChecks(reporter)
+        productionCallSiteChecks(reporter)
         ownershipAndEvictionChecks(reporter)
         onePassCheck(reporter)
         evictionSettleChecks(reporter)
@@ -32,11 +34,20 @@ enum ModelCapacitySelfTest {
         """.utf8)
         let parsed = ModelResidency.parseResidentModelsJSON(fixture)
         reporter.record(
-            "lms ps parser retains identifier, size, last-use time, and status",
+            "lms ps parser retains identifier, size, last-use time, status, and TTL",
             parsed == [
                 resident("foreign/embed", 634_553_760, 1_787_551_824_934, "idle"),
-                resident("owned/busy", 17_190_793_452, 1_787_551_825_999, "loading"),
+                resident("owned/busy", 17_190_793_452, 1_787_551_825_999, "loading", ttl: 600),
             ])
+        // `ttlMs: null` is a model LM Studio holds with no timeout at all - the state that pinned 28.7 GB
+        // for an hour on 2026-08-21. It is a FACT about the row, not a hole in it, so it must not fail the
+        // snapshot the way a missing size does.
+        reporter.record(
+            "a model loaded with no TTL parses as resident without one, rather than failing the snapshot",
+            parsed?.first?.ttlSeconds == nil && parsed?.count == 2)
+        reporter.record(
+            "the TTL comes from the same row as the size, not a second lms ps",
+            parsed?.last?.ttlSeconds == 600, "\(parsed?.last?.ttlSeconds as Int? ?? -1)")
         reporter.record(
             "lms ps parser fails closed on malformed JSON",
             ModelResidency.parseResidentModelsJSON(Data("not json".utf8)) == nil)
@@ -68,7 +79,8 @@ enum ModelCapacitySelfTest {
                     wiredBytes: { wired },
                     budgetBytes: { _ in budget },
                     ensureLoaded: { _, _ in loadSucceeds },
-                    unload: { _ in }))
+                    unload: { _ in },
+                    log: { _ in }))
         }
 
         reporter.record("missing resident snapshot refuses softly with a typed capacity result",
@@ -84,6 +96,107 @@ enum ModelCapacitySelfTest {
                         result(budget: nil) == .capacityRefused(.factsUnavailable))
         reporter.record("LM Studio load failure remains distinct from a capacity refusal",
                         result(loadSucceeds: false) == .loadFailed)
+    }
+
+    private static func residentBypassLoggingChecks(_ reporter: SelfTestReporter) {
+        let model = "fixture/already-resident"
+        var catalogReads = 0
+        var wiredReads = 0
+        var budgetReads = 0
+        var loads: [String] = []
+        var unloads: [String] = []
+        var logs: [String] = []
+
+        func dependencies(budget: UInt64?) -> ModelManager.CapacityDependencies {
+            ModelManager.CapacityDependencies(
+                availableInstalledModels: {
+                    catalogReads += 1
+                    return nil
+                },
+                residentModels: { [resident(model, 1_200_000_000, 1, "idle")] },
+                wiredBytes: {
+                    wiredReads += 1
+                    return nil
+                },
+                budgetBytes: { _ in
+                    budgetReads += 1
+                    return budget
+                },
+                ensureLoaded: { requested, _ in
+                    loads.append(requested)
+                    return true
+                },
+                unload: { unloads.append($0) },
+                log: { logs.append($0) })
+        }
+
+        let overBudget = ModelManager().ensureReady(
+            model, ttlOverrideSeconds: 600, dependencies: dependencies(budget: 1_000_000_000))
+        reporter.record(
+            "an already-resident model above the current budget remains ready without load or eviction",
+            overBudget == .ready && catalogReads == 0 && wiredReads == 0
+                && loads.isEmpty && unloads.isEmpty,
+            "result=\(overBudget) catalogReads=\(catalogReads) wiredReads=\(wiredReads) "
+                + "loads=\(loads) unloads=\(unloads)")
+        reporter.record(
+            "over-budget resident reuse logs the model footprint, budget, and no-new-allocation reason",
+            logs == [
+                "model capacity: fixture/already-resident is already resident at 1.2 GB, "
+                    + "above the current 1.0 GB budget; reusing it because this request "
+                    + "allocates no new model memory",
+            ],
+            "logs=\(logs)")
+
+        logs.removeAll()
+        let missingBudget = ModelManager().ensureReady(
+            model, ttlOverrideSeconds: 600, dependencies: dependencies(budget: nil))
+        reporter.record(
+            "an unreadable budget cannot turn the already-resident shortcut into a refusal",
+            missingBudget == .ready && logs.isEmpty && budgetReads == 2
+                && catalogReads == 0 && wiredReads == 0 && loads.isEmpty && unloads.isEmpty,
+            "result=\(missingBudget) budgetReads=\(budgetReads) logs=\(logs)")
+    }
+
+    private static func productionCallSiteChecks(_ reporter: SelfTestReporter) {
+        let repo = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let sources = repo.appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: sources,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            reporter.record(
+                "production sources are readable for the direct ModelResidency load guard", false,
+                "run the gate from the worktree root")
+            return
+        }
+
+        let needle = "ModelResidency.ensureLoaded("
+        var swiftFileCount = 0
+        var directSites: [String] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift",
+                  !url.path.contains("/Sources/SelfTest/") else { continue }
+            swiftFileCount += 1
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                directSites.append("UNREADABLE:\(url.lastPathComponent)")
+                continue
+            }
+            let count = text.components(separatedBy: needle).count - 1
+            guard count > 0 else { continue }
+            let relative = url.path.replacingOccurrences(of: repo.path + "/", with: "")
+            directSites.append(contentsOf: Array(repeating: relative, count: count))
+        }
+
+        reporter.record(
+            "production sources are readable for the direct ModelResidency load guard",
+            swiftFileCount > 100,
+            "swiftFiles=\(swiftFileCount)")
+        reporter.record(
+            "ModelManager is the only production call site allowed to reach ModelResidency.ensureLoaded",
+            directSites == ["Sources/App/ModelManager.swift"],
+            "directSites=\(directSites)")
     }
 
     private static func ownershipAndEvictionChecks(_ reporter: SelfTestReporter) {
@@ -192,18 +305,85 @@ enum ModelCapacitySelfTest {
 
         let overPresentation = TextTransformClient.safeFailurePresentation(for: overBudget)
         let factsPresentation = TextTransformClient.safeFailurePresentation(for: factsUnavailable)
+        let quotaPresentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 429"))
+        let auth401Presentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 401"))
+        let auth403Presentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 403"))
         let ordinaryPresentation = TextTransformClient.safeFailurePresentation(
             for: .unavailable("fixture provider diagnostic that must stay hidden"))
         reporter.record(
-            "capacity strings survive presentation intact and force the full HUD",
+            "capacity strings survive presentation intact",
             overPresentation?.userMessage == CleanupClient.overBudgetMessage
-                && overPresentation?.forceFullToast == true
-                && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage
-                && factsPresentation?.forceFullToast == true)
+                && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage)
         reporter.record(
-            "ordinary provider diagnostics remain generic and pill-eligible",
-            ordinaryPresentation?.userMessage == "Selected provider is unavailable"
-                && ordinaryPresentation?.forceFullToast == false)
+            "Gemini quota and auth statuses use short app-authored presentation sentences",
+            quotaPresentation?.userMessage == CleanupClient.geminiSpendCapMessage
+                && auth401Presentation?.userMessage == CleanupClient.geminiRejectedKeyMessage
+                && auth403Presentation?.userMessage == CleanupClient.geminiRejectedKeyMessage
+                && CleanupClient.geminiSpendCapMessage.contains("Google AI Studio")
+                && CleanupClient.geminiSpendCapMessage.contains("spend cap")
+                && CleanupClient.geminiRejectedKeyMessage.contains("Settings")
+                && (CleanupClient.geminiSpendCapMessage
+                    + CleanupClient.geminiRejectedKeyMessage).allSatisfy(\.isASCII))
+        reporter.record(
+            "ordinary provider diagnostics remain generic",
+            ordinaryPresentation?.userMessage == "Selected provider is unavailable")
+
+        // LD3: every PROVIDER FAILURE renders the same way, so this seam must carry NOTHING that could
+        // route one of those sentences to a different window than another. A future field that does is
+        // the regression this pins; the pill's ability to hold the longest sentence is pinned in the
+        // offscreen render gate, where real font metrics exist.
+        reporter.record(
+            "presentation carries only the safe sentence, with no per-message rendering escape",
+            Mirror(reflecting: TextTransformClient.FailurePresentation(userMessage: "x"))
+                .children.compactMap(\.label) == ["userMessage"])
+
+        let providerCanary = "PRIVATE_PROVIDER_DETAIL_\(UUID().uuidString)"
+        let nonAllowlistedPresentations = [
+            CleanupClient.Result.unavailable("gemini HTTP 500"),
+            .unavailable("gemini HTTP 429 \(providerCanary)"),
+            .unavailable("transport echoed \(providerCanary)"),
+            .badOutput("provider stderr \(providerCanary)"),
+        ].compactMap { TextTransformClient.safeFailurePresentation(for: $0)?.userMessage }
+        reporter.record(
+            "non-allowlisted Gemini and provider detail stays generic and never reaches the UI",
+            nonAllowlistedPresentations.count == 4
+                && nonAllowlistedPresentations.dropLast().allSatisfy {
+                    $0 == "Selected provider is unavailable"
+                }
+                && nonAllowlistedPresentations.last
+                    == "Selected provider returned unusable output"
+                && nonAllowlistedPresentations.allSatisfy { !$0.contains(providerCanary) })
+
+        let safeGeminiReasons = [
+            "gemini HTTP 429", "gemini HTTP 401", "gemini HTTP 403",
+            "bad gemini response shape", "encode failed",
+        ]
+        reporter.record(
+            "Option+G logs each fixed app-authored failure reason beside its category",
+            safeGeminiReasons.allSatisfy { reason in
+                OneShotRegistry.searchFailureLogLine(
+                    for: .unavailable(reason), mode: .searchGemini
+                ).contains("classification=unavailable reason=\(reason)")
+            })
+        let privateGeminiLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("transport echoed \(providerCanary)"), mode: .searchGemini)
+        let decoratedHTTPLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("gemini HTTP 429 \(providerCanary)"), mode: .searchGemini)
+        let privateBadOutputLog = OneShotRegistry.searchFailureLogLine(
+            for: .badOutput("provider stderr \(providerCanary)"), mode: .searchGemini)
+        let localEncodeLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("encode failed"), mode: .searchLocal)
+        reporter.record(
+            "transport, stderr, and local-search branches remain category-only in logs",
+            !privateGeminiLog.contains(providerCanary)
+                && !decoratedHTTPLog.contains(providerCanary)
+                && !privateBadOutputLog.contains(providerCanary)
+                && !localEncodeLog.contains("reason=")
+                && [privateGeminiLog, decoratedHTTPLog, privateBadOutputLog, localEncodeLog]
+                    .allSatisfy { $0.contains("classification=") })
 
         let cleanupSemaphore = DispatchSemaphore(value: 0)
         var cleanupResult: CleanupClient.Result = .badOutput("unset")
@@ -418,10 +598,11 @@ enum ModelCapacitySelfTest {
     }
 
     private static func resident(
-        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64, _ status: String
+        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64, _ status: String,
+        ttl: Int? = nil
     ) -> ModelResidency.ResidentModel {
         .init(identifier: identifier, sizeBytes: sizeBytes,
-              lastUsedTime: lastUsedTime, status: status)
+              lastUsedTime: lastUsedTime, status: status, ttlSeconds: ttl)
     }
 
     private static func installedModel(_ id: String, size: Int64?) -> LMStudioInstalledModel {

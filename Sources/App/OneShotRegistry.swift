@@ -99,6 +99,21 @@ final class OneShotRegistry {
             userMessage: EmailClient.wrap(input), timeout: timeout)
     }
 
+    /// Build the one-shot search failure log without exposing arbitrary result detail. Only Option+G
+    /// may attach SearchClient's fixed, app-authored Gemini reason; local search stays category-only.
+    static func searchFailureLogLine(
+        for result: CleanupClient.Result,
+        mode: Mode
+    ) -> String {
+        let failure = TextTransformClient.safeFailure(for: result)!
+        let reason = mode == .searchGemini
+            ? SearchClient.safeGeminiFailureLogReason(for: result)
+            : nil
+        let reasonToken = reason.map { " reason=\($0)" } ?? ""
+        return "search fallback classification=\(failure.logToken)\(reasonToken) - "
+            + descriptor(for: mode).label
+    }
+
     /// True while a one-shot flow owns the stage (the coordinator's arbiter folds this in). Spans the
     /// whole cycle: the level-pick window, the transcribe, the client call, and the land.
     var isBusy: Bool { busy }
@@ -565,12 +580,10 @@ final class OneShotRegistry {
                                                            app: self.context.targetLabel,
                                                            id: historyID ?? UUID())
                     case .unavailable, .timedOut, .badOutput:
-                        let failure = TextTransformClient.safeFailure(for: result)!
                         let presentation = TextTransformClient.safeFailurePresentation(for: result)!
-                        Log.write("search fallback classification=\(failure.logToken) — \(m.label)")
+                        Log.write(Self.searchFailureLogLine(for: result, mode: mode))
                         self.context.hud.toast(
-                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.",
-                            forceFull: presentation.forceFullToast)
+                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.")
                     }
                 })
         }
@@ -607,8 +620,7 @@ final class OneShotRegistry {
                     let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                     Log.write("custom \(m.id) fallback classification=\(failure.logToken)")
                     self.context.hud.toast(
-                        "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry in Models.",
-                        forceFull: presentation.forceFullToast)
+                        "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry under Models on the Hotkeys tab.")
                 }
             }
             : nil

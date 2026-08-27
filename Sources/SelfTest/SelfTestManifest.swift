@@ -176,6 +176,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     },
     // Pure: the slider's two renderings, the LM Studio JIT reader driven against fixtures in this run's own
     // TMPDIR, and what each reading is reported as. No view and no real settings file.
+    // Live: it reads THIS machine's LM Studio. The offscreen render gate proves the readout's wiring
+    // against a stub; this proves the stub was telling the truth about the real CLI.
+    .localModelsReadoutLive: .init(tier: .services) { arguments in
+        LocalModelsReadoutLiveGate.run(arguments: arguments) ? 0 : 1
+    },
     .localModelSetupSelftest: .init(tier: .deterministic) { _ in
         LocalModelSetupSelfTest.run() ? 0 : 1
     },

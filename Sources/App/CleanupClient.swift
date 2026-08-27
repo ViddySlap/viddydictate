@@ -12,12 +12,17 @@ import Foundation
 /// the pending `gemma-3-4b-it-qat` head-to-head swaps in via config with no code change.
 enum CleanupClient {
 
-    /// Capacity refusals are app-authored and safe to show verbatim. Do not replace the over-budget
-    /// sentence: Ben chose it as the user-facing instruction for the real RAM-capacity case.
+    /// These refusal sentences are app-authored and safe to show verbatim. Do not replace the
+    /// over-budget sentence: Ben chose it as the user-facing instruction for the real RAM-capacity
+    /// case. Gemini's HTTP classifier supplies only the status code, never provider response text.
     static let overBudgetMessage =
         "Not enough space in RAM. Adjust local model settings under the Setup tab."
     static let memoryFactsUnavailableMessage =
         "Memory facts could not be read, so the model was not loaded."
+    static let geminiSpendCapMessage =
+        "Google AI Studio spend cap reached. Increase it there, then try again."
+    static let geminiRejectedKeyMessage =
+        "Google AI Studio rejected the API key. Update it in Settings."
 
     /// Fence the raw transcript inside the delimiter markers the prompts reference, so the model sees
     /// the dictation strictly as a delimited DATA block (the prompt-injection fix). Coupled to the
@@ -101,13 +106,21 @@ enum CleanupClient {
         }
     }
 
-    /// Only these two allowlisted strings may bypass the generic, content-safe provider wording at
-    /// presentation time. Arbitrary transport/provider errors can contain user or service text.
+    /// Only these exact app-authored strings may bypass the generic, content-safe provider wording at
+    /// presentation time. Arbitrary transport/provider errors can contain user or service text. The
+    /// historical capacity-focused name stays as the single presentation allowlist seam.
     static func capacityRefusalMessage(for result: Result) -> String? {
-        guard case .unavailable(let message) = result,
-              message == overBudgetMessage || message == memoryFactsUnavailableMessage
-        else { return nil }
-        return message
+        guard case .unavailable(let message) = result else { return nil }
+        switch message {
+        case overBudgetMessage, memoryFactsUnavailableMessage:
+            return message
+        case "gemini HTTP 429":
+            return geminiSpendCapMessage
+        case "gemini HTTP 401", "gemini HTTP 403":
+            return geminiRejectedKeyMessage
+        default:
+            return nil
+        }
     }
 
     enum ChatResponseClassification {

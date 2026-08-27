@@ -90,6 +90,21 @@ enum SearchClient {
                      + SecretStore.Secret.geminiAPIKey.setupHint)
     }
 
+    /// The Option+G landing log may retain only reasons authored entirely by this app. The exact
+    /// HTTP form contains our numeric status code, not Google's body. Shape/encoding labels are fixed
+    /// literals. Transport text and downstream provider diagnostics remain category-only.
+    static func safeGeminiFailureLogReason(for result: CleanupClient.Result) -> String? {
+        guard case .unavailable(let reason) = result else { return nil }
+        if reason == "bad gemini response shape" || reason == "encode failed" {
+            return reason
+        }
+        let prefix = "gemini HTTP "
+        guard reason.hasPrefix(prefix),
+              Int(reason.dropFirst(prefix.count)) != nil
+        else { return nil }
+        return reason
+    }
+
     // MARK: - LM Studio chat (tool-capable, synchronous)
 
     private struct ChatOutcome {

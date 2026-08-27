@@ -521,6 +521,13 @@ enum CodexIsolationSelfTest {
                   args.last == "-" && !args.joined(separator: " ").contains(secretMarker))
             check("argv carries only the content-hashed profile name, not developer instructions",
                   args.contains(profile.name) && !args.joined(separator: " ").contains(CodexIsolationFoundation.routeAuditMarker))
+            let argumentPairs = Array(zip(args, args.dropFirst()))
+            check("exec contract pins the Codex sandbox to read-only",
+                  args.filter { $0 == "-s" }.count == 1
+                    && argumentPairs.contains { $0.0 == "-s" && $0.1 == "read-only" })
+            check("exec contract pins approval to never",
+                  args.filter { $0 == "-a" }.count == 1
+                    && argumentPairs.contains { $0.0 == "-a" && $0.1 == "never" })
             let stdin = String(decoding: CodexIsolationFoundation.stdinBytes(userText: secretMarker), as: UTF8.self)
             check("stdin uses the fixed fenced transcript contract",
                   stdin == "<<<TRANSCRIPT>>>\n\(secretMarker)\n<<<END_TRANSCRIPT>>>\n")
@@ -533,10 +540,33 @@ enum CodexIsolationSelfTest {
             """
             check("strict JSONL accepts one schema-valid completed agent message",
                   try CodexTransformOutputContract.parseAcceptedResult(Data(valid.utf8)) == "clean")
-            check("strict JSONL rejects bookkeeping/tool events", throwsError {
-                let bad = valid.replacingOccurrences(of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
-                                                     with: "{\"type\":\"item.completed\",\"item\":{\"type\":\"todo_list\"}}")
-                _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8))
+            let ignoredItemStates = """
+            {"type":"item.started","item":{"id":"initial-start","type":"reasoning"}}
+            {"type":"item.completed","item":{"id":"initial-complete","type":"error"}}
+            {"type":"thread.started","thread_id":"synthetic"}
+            {"type":"item.started","item":{"id":"thread-start","type":"todo_list"}}
+            {"type":"item.completed","item":{"id":"thread-complete","type":"command_execution"}}
+            {"type":"turn.started"}
+            {"type":"item.started","item":{"id":"turn-start","type":"file_change"}}
+            {"type":"item.completed","item":{"id":"turn-complete","type":"mcp_tool_call"}}
+            {"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"clean\\"}"}}
+            {"type":"item.started","item":{"id":"message-start","type":"web_search"}}
+            {"type":"item.completed","item":{"id":"message-complete","type":"browser_action"}}
+            {"type":"turn.completed"}
+            """
+            check("non-agent item events are ignored in every pre-terminal parser state",
+                  try CodexTransformOutputContract.parseAcceptedResult(
+                    Data(ignoredItemStates.utf8)) == "clean")
+            let noAgentMessage = """
+            {"type":"thread.started","thread_id":"synthetic"}
+            {"type":"item.completed","item":{"type":"error","message":"synthetic advisory"}}
+            {"type":"turn.started"}
+            {"type":"item.completed","item":{"type":"reasoning"}}
+            {"type":"turn.completed"}
+            """
+            check("strict JSONL rejects a stream with no agent message", throwsError {
+                _ = try CodexTransformOutputContract.parseAcceptedResult(
+                    Data(noAgentMessage.utf8))
             })
             check("strict JSONL rejects partial streams", throwsError {
                 _ = try CodexTransformOutputContract.parseAcceptedResult(
@@ -547,6 +577,22 @@ enum CodexIsolationSelfTest {
                 let duplicate = valid.replacingOccurrences(of: "{\"type\":\"turn.completed\"}", with:
                     "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"again\\\"}\"}}\n{\"type\":\"turn.completed\"}")
                 _ = try CodexTransformOutputContract.parseAcceptedResult(Data(duplicate.utf8))
+            })
+            check("strict JSONL rejects a top-level error event", throwsError {
+                let bad = valid.replacingOccurrences(
+                    of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
+                    with: "{\"type\":\"error\",\"message\":\"synthetic failure\"}")
+                _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8))
+            })
+            check("strict JSONL rejects a turn.failed event", throwsError {
+                let bad = valid.replacingOccurrences(
+                    of: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"result\\\":\\\"clean\\\"}\"}}",
+                    with: "{\"type\":\"turn.failed\",\"error\":{\"message\":\"synthetic failure\"}}")
+                _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8))
+            })
+            check("strict JSONL rejects every event after turn.completed", throwsError {
+                let bad = valid + "\n{\"type\":\"item.completed\",\"item\":{\"type\":\"error\"}}"
+                _ = try CodexTransformOutputContract.parseAcceptedResult(Data(bad.utf8))
             })
             check("strict nested schema rejects additional properties", throwsError {
                 let bad = valid.replacingOccurrences(of: "{\\\"result\\\":\\\"clean\\\"}",
@@ -941,15 +987,19 @@ enum CodexIsolationSelfTest {
 
             let deprecationFixture = try Data(contentsOf: URL(fileURLWithPath:
                 "Sources/SelfTest/Fixtures/codex-jsonl-deprecation-errors.jsonl"))
-            check("real 0.145 deprecation-error shape is rejected with the exact boundary reason",
-                  errorDescription {
-                      _ = try CodexTransformOutputContract.parseAcceptedResult(deprecationFixture)
-                  } == "tool/bookkeeping or duplicate item.completed rejected")
+            check("real 0.145 pre-turn item errors are ignored when the turn completes",
+                  try CodexTransformOutputContract.parseAcceptedResult(deprecationFixture)
+                    == "SYNTHETIC_RESULT_AFTER_DEPRECATION_ERRORS")
             let cleanFixture = try Data(contentsOf: URL(fileURLWithPath:
                 "Sources/SelfTest/Fixtures/codex-jsonl-clean.jsonl"))
             check("real 0.145 clean shape without item.started parses to the result",
                   try CodexTransformOutputContract.parseAcceptedResult(cleanFixture)
                     == "SYNTHETIC_CLEAN_RESULT")
+            let real20260827Fixture = try Data(contentsOf: URL(fileURLWithPath:
+                "Sources/SelfTest/Fixtures/codex-jsonl-real-20260827.jsonl"))
+            check("real 2026-08-27 code-mode advisory stream parses to the result",
+                  try CodexTransformOutputContract.parseAcceptedResult(real20260827Fixture)
+                    == "Return the word CAPTURED.")
 
             let binaryFixture = root.appendingPathComponent("candidate-codex", isDirectory: false)
             let runnerFixture = root.appendingPathComponent("candidate-runner", isDirectory: false)

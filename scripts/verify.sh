@@ -612,6 +612,9 @@ tier_services() {
                 "${service_env[@]}" "$service_app" --per-take-arm-service || true
             run_service_gate "LM Studio available-model discovery" normal \
                 "${service_env[@]}" "$service_app" --lmstudio-model-catalog-live || true
+            # Read-only: it never passes --unload-all, so it cannot change what the machine is holding.
+            run_service_gate "Setup tab resident-models readout (real lms ps)" normal \
+                "${service_env[@]}" "$service_app" --local-models-readout-live || true
             run_service_gate "Claude subscription smoke" required "${service_env[@]}" "$service_app" --cloudmode-selftest || true
             # The whole-note path over a note WITH an attachment, on a PINNED cloud route, with
             # degradation required NOT to fire (locked decision D7). Both cloud providers rejected that

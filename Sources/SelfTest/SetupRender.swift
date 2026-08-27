@@ -68,10 +68,16 @@ enum SetupRender {
         check("the shipped idle timer reaches the section", store.seconds == 600, "\(store.seconds)")
         // The hour that pinned 28.7 GB on 2026-08-21, which is what this machine's LM Studio still says.
         var jit: LocalModelSetup.JITSettings? = .init(ttlSeconds: 3600, enabled: true)
+        // Ben's machine at 07:40 on 2026-08-27, frozen: the 17.19 GB coder model he had loaded, plus the
+        // vault's embedding model, which LM Studio holds with NO TTL at all. That pair is the exact state
+        // the budget was correct and silent about, so it is the state the section is photographed in.
+        let residency = LocalResidencyStub(models: Self.bensModels, wired: 21_400_000_000)
         let view = SetupSettingsView(width: 640, observer: { completion in
             calls += 1
             completion(observation)
-        }, localModels: .init(store: store.store, facts: { .live }, jit: { jit }))
+        }, localModels: .init(store: store.store, facts: { .live }, jit: { jit },
+                              residency: residency.reader, unloadAll: residency.unloader,
+                              now: { Self.clock }))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 1200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -87,7 +93,9 @@ enum SetupRender {
         assertReport(view, Preflight.evaluate(observation), state: "warnings")
         assertLayout(view)
         assertLocalModels(view, position: 54, facts: .live,
-                          status: .tooLong(ttlSeconds: 3600, appSeconds: 600), state: "warnings")
+                          status: .tooLong(ttlSeconds: 3600, appSeconds: 600),
+                          residency: .models(Self.bensModels), wired: 21_400_000_000,
+                          state: "warnings")
         assertLocalModelsLayout(view, state: "warnings")
         capture(view, card: nil, to: outDir + "/setup-warnings.png", name: "warnings")
         capture(view, card: PreflightSurface.cardIdentifier(.textProvider),
@@ -107,7 +115,9 @@ enum SetupRender {
         assertReport(view, Preflight.evaluate(observation), state: "clean")
         assertLayout(view)
         assertLocalModels(view, position: 54, facts: .live,
-                          status: .matched(ttlSeconds: 600), state: "clean")
+                          status: .matched(ttlSeconds: 600),
+                          residency: .models(Self.bensModels), wired: 21_400_000_000,
+                          state: "clean")
         assertLocalModelsLayout(view, state: "clean")
         capture(view, card: LocalModelSetup.sectionIdentifier,
                 to: outDir + "/setup-local-models-jit-ok.png", name: "local models (LM Studio settled)")
@@ -119,10 +129,12 @@ enum SetupRender {
         capture(view, card: nil, to: outDir + "/setup-clean.png", name: "clean")
 
         driveBudgetSlider(view, store: store, host: host, outDir: outDir)
+        driveResidency(view, store: store, residency: residency, outDir: outDir)
 
         view.removeFromSuperview()
         driveGeminiKeySection(outDir: outDir)
         driveLocalModelsWithoutKernelFacts(outDir: outDir)
+        driveResidencyPending(outDir: outDir)
         print("[setup-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
     }
@@ -211,6 +223,13 @@ enum SetupRender {
         _ = host
     }
 
+    /// Ask the section to take a fresh reading, the way its own refresh timer does. Used after changing
+    /// what the stub LM Studio reports, so the section is driven through its real refresh path rather than
+    /// having its labels written to directly.
+    private static func refreshSection(_ view: NSView) {
+        (find(LocalModelSetup.sectionIdentifier, in: view) as? LocalModelsSectionView)?.apply()
+    }
+
     /// Move the handle the way a mouse does: set the value, then fire the control's action.
     private static func drag(_ view: NSView, to position: Double) {
         guard let slider = find(LocalModelSetup.identifier(.budgetSlider), in: view) as? NSSlider else {
@@ -233,18 +252,221 @@ enum SetupRender {
         _ = target.perform(action, with: control)
     }
 
+    // MARK: - The live resident-set readout (item L4, LOCKED DECISION 2)
+
+    /// A fixed clock, so the TTL countdown in the capture is the same picture every run.
+    static let clock = Date(timeIntervalSince1970: 1_787_849_000)
+
+    /// Ben's machine at 07:40 on 2026-08-27. The coder model was last used two minutes before this
+    /// clock and carries the shipped ten-minute TTL; the vault's embedding model carries `ttlMs: null`,
+    /// which is the state that pinned 28.7 GB for an hour on 2026-08-21 and must not render as blank.
+    static let bensModels: [ModelResidency.ResidentModel] = [
+        .init(identifier: "qwen3-coder-30b-a3b-instruct-mlx", sizeBytes: 17_190_793_452,
+              lastUsedTime: 1_787_848_880_000, status: "idle", ttlSeconds: 600),
+        .init(identifier: "text-embedding-bge-m3", sizeBytes: 634_553_760,
+              lastUsedTime: 1_787_848_880_000, status: "idle", ttlSeconds: nil),
+    ]
+
+    /// The claim the whole item rests on, and the one a still image cannot make for itself: that the
+    /// readout is a READING of the machine rather than a caption, that the summary's denominator is the
+    /// handle beside it, and that Unload all actually changes what the section then reports.
+    ///
+    /// Every `lms` call in production is a subprocess, so this gate also proves the section never waits
+    /// on one: `driveResidencyPending` holds the answer back and photographs what is on screen meanwhile.
+    private static func driveResidency(_ view: NSView, store: LocalModelStore,
+                                       residency: LocalResidencyStub, outDir: String) {
+        guard let list = label(LocalModelSetup.identifier(.residencyList), in: view) else {
+            check("[residency] the section lists what is loaded", false)
+            return
+        }
+        check("[residency] the list names every resident model, its size and its state",
+              list.stringValue.contains("qwen3-coder-30b-a3b-instruct-mlx")
+                && list.stringValue.contains("17.2 GB")
+                && list.stringValue.contains("text-embedding-bge-m3")
+                && list.stringValue.contains("0.6 GB"),
+              list.stringValue.replacingOccurrences(of: "\n", with: " / "))
+        check("[residency] the biggest model is on the first line",
+              list.stringValue.hasPrefix("qwen3-coder-30b-a3b-instruct-mlx"))
+        check("[residency] a model with a TTL says when it goes",
+              list.stringValue.contains("unloads in 8 min"))
+        check("[residency] a model LM Studio holds with no TTL says so rather than rendering blank",
+              list.stringValue.contains("no timeout"))
+        check("[residency] the rows are monospaced, so the padded columns line up",
+              list.font == NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
+              list.font?.fontName ?? "nil")
+
+        // The sentence the item exists for. Asserted on the SURFACE, verbatim, not merely in the pure gate:
+        // it is the thing Ben lost a hand test to the absence of.
+        check("[residency] the section says a lowered budget does not evict what is already loaded",
+              label(LocalModelSetup.identifier(.residencyNote), in: view)?.stringValue
+                == "Lowering the budget applies to the next model load. Models already in memory keep "
+                    + "running.",
+              label(LocalModelSetup.identifier(.residencyNote), in: view)?.stringValue ?? "missing")
+
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-loaded.png", name: "local models (loaded)")
+
+        // The summary's denominator is the handle. Drag it and the line has to follow, or the number and
+        // the knob are two separate claims again - which is the exact defect LOCKED DECISION 2 addresses.
+        var summaries: [String] = []
+        var wrong: [String] = []
+        for position in [0.0, 54.0, 100.0] {
+            drag(view, to: position)
+            let expected = LocalModelSetup.residencySummary(position: position, facts: .live,
+                                                            wiredBytes: 21_400_000_000)
+            let shown = label(LocalModelSetup.identifier(.residencySummary), in: view)?.stringValue
+            if shown != expected { wrong.append("\(Int(position)): \(shown ?? "missing")") }
+            summaries.append(shown ?? "")
+            if position == 0 {
+                capture(view, card: LocalModelSetup.sectionIdentifier,
+                        to: outDir + "/setup-local-models-loaded-floor.png",
+                        name: "local models (loaded, budget dragged to 0)")
+            }
+        }
+        check("[residency] the in-use summary tracks the budget handle", wrong.isEmpty,
+              wrong.joined(separator: ", "))
+        // Dragging the handle BELOW what is already in use is the scenario the readout exists for, so the
+        // colour has to move with the number rather than being fixed when the card was built.
+        drag(view, to: 0)
+        check("[residency] a budget dragged under what is in use reads as needing attention",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.textColor == .systemOrange)
+        drag(view, to: 100)
+        check("[residency] a budget with room to spare reads as ordinary, not as a warning",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.textColor == .labelColor)
+        check("[residency] no two positions read the same, so the summary is not a fixed caption",
+              Set(summaries).count == summaries.count, summaries.joined(separator: " | "))
+        check("[residency] the summary reads in the established GB-of-GB style",
+              summaries.allSatisfy { $0.contains(" GB of ") && $0.hasSuffix(" budget in use") },
+              summaries.joined(separator: " | "))
+        drag(view, to: 54)
+        check("[residency] the summary states the machine's whole wired total against the budget",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.stringValue
+                == "21.4 GB of 33.9 GB budget in use",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.stringValue ?? "missing")
+
+        // Unload all: the control that makes a lowered budget true immediately.
+        guard let button = find(LocalModelSetup.identifier(.unloadAll), in: view) as? NSButton else {
+            check("[residency] the section offers an Unload all button", false)
+            return
+        }
+        check("[residency] Unload all is offered while something is loaded", button.isEnabled)
+        residency.reading = .init(models: [], wiredBytes: 4_100_000_000)
+        fire(button)
+        check("[residency] Unload all reaches the unload seam exactly once",
+              residency.unloadCalls == 1, "\(residency.unloadCalls)")
+        check("[residency] the section re-measures after unloading instead of believing its own request",
+              residency.readCallsAfterUnload >= 1, "\(residency.readCallsAfterUnload)")
+        check("[residency] an empty machine says nothing is loaded rather than rendering a blank block",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue
+                .hasPrefix("Nothing is loaded right now.") == true,
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue ?? "missing")
+        check("[residency] the summary falls with the freed memory",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.stringValue
+                == "4.1 GB of 33.9 GB budget in use",
+              label(LocalModelSetup.identifier(.residencySummary), in: view)?.stringValue ?? "missing")
+        check("[residency] Unload all is disabled once there is nothing left to unload",
+              (find(LocalModelSetup.identifier(.unloadAll), in: view) as? NSButton)?.isEnabled == false)
+        // The columns' font travels with the columns. An empty machine's sentence left in a monospaced
+        // face reads as a code dump, and this is the state that most often follows a click.
+        check("[residency] an empty machine's sentence drops the columns' monospaced face",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.font
+                == NSFont.systemFont(ofSize: 10.5),
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.font?.fontName ?? "nil")
+        assertLocalModelsLayout(view, state: "unloaded")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-unloaded.png", name: "local models (after Unload all)")
+
+        // An LM Studio that cannot be asked is a different fact from an empty one, and must not read as
+        // an all-clear.
+        residency.reading = .init(models: nil, wiredBytes: 21_400_000_000)
+        refreshSection(view)
+        check("[residency] an unreadable LM Studio says so rather than claiming nothing is loaded",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue
+                .contains("could not ask LM Studio") == true,
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue ?? "missing")
+        check("[residency] Unload all is disabled when the resident set is unknown",
+              (find(LocalModelSetup.identifier(.unloadAll), in: view) as? NSButton)?.isEnabled == false)
+        assertLocalModelsLayout(view, state: "unreadable")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-unreadable.png",
+                name: "local models (LM Studio unreadable)")
+
+        // Put the section back the way the earlier captures found it.
+        residency.reading = .init(models: bensModels, wiredBytes: 21_400_000_000)
+        refreshSection(view)
+        drag(view, to: 54)
+        _ = store
+    }
+
+    /// The proof that the section does not BLOCK on the LM Studio CLI.
+    ///
+    /// `lms ps` costs about a sixth of a second, and the 2026-07-13 freeze was a synchronous call of that
+    /// kind behind the filtering event tap, which stalled every keystroke on the Mac. So this stub simply
+    /// never answers: the section is built, and what is on screen afterwards is photographed. A section
+    /// that waited for the CLI could not have returned from its own initialiser to be photographed at all,
+    /// and one that rendered an empty list would be claiming a machine state it had not measured.
+    private static func driveResidencyPending(outDir: String) {
+        let store = LocalModelStore(position: 54, seconds: 600)
+        let residency = LocalResidencyStub(models: bensModels, wired: 21_400_000_000)
+        residency.withholdsAnswer = true
+        let view = SetupSettingsView(width: 640, observer: { $0(PreflightSelfTest.healthy) },
+                                     geminiKeyWriter: { _ in errSecSuccess },
+                                     geminiKeyDeleter: { errSecSuccess },
+                                     localModels: .init(store: store.store, facts: { .live },
+                                                        jit: { nil },
+                                                        residency: residency.reader,
+                                                        unloadAll: residency.unloader,
+                                                        now: { clock }))
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 2200),
+                            styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView?.addSubview(view)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        check("[pending] building the section asks for a reading without waiting for one",
+              residency.readCalls >= 1, "\(residency.readCalls)")
+        check("[pending] a reading that has not landed reads as pending, not as an empty machine",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue
+                == "Reading LM Studio...",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue ?? "missing")
+        check("[pending] the pending sentence is prose, not columns",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.font
+                == NSFont.systemFont(ofSize: 10.5))
+        check("[pending] Unload all is disabled until the machine has actually been read",
+              (find(LocalModelSetup.identifier(.unloadAll), in: view) as? NSButton)?.isEnabled == false)
+        check("[pending] the sentence about lowering the budget is on screen before any reading lands",
+              label(LocalModelSetup.identifier(.residencyNote), in: view)?.stringValue
+                == LocalModelSetup.residencyNote)
+        assertLocalModelsLayout(view, state: "pending")
+        capture(view, card: LocalModelSetup.sectionIdentifier,
+                to: outDir + "/setup-local-models-pending.png", name: "local models (reading)")
+
+        // ...and once it does land, the same section fills in without being rebuilt by anyone.
+        residency.withholdsAnswer = false
+        residency.deliverParked()
+        check("[pending] the reading fills the section in when it finally arrives",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue
+                .contains("qwen3-coder-30b-a3b-instruct-mlx") == true,
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue ?? "missing")
+        view.removeFromSuperview()
+    }
+
     /// The machine whose kernel ceiling is unreadable. There is no budget to state, so the section must say
     /// so rather than substitute `hw.memsize` - which would hand models the 12 GB macOS reserves and can
     /// never lend out. Rendered on its own because the facts are fixed when the section is built.
     private static func driveLocalModelsWithoutKernelFacts(outDir: String) {
         let store = LocalModelStore(position: 54, seconds: 600)
+        let residency = LocalResidencyStub(models: bensModels, wired: 21_400_000_000)
         let view = SetupSettingsView(width: 640, observer: { $0(PreflightSelfTest.healthy) },
                                      geminiKeyWriter: { _ in errSecSuccess },
                                      geminiKeyDeleter: { errSecSuccess },
                                      localModels: .init(store: store.store,
                                                         facts: { .init(userWireLimitBytes: nil,
                                                                        noUserWireBytes: nil) },
-                                                        jit: { nil }))
+                                                        jit: { nil },
+                                                        residency: residency.reader,
+                                                        unloadAll: residency.unloader,
+                                                        now: { clock }))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 2200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -253,13 +475,24 @@ enum SetupRender {
 
         assertLocalModels(view, position: 54,
                           facts: .init(userWireLimitBytes: nil, noUserWireBytes: nil),
-                          status: .unknown, state: "no kernel facts")
+                          status: .unknown, residency: .models(bensModels), wired: 21_400_000_000,
+                          state: "no kernel facts")
         assertLocalModelsLayout(view, state: "no kernel facts")
         check("[no kernel facts] the section states no budget at all",
               label(LocalModelSetup.identifier(.budgetLine), in: view)?.stringValue.contains("GB of")
                 == false)
         check("[no kernel facts] the reserved line is omitted rather than guessed",
               find(LocalModelSetup.identifier(.reservedLine), in: view) == nil)
+        // There is no budget to be in use against, and `budgetLine` has already said so. A lone "in use"
+        // figure here would be the second half of a sentence whose first half does not exist.
+        check("[no kernel facts] the in-use summary is omitted rather than stated against nothing",
+              find(LocalModelSetup.identifier(.residencySummary), in: view) == nil)
+        check("[no kernel facts] what is loaded is still reported, because that was measured",
+              label(LocalModelSetup.identifier(.residencyList), in: view)?.stringValue
+                .contains("qwen3-coder-30b-a3b-instruct-mlx") == true)
+        check("[no kernel facts] the sentence about lowering the budget is still on screen",
+              label(LocalModelSetup.identifier(.residencyNote), in: view)?.stringValue
+                == LocalModelSetup.residencyNote)
         check("[no kernel facts] the slider is still offered, so the setting can still be chosen",
               find(LocalModelSetup.identifier(.budgetSlider), in: view) is NSSlider)
         check("[no kernel facts] an unreadable LM Studio file does not read as a warning",
@@ -273,7 +506,9 @@ enum SetupRender {
     /// what makes the PNGs trustworthy: a capture alone cannot tell a correct number from a plausible one.
     private static func assertLocalModels(_ view: NSView, position: Double,
                                           facts: LocalModelSetup.MemoryFacts,
-                                          status: LocalModelSetup.JITStatus, state: String) {
+                                          status: LocalModelSetup.JITStatus,
+                                          residency: LocalModelSetup.Residency,
+                                          wired: UInt64?, state: String) {
         check("[local models \(state)] the section is on the Setup tab",
               find(LocalModelSetup.cardIdentifier, in: view) != nil
                 && find(LocalModelSetup.jitCardIdentifier, in: view) != nil)
@@ -286,6 +521,11 @@ enum SetupRender {
             (.budgetLevel, LocalModelSetup.budgetLevelText(position)),
             (.budgetLine, LocalModelSetup.budgetLine(position: position, facts: facts)),
             (.reservedLine, LocalModelSetup.reservedLine(facts: facts)),
+            (.residencyTitle, LocalModelSetup.residencyTitle),
+            (.residencyList, LocalModelSetup.residencyList(residency, now: clock)),
+            (.residencySummary, LocalModelSetup.residencySummary(position: position, facts: facts,
+                                                                 wiredBytes: wired)),
+            (.residencyNote, LocalModelSetup.residencyNote),
             (.timerTitle, LocalModelSetup.timerTitle),
             (.timerHint, LocalModelSetup.timerHint),
             (.jitStatus, LocalModelSetup.jitStatusText(status)),
@@ -817,6 +1057,54 @@ enum SetupRender {
 
     private static func label(_ id: String, in root: NSView) -> NSTextField? {
         SelfTestRenderCapture.label(id, in: root)
+    }
+}
+
+/// An in-memory stand-in for LM Studio, so this gate can drive the live readout through every state -
+/// loaded, empty, unreadable, and not-yet-answered - on a machine whose real LM Studio is holding whatever
+/// it happens to be holding.
+///
+/// It also holds the answer BACK on demand. That is the only way to photograph the `pending` state, and
+/// `pending` is the state that proves the section asks for a reading rather than blocking on the CLI:
+/// production spends about 0.16s in `lms ps`, and doing that on the main thread is the 2026-07-13 freeze.
+final class LocalResidencyStub {
+    var reading: LocalModelsSectionView.ResidencyReading
+    /// Every reading the section asked for, and every unload it performed.
+    var readCalls = 0
+    var unloadCalls = 0
+    /// Readings taken after the first unload, which is what proves the button re-measures rather than
+    /// believing its own request.
+    var readCallsAfterUnload = 0
+    /// While true, a request is recorded and parked instead of answered.
+    var withholdsAnswer = false
+    private var parked: ((LocalModelsSectionView.ResidencyReading) -> Void)?
+
+    init(models: [ModelResidency.ResidentModel]?, wired: UInt64?) {
+        reading = .init(models: models, wiredBytes: wired)
+    }
+
+    var reader: LocalModelsSectionView.ResidencyReader {
+        { [self] completion in
+            readCalls += 1
+            if unloadCalls > 0 { readCallsAfterUnload += 1 }
+            if withholdsAnswer { parked = completion; return }
+            completion(reading)
+        }
+    }
+
+    var unloader: LocalModelsSectionView.UnloadAll {
+        { [self] completion in
+            unloadCalls += 1
+            completion()
+        }
+    }
+
+    /// Answer a request that was parked while `withholdsAnswer` was set, the way a background queue
+    /// completing would. Does nothing if nothing is parked.
+    func deliverParked() {
+        guard let parked = parked else { return }
+        self.parked = nil
+        parked(reading)
     }
 }
 
