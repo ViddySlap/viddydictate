@@ -774,8 +774,7 @@ final class DictationController {
         guard let presentation = TextTransformClient.safeFailurePresentation(for: result) else { return }
         Log.write("\(logNoun) fallback classification=\(failure.logToken) — text untouched")
         hud.toast(
-            "⚠️ \(uiNoun): \(presentation.userMessage) — text left as-is. Retry in Models.",
-            forceFull: presentation.forceFullToast)
+            "⚠️ \(uiNoun): \(presentation.userMessage) — text left as-is. Retry under Models on the Hotkeys tab.")
     }
 
     /// Land a successful selection-transform result through the focus fallback. The shared notes delivery
@@ -899,8 +898,7 @@ final class DictationController {
                 let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                 Log.write("\(logNoun) fallback classification=\(failure.logToken) — raw")
                 hud.toast(
-                    "⚠️ \(uiNoun): \(presentation.userMessage) — pasted raw. Retry in Models.",
-                    forceFull: presentation.forceFullToast)
+                    "⚠️ \(uiNoun): \(presentation.userMessage) — pasted raw. Retry under Models on the Hotkeys tab.")
                 finalize(
                     delivered: input, raw: input, cleaned: nil, mode: .raw,
                     historyID: historyID ?? UUID(), keepHUD: true,
@@ -1189,8 +1187,7 @@ final class DictationController {
                     let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                     Log.write("cleanup fallback classification=\(failure.logToken) → raw")
                     self.hud.toast(
-                        "⚠️ \(presentation.userMessage) — pasted raw. Retry in Models.",
-                        forceFull: presentation.forceFullToast)
+                        "⚠️ \(presentation.userMessage) — pasted raw. Retry under Models on the Hotkeys tab.")
                     self.finalize(
                         delivered: raw, raw: raw, cleaned: nil, mode: .raw,
                         historyID: takeID, keepHUD: true, lateRecovery: recovered
@@ -1296,8 +1293,7 @@ final class DictationController {
             let presentation = TextTransformClient.safeFailurePresentation(for: result)!
             Log.write("cleanup explicit retry classification=\(failure.logToken) — raw unchanged")
             hud.toast(
-                "⚠️ \(presentation.userMessage) — raw text left unchanged. Retry in Models.",
-                forceFull: presentation.forceFullToast)
+                "⚠️ \(presentation.userMessage) — raw text left unchanged. Retry under Models on the Hotkeys tab.")
         }
     }
 

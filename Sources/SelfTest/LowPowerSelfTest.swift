@@ -72,6 +72,62 @@ enum LowPowerSelfTest {
         check("consolidation preserves every unrelated tab and their order",
               labels == ["Setup", "Hotkeys", "Sticky Skills", "Audio", "Appearance",
                          "Dictionary", "History", "Notes"])
+
+        checkRetiredTabPointers(check, live: Set(labels))
+    }
+
+    /// The tab merges retired two names, and five failure toasts plus three battery advisories went on
+    /// telling the user to "Retry in Models" for weeks. Nothing caught it: the existing consolidation
+    /// checks read the tab enum, and `ModelsPowerUIProbe`'s cross-reference check reads only the Hotkeys
+    /// tab's own rendered text — while the dead pointers lived in DictationController, OneShotRegistry,
+    /// and PowerMode, which no settings probe ever looks at.
+    ///
+    /// So scan the app's own sources for the retired names in the two shapes a user-facing pointer takes.
+    /// Comment-only lines are skipped, because a comment recording the history of a merge is not a
+    /// pointer anyone can follow and must not go red. A line of CODE that names a retired tab is a
+    /// finding either way. Known limitation: a retired name reached by string interpolation would slip
+    /// through — this catches literals, which is how all eight of the real ones were written.
+    private static func checkRetiredTabPointers(_ check: (String, Bool) -> Void, live: Set<String>) {
+        // Every tab Settings has ever shipped. L3 merged Display into Appearance; L9 merged Models into
+        // Hotkeys. Deriving `retired` from the live enum means a future merge is covered by adding one
+        // name here, not by remembering to write a new check.
+        let everShipped = ["Setup", "Hotkeys", "Sticky Skills", "Audio", "Appearance", "Dictionary",
+                           "History", "Notes", "Models", "Display"]
+        let retired = everShipped.filter { !live.contains($0) }.sorted()
+        // Deliberately not an exact-set match: if a later merge retires a third tab, `retired`
+        // picks it up on its own and the scan widens for free. This only guards the two names
+        // being dropped from `everShipped` by a future edit.
+        check("the retired-tab list still names the two merged-away tabs",
+              retired.contains("Display") && retired.contains("Models"))
+
+        let dir = "Sources/App"
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+            .filter { $0.hasSuffix(".swift") }.sorted()
+        // Fail CLOSED: an empty listing means the gate was run from the wrong cwd, not that the app is
+        // clean. Every probe in this suite reads sources by a path relative to the worktree root.
+        check("app sources are readable for the pointer scan (run the gate from the worktree root)",
+              files.count > 100)
+
+        var offenders: [String] = []
+        for file in files {
+            guard let text = try? String(contentsOfFile: "\(dir)/\(file)", encoding: .utf8) else {
+                offenders.append("\(file): unreadable")
+                continue
+            }
+            for (n, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("//") || line.hasPrefix("*") || line.hasPrefix("/*") { continue }
+                for name in retired {
+                    // "on the Models tab" / "Retry in Models." / "open Models in Settings."
+                    for needle in ["\(name) tab", "in \(name).", "\(name) in Settings"]
+                    where line.contains(needle) {
+                        offenders.append("\(file):\(n + 1): \(needle)")
+                    }
+                }
+            }
+        }
+        if !offenders.isEmpty { print("  retired-tab pointers: \(offenders.joined(separator: "; "))") }
+        check("no user-facing copy points at a retired Settings tab", offenders.isEmpty)
     }
 
     private static func checkMigration(_ check: (String, Bool) -> Void, defaults: UserDefaults) {

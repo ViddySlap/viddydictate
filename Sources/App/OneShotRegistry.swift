@@ -583,8 +583,7 @@ final class OneShotRegistry {
                         let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                         Log.write(Self.searchFailureLogLine(for: result, mode: mode))
                         self.context.hud.toast(
-                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.",
-                            forceFull: presentation.forceFullToast)
+                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.")
                     }
                 })
         }
@@ -621,8 +620,7 @@ final class OneShotRegistry {
                     let presentation = TextTransformClient.safeFailurePresentation(for: result)!
                     Log.write("custom \(m.id) fallback classification=\(failure.logToken)")
                     self.context.hud.toast(
-                        "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry in Models.",
-                        forceFull: presentation.forceFullToast)
+                        "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry under Models on the Hotkeys tab.")
                 }
             }
             : nil

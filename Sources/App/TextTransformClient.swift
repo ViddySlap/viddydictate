@@ -427,24 +427,39 @@ enum TextTransformClient {
         }
     }
 
+    /// A failure sentence that has already been through the allowlist and is safe to show verbatim.
+    /// The wrapper is the safety signal, not ceremony: a raw provider or transport reason can never be
+    /// one of these, so a call site holding a `FailurePresentation` knows it is not about to put user
+    /// input or service diagnostics on screen.
     struct FailurePresentation: Equatable {
         let userMessage: String
-        let forceFullToast: Bool
     }
 
     /// Preserve only the exact app-authored sentences on CleanupClient's existing allowlist. Every
     /// arbitrary provider/transport reason remains collapsed to the content-safe category, because it
-    /// may contain user input or service diagnostics. Allowlisted messages force the full HUD: the
-    /// Final-only pill caps at two lines and can truncate an instruction once its mode-specific suffix
-    /// is added.
+    /// may contain user input or service diagnostics.
+    ///
+    /// Every presentation in this family renders the same way (LD3), and the family is the point: these
+    /// are the PROVIDER FAILURE toasts, the ones a user meets back to back while one dictation keeps
+    /// failing. A capacity refusal used to force the full box, so a RAM refusal arrived in a different
+    /// KIND of window from the quota refusal right behind it. The truncation that justified the escape
+    /// was real but scale-dependent: measured against the pre-LD3 binary, the sentence fitted the pill
+    /// at pill scale 0.9 and 1.0 and only clipped at 0.5, where the toast font has floored at 12pt but
+    /// the capsule width was still shrinking. `layoutPillToast` now floors its width with its font, so
+    /// the longest allowlisted sentence fits at every pill size and the escape hatch is unnecessary.
+    ///
+    /// This is NOT a rule that every toast in the app is compact. AppDelegate's deliberate high-salience
+    /// advisories — a failed save, a blocked quit, a battery warning, a multi-line update notice — still
+    /// pass `forceFull: true` to `HUDPanel.toast`, and should. Consistency is owed within a family the
+    /// user compares, not across every notice the app can raise.
     static func safeFailurePresentation(
         for result: CleanupClient.Result
     ) -> FailurePresentation? {
         if let message = CleanupClient.capacityRefusalMessage(for: result) {
-            return FailurePresentation(userMessage: message, forceFullToast: true)
+            return FailurePresentation(userMessage: message)
         }
         guard let failure = safeFailure(for: result) else { return nil }
-        return FailurePresentation(userMessage: failure.userMessage, forceFullToast: false)
+        return FailurePresentation(userMessage: failure.userMessage)
     }
 
     private static func armAsyncRetry(for request: TextTransformRequest,

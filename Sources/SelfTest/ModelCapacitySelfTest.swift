@@ -201,11 +201,9 @@ enum ModelCapacitySelfTest {
         let ordinaryPresentation = TextTransformClient.safeFailurePresentation(
             for: .unavailable("fixture provider diagnostic that must stay hidden"))
         reporter.record(
-            "capacity strings survive presentation intact and force the full HUD",
+            "capacity strings survive presentation intact",
             overPresentation?.userMessage == CleanupClient.overBudgetMessage
-                && overPresentation?.forceFullToast == true
-                && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage
-                && factsPresentation?.forceFullToast == true)
+                && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage)
         reporter.record(
             "Gemini quota and auth statuses use short app-authored presentation sentences",
             quotaPresentation?.userMessage == CleanupClient.geminiSpendCapMessage
@@ -217,9 +215,17 @@ enum ModelCapacitySelfTest {
                 && (CleanupClient.geminiSpendCapMessage
                     + CleanupClient.geminiRejectedKeyMessage).allSatisfy(\.isASCII))
         reporter.record(
-            "ordinary provider diagnostics remain generic and pill-eligible",
-            ordinaryPresentation?.userMessage == "Selected provider is unavailable"
-                && ordinaryPresentation?.forceFullToast == false)
+            "ordinary provider diagnostics remain generic",
+            ordinaryPresentation?.userMessage == "Selected provider is unavailable")
+
+        // LD3: every PROVIDER FAILURE renders the same way, so this seam must carry NOTHING that could
+        // route one of those sentences to a different window than another. A future field that does is
+        // the regression this pins; the pill's ability to hold the longest sentence is pinned in the
+        // offscreen render gate, where real font metrics exist.
+        reporter.record(
+            "presentation carries only the safe sentence, with no per-message rendering escape",
+            Mirror(reflecting: TextTransformClient.FailurePresentation(userMessage: "x"))
+                .children.compactMap(\.label) == ["userMessage"])
 
         let providerCanary = "PRIVATE_PROVIDER_DETAIL_\(UUID().uuidString)"
         let nonAllowlistedPresentations = [
