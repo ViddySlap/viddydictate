@@ -23,6 +23,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case stickySkillSelftest = "--sticky-skill-selftest"
     case freshInstallRehearsal = "--fresh-install-rehearsal"
     case networkPathSelftest = "--network-path-selftest"
+    case lmStudioInstallerSelftest = "--lmstudio-installer-selftest"
     case lmStudioModelCatalogSelftest = "--lmstudio-model-catalog-selftest"
     case lmStudioModelCatalogLive = "--lmstudio-model-catalog-live"
     case modelRoutingSelftest = "--model-routing-selftest"
