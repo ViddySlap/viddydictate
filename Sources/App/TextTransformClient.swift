@@ -432,11 +432,11 @@ enum TextTransformClient {
         let forceFullToast: Bool
     }
 
-    /// Preserve only the two app-authored capacity sentences. Every arbitrary provider/transport
-    /// reason remains collapsed to the existing content-safe category, because it may contain user
-    /// input or service diagnostics. Capacity messages force the full HUD: the Final-only pill caps at
-    /// two lines and would truncate the long over-budget instruction once its mode-specific suffix is
-    /// added.
+    /// Preserve only the exact app-authored sentences on CleanupClient's existing allowlist. Every
+    /// arbitrary provider/transport reason remains collapsed to the content-safe category, because it
+    /// may contain user input or service diagnostics. Allowlisted messages force the full HUD: the
+    /// Final-only pill caps at two lines and can truncate an instruction once its mode-specific suffix
+    /// is added.
     static func safeFailurePresentation(
         for result: CleanupClient.Result
     ) -> FailurePresentation? {

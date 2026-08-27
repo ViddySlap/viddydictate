@@ -192,6 +192,12 @@ enum ModelCapacitySelfTest {
 
         let overPresentation = TextTransformClient.safeFailurePresentation(for: overBudget)
         let factsPresentation = TextTransformClient.safeFailurePresentation(for: factsUnavailable)
+        let quotaPresentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 429"))
+        let auth401Presentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 401"))
+        let auth403Presentation = TextTransformClient.safeFailurePresentation(
+            for: .unavailable("gemini HTTP 403"))
         let ordinaryPresentation = TextTransformClient.safeFailurePresentation(
             for: .unavailable("fixture provider diagnostic that must stay hidden"))
         reporter.record(
@@ -201,9 +207,64 @@ enum ModelCapacitySelfTest {
                 && factsPresentation?.userMessage == CleanupClient.memoryFactsUnavailableMessage
                 && factsPresentation?.forceFullToast == true)
         reporter.record(
+            "Gemini quota and auth statuses use short app-authored presentation sentences",
+            quotaPresentation?.userMessage == CleanupClient.geminiSpendCapMessage
+                && auth401Presentation?.userMessage == CleanupClient.geminiRejectedKeyMessage
+                && auth403Presentation?.userMessage == CleanupClient.geminiRejectedKeyMessage
+                && CleanupClient.geminiSpendCapMessage.contains("Google AI Studio")
+                && CleanupClient.geminiSpendCapMessage.contains("spend cap")
+                && CleanupClient.geminiRejectedKeyMessage.contains("Settings")
+                && (CleanupClient.geminiSpendCapMessage
+                    + CleanupClient.geminiRejectedKeyMessage).allSatisfy(\.isASCII))
+        reporter.record(
             "ordinary provider diagnostics remain generic and pill-eligible",
             ordinaryPresentation?.userMessage == "Selected provider is unavailable"
                 && ordinaryPresentation?.forceFullToast == false)
+
+        let providerCanary = "PRIVATE_PROVIDER_DETAIL_\(UUID().uuidString)"
+        let nonAllowlistedPresentations = [
+            CleanupClient.Result.unavailable("gemini HTTP 500"),
+            .unavailable("gemini HTTP 429 \(providerCanary)"),
+            .unavailable("transport echoed \(providerCanary)"),
+            .badOutput("provider stderr \(providerCanary)"),
+        ].compactMap { TextTransformClient.safeFailurePresentation(for: $0)?.userMessage }
+        reporter.record(
+            "non-allowlisted Gemini and provider detail stays generic and never reaches the UI",
+            nonAllowlistedPresentations.count == 4
+                && nonAllowlistedPresentations.dropLast().allSatisfy {
+                    $0 == "Selected provider is unavailable"
+                }
+                && nonAllowlistedPresentations.last
+                    == "Selected provider returned unusable output"
+                && nonAllowlistedPresentations.allSatisfy { !$0.contains(providerCanary) })
+
+        let safeGeminiReasons = [
+            "gemini HTTP 429", "gemini HTTP 401", "gemini HTTP 403",
+            "bad gemini response shape", "encode failed",
+        ]
+        reporter.record(
+            "Option+G logs each fixed app-authored failure reason beside its category",
+            safeGeminiReasons.allSatisfy { reason in
+                OneShotRegistry.searchFailureLogLine(
+                    for: .unavailable(reason), mode: .searchGemini
+                ).contains("classification=unavailable reason=\(reason)")
+            })
+        let privateGeminiLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("transport echoed \(providerCanary)"), mode: .searchGemini)
+        let decoratedHTTPLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("gemini HTTP 429 \(providerCanary)"), mode: .searchGemini)
+        let privateBadOutputLog = OneShotRegistry.searchFailureLogLine(
+            for: .badOutput("provider stderr \(providerCanary)"), mode: .searchGemini)
+        let localEncodeLog = OneShotRegistry.searchFailureLogLine(
+            for: .unavailable("encode failed"), mode: .searchLocal)
+        reporter.record(
+            "transport, stderr, and local-search branches remain category-only in logs",
+            !privateGeminiLog.contains(providerCanary)
+                && !decoratedHTTPLog.contains(providerCanary)
+                && !privateBadOutputLog.contains(providerCanary)
+                && !localEncodeLog.contains("reason=")
+                && [privateGeminiLog, decoratedHTTPLog, privateBadOutputLog, localEncodeLog]
+                    .allSatisfy { $0.contains("classification=") })
 
         let cleanupSemaphore = DispatchSemaphore(value: 0)
         var cleanupResult: CleanupClient.Result = .badOutput("unset")
