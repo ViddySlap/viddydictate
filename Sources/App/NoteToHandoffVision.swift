@@ -140,15 +140,34 @@ enum NoteToHandoffLocalVisionClient {
     static let idleTTLSeconds = 300 // ADR 0006 intent: a helper VLM cools after five idle minutes.
 
     typealias Descriptions = [Int: String]
+    typealias Readiness = (String, Int) -> ModelManager.ReadinessResult
 
     static func describe(
         model: String,
         frames: [NoteToHandoffFrame],
+        readiness: @escaping Readiness = { model, ttlSeconds in
+            ModelManager.shared.ensureReady(model, ttlOverrideSeconds: ttlSeconds)
+        },
         completion: @escaping (Descriptions?) -> Void
     ) {
         guard !frames.isEmpty else { completion([:]); return }
         DispatchQueue.global(qos: .userInitiated).async {
-            guard ModelResidency.ensureLoaded(model, ttlSeconds: idleTTLSeconds) else {
+            switch readiness(model, idleTTLSeconds) {
+            case .ready:
+                break
+            case .capacityRefused(.overBudget):
+                Log.write(
+                    "handoff vision: \(model) capacity refused (over budget); using filename-only fallback")
+                completion(nil)
+                return
+            case .capacityRefused(.factsUnavailable):
+                Log.write(
+                    "handoff vision: \(model) capacity refused (memory facts unavailable); using filename-only fallback")
+                completion(nil)
+                return
+            case .loadFailed:
+                Log.write(
+                    "handoff vision: \(model) could not be made resident; using filename-only fallback")
                 completion(nil)
                 return
             }

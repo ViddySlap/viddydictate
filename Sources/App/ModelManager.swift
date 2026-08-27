@@ -40,9 +40,30 @@ final class ModelManager {
         let budgetBytes: (Double) -> UInt64?
         let ensureLoaded: (String, Int) -> Bool
         let unload: (String) -> Void
+        let log: (String) -> Void
         /// How long the recheck may wait for the kernel to reclaim an evicted model's wired pages.
         /// Defaults to 0 so a test supplying its own facts sees no wall-clock wait; production waits.
         var evictionSettleSeconds: Double = 0
+
+        init(
+            availableInstalledModels: @escaping () -> [LMStudioInstalledModel]?,
+            residentModels: @escaping () -> [ModelResidency.ResidentModel]?,
+            wiredBytes: @escaping () -> UInt64?,
+            budgetBytes: @escaping (Double) -> UInt64?,
+            ensureLoaded: @escaping (String, Int) -> Bool,
+            unload: @escaping (String) -> Void,
+            log: @escaping (String) -> Void = { Log.write($0) },
+            evictionSettleSeconds: Double = 0
+        ) {
+            self.availableInstalledModels = availableInstalledModels
+            self.residentModels = residentModels
+            self.wiredBytes = wiredBytes
+            self.budgetBytes = budgetBytes
+            self.ensureLoaded = ensureLoaded
+            self.unload = unload
+            self.log = log
+            self.evictionSettleSeconds = evictionSettleSeconds
+        }
 
         static let live = CapacityDependencies(
             availableInstalledModels: { ModelResidency.availableInstalledModels() },
@@ -51,6 +72,7 @@ final class ModelManager {
             budgetBytes: { SystemMemory.budgetBytes(forSliderPosition: $0) },
             ensureLoaded: { ModelResidency.ensureLoaded($0, ttlSeconds: $1) },
             unload: { ModelResidency.unload($0) },
+            log: { Log.write($0) },
             evictionSettleSeconds: evictionSettleWindow)
     }
 
@@ -166,7 +188,21 @@ final class ModelManager {
 
         // A resident request allocates nothing new. Do not re-load it (LM Studio would create :2),
         // and do not claim ownership if another caller made it resident.
-        if residents.contains(where: { $0.identifier == model }) { return .alreadyResident }
+        if let resident = residents.first(where: { $0.identifier == model }) {
+            // This read is diagnostic only. Reusing a resident remains authorized even when the
+            // selected budget was lowered beneath its footprint, or when the budget is unreadable:
+            // the request wires no new model memory. Keep this inside the resident short-circuit so
+            // it can never become a refusal or trigger the cold-load eviction path.
+            if let budget = dependencies.budgetBytes(Settings.modelMemoryBudgetSliderPosition),
+               resident.sizeBytes > budget {
+                dependencies.log(
+                    "model capacity: \(model) is already resident at "
+                        + "\(SystemMemory.formatGB(resident.sizeBytes)), above the current "
+                        + "\(SystemMemory.formatGB(budget)) budget; reusing it because this request "
+                        + "allocates no new model memory")
+            }
+            return .alreadyResident
+        }
 
         guard let installed = dependencies.availableInstalledModels(),
               let size = installed.first(where: { $0.modelID == model })?.sizeBytes,

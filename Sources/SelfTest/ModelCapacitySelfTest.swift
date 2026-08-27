@@ -9,7 +9,9 @@ enum ModelCapacitySelfTest {
 
         parserChecks(reporter)
         factorAndMissingFactChecks(reporter)
+        residentBypassLoggingChecks(reporter)
         clientWiringAndGeminiOrderingChecks(reporter)
+        productionCallSiteChecks(reporter)
         ownershipAndEvictionChecks(reporter)
         onePassCheck(reporter)
         evictionSettleChecks(reporter)
@@ -77,7 +79,8 @@ enum ModelCapacitySelfTest {
                     wiredBytes: { wired },
                     budgetBytes: { _ in budget },
                     ensureLoaded: { _, _ in loadSucceeds },
-                    unload: { _ in }))
+                    unload: { _ in },
+                    log: { _ in }))
         }
 
         reporter.record("missing resident snapshot refuses softly with a typed capacity result",
@@ -93,6 +96,107 @@ enum ModelCapacitySelfTest {
                         result(budget: nil) == .capacityRefused(.factsUnavailable))
         reporter.record("LM Studio load failure remains distinct from a capacity refusal",
                         result(loadSucceeds: false) == .loadFailed)
+    }
+
+    private static func residentBypassLoggingChecks(_ reporter: SelfTestReporter) {
+        let model = "fixture/already-resident"
+        var catalogReads = 0
+        var wiredReads = 0
+        var budgetReads = 0
+        var loads: [String] = []
+        var unloads: [String] = []
+        var logs: [String] = []
+
+        func dependencies(budget: UInt64?) -> ModelManager.CapacityDependencies {
+            ModelManager.CapacityDependencies(
+                availableInstalledModels: {
+                    catalogReads += 1
+                    return nil
+                },
+                residentModels: { [resident(model, 1_200_000_000, 1, "idle")] },
+                wiredBytes: {
+                    wiredReads += 1
+                    return nil
+                },
+                budgetBytes: { _ in
+                    budgetReads += 1
+                    return budget
+                },
+                ensureLoaded: { requested, _ in
+                    loads.append(requested)
+                    return true
+                },
+                unload: { unloads.append($0) },
+                log: { logs.append($0) })
+        }
+
+        let overBudget = ModelManager().ensureReady(
+            model, ttlOverrideSeconds: 600, dependencies: dependencies(budget: 1_000_000_000))
+        reporter.record(
+            "an already-resident model above the current budget remains ready without load or eviction",
+            overBudget == .ready && catalogReads == 0 && wiredReads == 0
+                && loads.isEmpty && unloads.isEmpty,
+            "result=\(overBudget) catalogReads=\(catalogReads) wiredReads=\(wiredReads) "
+                + "loads=\(loads) unloads=\(unloads)")
+        reporter.record(
+            "over-budget resident reuse logs the model footprint, budget, and no-new-allocation reason",
+            logs == [
+                "model capacity: fixture/already-resident is already resident at 1.2 GB, "
+                    + "above the current 1.0 GB budget; reusing it because this request "
+                    + "allocates no new model memory",
+            ],
+            "logs=\(logs)")
+
+        logs.removeAll()
+        let missingBudget = ModelManager().ensureReady(
+            model, ttlOverrideSeconds: 600, dependencies: dependencies(budget: nil))
+        reporter.record(
+            "an unreadable budget cannot turn the already-resident shortcut into a refusal",
+            missingBudget == .ready && logs.isEmpty && budgetReads == 2
+                && catalogReads == 0 && wiredReads == 0 && loads.isEmpty && unloads.isEmpty,
+            "result=\(missingBudget) budgetReads=\(budgetReads) logs=\(logs)")
+    }
+
+    private static func productionCallSiteChecks(_ reporter: SelfTestReporter) {
+        let repo = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let sources = repo.appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: sources,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            reporter.record(
+                "production sources are readable for the direct ModelResidency load guard", false,
+                "run the gate from the worktree root")
+            return
+        }
+
+        let needle = "ModelResidency.ensureLoaded("
+        var swiftFileCount = 0
+        var directSites: [String] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift",
+                  !url.path.contains("/Sources/SelfTest/") else { continue }
+            swiftFileCount += 1
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                directSites.append("UNREADABLE:\(url.lastPathComponent)")
+                continue
+            }
+            let count = text.components(separatedBy: needle).count - 1
+            guard count > 0 else { continue }
+            let relative = url.path.replacingOccurrences(of: repo.path + "/", with: "")
+            directSites.append(contentsOf: Array(repeating: relative, count: count))
+        }
+
+        reporter.record(
+            "production sources are readable for the direct ModelResidency load guard",
+            swiftFileCount > 100,
+            "swiftFiles=\(swiftFileCount)")
+        reporter.record(
+            "ModelManager is the only production call site allowed to reach ModelResidency.ensureLoaded",
+            directSites == ["Sources/App/ModelManager.swift"],
+            "directSites=\(directSites)")
     }
 
     private static func ownershipAndEvictionChecks(_ reporter: SelfTestReporter) {

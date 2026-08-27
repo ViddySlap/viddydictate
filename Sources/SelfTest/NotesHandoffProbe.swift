@@ -321,6 +321,29 @@ extension NotesProbe {
               && NoteToHandoffFrameExtractor.maxFrameBytesPerNote == 24_000_000)
 
         let frame = extraction.frames[0]
+        var refusedReadinessCalls: [(String, Int)] = []
+        let refusedDone = DispatchSemaphore(value: 0)
+        var refusedDescriptions: NoteToHandoffLocalVisionClient.Descriptions? = [
+            0: "must be cleared by the refusal",
+        ]
+        NoteToHandoffLocalVisionClient.describe(
+            model: "fixture/blocked-vlm",
+            frames: [frame],
+            readiness: { model, ttlSeconds in
+                refusedReadinessCalls.append((model, ttlSeconds))
+                return .capacityRefused(.overBudget)
+            }
+        ) {
+            refusedDescriptions = $0
+            refusedDone.signal()
+        }
+        let refusedReturned = refusedDone.wait(timeout: .now() + 2) == .success
+        check("note-to-handoff vision: capacity refusal stops before inference and degrades to filename-only",
+              refusedReturned && refusedDescriptions == nil
+              && refusedReadinessCalls.count == 1
+              && refusedReadinessCalls.first?.0 == "fixture/blocked-vlm"
+              && refusedReadinessCalls.first?.1 == NoteToHandoffLocalVisionClient.idleTTLSeconds)
+
         let request = NoteToHandoffRequest(
             sourceNoteId: "vision", title: "Vision", body: "Map attachments",
             attachments: [NoteToHandoffAttachmentEvidence(filename: "image-0.png")],
