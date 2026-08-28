@@ -31,7 +31,17 @@ enum WebSearchSelfTest {
 
     static func run() -> Bool {
         Settings.registerDefaults()
+        // Establish the SAME precondition the running app establishes, rather than exercising the
+        // pipeline in a state production never has. Local availability begins fail-closed by design
+        // (no route may assume a model exists before the catalog has been measured), and the app
+        // publishes a real measurement at startup via AppDelegate.hydrateLocalAvailability() and
+        // again in Preflight.observe. A harness that skips it measures the default, not the product.
+        // This measures for real; it does not assert Local is available.
+        let measuredLocal = LLMProviderDetection.observeLocal()
+        Settings.modelsPower.setLocalAvailabilityState(
+            measuredLocal.presence.state, models: measuredLocal.models)
         print("=== ViddyDictate Web-Search (Option+L / Option+G) — selftest ===")
+        print("local availability measured: \(measuredLocal.presence.state)")
         print("retrieval=\(Settings.searchModel)  synth=\(Settings.searchSynthModel)")
         print("endpoint=\(Settings.searchEndpoint.absoluteString)  maxSearches=\(Settings.searchMaxSearches)")
         print("backend installed: \(WebSearchBackend.isInstalled)  gemini=\(Settings.geminiModel)\n")
