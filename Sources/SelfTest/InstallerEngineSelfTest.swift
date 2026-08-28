@@ -53,6 +53,13 @@ enum InstallerEngineSelfTest {
                         && script.contains("VIDDYDICTATE_HASH_MISMATCH"))
         check.record("the model command carries no repository or revision in argv",
                      modelArgs.count == 2 && !modelArgs.contains("small/test") && !modelArgs.contains("rev-1"))
+        // The check above only proves the script MENTIONS sha256, which stayed true while the script
+        // could never obtain one: huggingface_hub returns `lfs = None` for every sibling unless file
+        // metadata is requested, so `published` was always empty and the mandatory voice-model row
+        // failed after downloading 1.5 GiB. A fixture cannot see that; this pins the one argument that
+        // makes the published-hash check capable of finding a hash at all.
+        check.record("the model command asks huggingface_hub for the per-file metadata the hash check needs",
+                     script.contains("files_metadata=True"))
     }
 
     private static func checkRetryRule(_ check: SelfTestReporter) {

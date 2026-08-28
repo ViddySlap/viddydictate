@@ -558,7 +558,7 @@ final class InstallerEngine {
         import hashlib, json, pathlib, sys
         repo = \(pythonString(artifact.repository))
         cache = \(pythonString(cacheDirectory.path))
-        siblings = HfApi().model_info(repo_id=repo, \(revisionLine)).siblings
+        siblings = HfApi().model_info(repo_id=repo, \(revisionLine)files_metadata=True).siblings
         published = {}
         for sibling in siblings:
             lfs = getattr(sibling, "lfs", None)
@@ -573,6 +573,12 @@ final class InstallerEngine {
         return ["-c", script]
     }
 
+    /// `model_info` omits per-file `lfs` metadata unless it is asked for: without `files_metadata=True`
+    /// every sibling comes back with `lfs = None`, so `published` is empty and the verification below
+    /// aborts the row with "huggingface_hub returned no published SHA-256 values" AFTER the model has
+    /// already been fetched. Measured cold against huggingface_hub 1.29.0 on 2026-08-27: the mandatory
+    /// voice-model row downloaded 1.5 GiB and then failed on every install. Asking for the metadata is
+    /// what makes the hash check real rather than vacuous.
     /// Streaming SHA-256 keeps a large model out of memory while checking its published digest.
     static func sha256(ofFileAt url: URL, fileManager: FileManager = .default) throws -> String {
         guard fileManager.isReadableFile(atPath: url.path) else {
