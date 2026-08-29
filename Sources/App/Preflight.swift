@@ -204,9 +204,7 @@ enum Preflight {
             return warn(.sttDaemon,
                         "Not installed: no LaunchAgent for \(DaemonClient.agentLabel) and nothing "
                             + "answering on 127.0.0.1:8765.",
-                        remedy: "run ./install-daemon.sh from the ViddyDictate repo - it creates the "
-                            + "Python venv, downloads the speech model on first run, and loads the "
-                            + "LaunchAgent",
+                        remedy: BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.sttDaemon),
                         reducedFunction: daemonReduced)
         case .unreachable(let detail):
             return warn(.sttDaemon,
@@ -349,8 +347,8 @@ enum Preflight {
     private static func webSearchHelperFinding(_ installed: Bool) -> PreflightFinding {
         guard !installed else { return ok(.webSearchHelper, "Installed (venv and helper both present).") }
         return warn(.webSearchHelper,
-                    "Not installed: the search venv or its helper script is missing.",
-                    remedy: "run ./install-websearch-helper.sh from the ViddyDictate repo",
+                    "Not installed: the search helper is missing.",
+                    remedy: BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch),
                     reducedFunction: "Local web search (Option+L) cannot retrieve results. Every other "
                         + "mode, including Gemini answers (Option+G), is unaffected.")
     }
@@ -391,6 +389,12 @@ extension Preflight {
     static func observe(completion: @escaping (PreflightObservation) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let providers = LLMProviderDetection.observeAll()
+            if let local = providers[.local] {
+                // Keep the execution resolver on the same measured Local state and catalog shown by this
+                // preflight pass. The catalog is runtime-only; no model inventory enters durable settings.
+                Settings.modelsPower.setLocalAvailabilityState(
+                    local.state, models: local.availableLocalModels)
+            }
             let helperInstalled = WebSearchBackend.isInstalled
             let keySource = SecretStore.resolveSource(.geminiAPIKey)
             let agentInstalled = FileManager.default.isReadableFile(atPath: daemonAgentPlistPath)

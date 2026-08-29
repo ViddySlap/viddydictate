@@ -11,6 +11,34 @@ MACOS="$APP/Contents/MacOS"
 HELPERS="$APP/Contents/Helpers"
 RES="$APP/Contents/Resources"
 ENTITLEMENTS="$ROOT/ViddyDictate.entitlements"
+PY_ENTITLEMENTS="$ROOT/PythonRuntime.entitlements"
+
+# ---- The bundled Python runtime ---------------------------------------------------------------
+# macOS ships no usable Python. /usr/bin/python3 is a Command-Line-Tools stub that prompts instead of
+# running, so a stranger who drags this app across from a DMG has no interpreter and no repository to
+# run an installer script from. Both environments the app depends on — the STT daemon venv and the
+# web-search helper venv — therefore have to be created by an interpreter the app brought with it.
+#
+# Spec B3, and it is a promise the first-run picker makes to the user in words: the runtime lives
+# INSIDE the bundle, nothing lands in /usr/local, nothing runs at login, and deleting the app deletes
+# it. Nothing here may grow a fallback that installs outside the bundle.
+#
+# 3.12 because that is the line Ben's working stt-venv runs (3.12.13) and the one mlx-whisper is
+# proven on here; the distribution is astral-sh/python-build-standalone, whose `install_only` builds
+# are relocatable (the interpreter is static and carries an @executable_path/../lib rpath).
+#
+# Pinned by release date AND by SHA-256. The spec's O4 reasoning — never install something unverified,
+# fail loudly with the real error instead — applies with more force here than it does to LM Studio,
+# because this tarball is something we then sign with a Developer ID and ship to strangers.
+PY_RELEASE="20260825"
+PY_VERSION="3.12.14"
+PY_ASSET="cpython-$PY_VERSION+$PY_RELEASE-aarch64-apple-darwin-install_only_stripped.tar.gz"
+PY_SHA256="8b0f1fa71eab7ca644e482c631807a1116fa848491051cd1c8d9429491de63a6"
+PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/$PY_RELEASE/$PY_ASSET"
+VENDOR="$ROOT/vendor"
+PY_TARBALL="$VENDOR/$PY_ASSET"
+PY_UNPACKED_PARENT="$VENDOR/cpython-$PY_VERSION+$PY_RELEASE"
+PY_UNPACKED="$PY_UNPACKED_PARENT/python"
 
 # ---- Pre-existing-install guard ---------------------------------------------------------------
 # The live app must run from ~/Applications (see install-app-agent.sh). An earlier ViddyDictate
@@ -106,6 +134,82 @@ prepare_signing_keychain() {
   rm -f "$HEAL_PEM"
 }
 
+# Put the pinned interpreter in vendor/ (gitignored), verified, exactly once. Cached like
+# node_modules is: present after the first build, so every later build — including the deterministic
+# verification tier, which is meant to be offline — needs no network. VD_PYTHON_TARBALL lets an
+# air-gapped or CI build supply the same file by hand; it is still hash-checked, because a local file
+# is not more trustworthy than a downloaded one, only more convenient.
+fetch_bundled_python() {
+  if [ -x "$PY_UNPACKED/bin/python3" ]; then
+    return 0
+  fi
+  mkdir -p "$VENDOR"
+
+  if [ ! -f "$PY_TARBALL" ]; then
+    if [ -n "${VD_PYTHON_TARBALL:-}" ]; then
+      echo "[build] using VD_PYTHON_TARBALL -> $VD_PYTHON_TARBALL"
+      cp "$VD_PYTHON_TARBALL" "$PY_TARBALL"
+    else
+      echo "[build] downloading the bundled Python runtime (~25 MB, cached in vendor/)"
+      echo "[build]     $PY_URL"
+      if ! curl -fSL --retry 3 --connect-timeout 15 -o "$PY_TARBALL.part" "$PY_URL"; then
+        rm -f "$PY_TARBALL.part"
+        echo "[build] ERROR: could not download the bundled Python runtime."
+        echo "[build]        The app cannot be built without it — macOS has no usable python3 and the"
+        echo "[build]        bundle is where ours lives. Either restore network access, or hand the"
+        echo "[build]        tarball over directly:"
+        echo "[build]            VD_PYTHON_TARBALL=/path/to/$PY_ASSET ./build.sh"
+        exit 1
+      fi
+      mv "$PY_TARBALL.part" "$PY_TARBALL"
+    fi
+  fi
+
+  actual_sha="$(shasum -a 256 "$PY_TARBALL" | awk '{print $1}')"
+  if [ "$actual_sha" != "$PY_SHA256" ]; then
+    rm -f "$PY_TARBALL"
+    echo "[build] ERROR: SHA-256 mismatch on the bundled Python runtime. The cached copy was deleted."
+    echo "[build]        expected $PY_SHA256"
+    echo "[build]        actual   $actual_sha"
+    echo "[build]        Refusing to bundle an unverified interpreter into an app we sign and ship."
+    exit 1
+  fi
+
+  echo "[build] unpacking the bundled Python runtime -> $PY_UNPACKED"
+  rm -rf "$PY_UNPACKED_PARENT"
+  mkdir -p "$PY_UNPACKED_PARENT"
+  tar -xzf "$PY_TARBALL" -C "$PY_UNPACKED_PARENT"
+  if [ ! -x "$PY_UNPACKED/bin/python3" ]; then
+    echo "[build] ERROR: the unpacked runtime has no bin/python3 at $PY_UNPACKED"
+    exit 1
+  fi
+}
+
+# ditto rather than cp -R: it preserves the symlinks (bin/python3 -> python3.12) and the exec bits
+# that make the tree relocatable, and copying those wrong is a failure that only shows up at the
+# first dictation on somebody else's Mac.
+stage_bundled_python() {
+  res="$1"; tag="$2"
+  fetch_bundled_python
+  rm -rf "$res/python"
+  ditto "$PY_UNPACKED" "$res/python"
+
+  # Precompile the stdlib BEFORE signing, because otherwise the interpreter breaks the app's own seal
+  # the first time it runs. Measured here, not guessed: a single `python -m venv` dropped 171 .pyc
+  # files into the signed bundle and turned `codesign --verify` from OK into "a sealed resource is
+  # missing or invalid". That is not a theoretical Gatekeeper problem — install-app-agent.sh deploys
+  # to ~/Applications, which the user can write, so it is the app's own first run that does it.
+  #
+  # unchecked-hash rather than the default timestamp invalidation: copying the tree changes mtimes,
+  # and a .pyc that looks stale gets rewritten, which is the same broken seal by a slower route. With
+  # this, re-running the whole flow leaves the tree byte-for-byte identical (verified).
+  echo "$tag precompiling the bundled stdlib (a signed bundle must not be written to at runtime)"
+  "$res/python/bin/python3" -m compileall -q -f --invalidation-mode unchecked-hash \
+    "$res/python/lib/python${PY_VERSION%.*}" >/dev/null
+
+  echo "$tag bundled Python $PY_VERSION -> Contents/Resources/python ($(du -sh "$res/python" | awk '{print $1}'))"
+}
+
 echo "[build] cleaning"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$HELPERS" "$RES"
@@ -182,39 +286,145 @@ fi
 #      Adds `--timestamp`, which notarization requires and the local path does not need.
 #   2. the self-signed keychain exists -> the stable LOCAL identity (TCC grants survive rebuilds).
 #   3. neither -> ad-hoc, and the grants reset every build.
-sign_bundle() {
-  bundle="$1"; tag="$2"
+#
+# Resolved ONCE per build, into SIGN_MODE plus the codesign arguments that select the identity, so
+# the bundle, the helper executables and the bundled Python runtime cannot end up signed by three
+# different identities. Explicit ifs, not && chains: under `set -e` a failing && list is a foot-gun.
+SIGN_MODE=""
+SIGN_ARGS=()
 
-  if [ -n "${VD_SIGN_IDENTITY:-}" ]; then
-    if codesign --force --sign "$VD_SIGN_IDENTITY" --timestamp \
-         -o runtime --entitlements "$ENTITLEMENTS" "$bundle"; then
-      echo "$tag signed for RELEASE ($VD_SIGN_IDENTITY), hardened runtime + secure timestamp"
-      return 0
-    fi
-    echo "$tag ERROR: VD_SIGN_IDENTITY is set but release signing FAILED."
-    echo "$tag        Refusing to fall back to a local or ad-hoc identity, which would produce a"
-    echo "$tag        bundle that cannot be notarized and would not be obvious downstream."
-    exit 1
+resolve_signing_mode() {
+  if [ -n "$SIGN_MODE" ]; then
+    return 0
   fi
-
+  if [ -n "${VD_SIGN_IDENTITY:-}" ]; then
+    SIGN_MODE="release"
+    SIGN_ARGS=(--sign "$VD_SIGN_IDENTITY" --timestamp)
+    return 0
+  fi
   if [ -f "$KC" ]; then
     prepare_signing_keychain
-    if codesign --force --sign "$SIGN_ID" --keychain "$KC" \
-         -o runtime --entitlements "$ENTITLEMENTS" "$bundle"; then
-      echo "$tag signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds"
-      return 0
+    SIGN_MODE="stable"
+    SIGN_ARGS=(--sign "$SIGN_ID" --keychain "$KC")
+    return 0
+  fi
+  SIGN_MODE="adhoc"
+  SIGN_ARGS=(--sign -)
+}
+
+sign_failure_note() {
+  tag="$1"
+  case "$SIGN_MODE" in
+    release)
+      echo "$tag ERROR: VD_SIGN_IDENTITY is set but release signing FAILED."
+      echo "$tag        Refusing to fall back to a local or ad-hoc identity, which would produce a"
+      echo "$tag        bundle that cannot be notarized and would not be obvious downstream."
+      ;;
+    stable)
+      echo "$tag ERROR: signing keychain present but stable-identity signing FAILED."
+      echo "$tag        Aborting instead of ad-hoc signing, which would silently void the app's"
+      echo "$tag        Accessibility / Input-Monitoring grants. Fix the keychain and rebuild."
+      echo "$tag        Do NOT re-run setup-signing.sh — that mints a NEW identity and also"
+      echo "$tag        resets the grants."
+      ;;
+    *)
+      echo "$tag ERROR: ad-hoc signing FAILED."
+      ;;
+  esac
+}
+
+# Sign every Mach-O nested inside the bundle, with the SAME identity and the hardened runtime.
+#
+# This is not belt-and-braces. Notarization refuses a submission in which any Mach-O is unsigned,
+# signed by somebody else, or missing the hardened runtime — and `codesign --verify --deep --strict`
+# does NOT catch that, which is the trap. Measured on 5391750, before this existed: the three
+# Contents/Helpers binaries were linker-signed ad-hoc, --deep --strict reported the bundle valid, and
+# Apple would have rejected the release. That is exactly the class of failure this chain exists to
+# find at build time rather than at release.sh time. The bundled Python adds eleven more Mach-Os
+# (fewer than the "hundreds of .so files" the findings note predicted — python-build-standalone links
+# most extension modules straight into the interpreter).
+#
+# Order matters: nested first, bundle last. codesign seals what it finds at sign time, so re-signing
+# an inner file afterwards invalidates the outer seal.
+sign_nested_mach_o() {
+  bundle="$1"; tag="$2"
+  contents="$bundle/Contents"
+  listing="$(mktemp)"
+
+  # One `file` pass over the whole tree. On a 1,650-file Python distribution the per-file process
+  # spawns cost several times what the signing itself does. -type f skips symlinks, so nothing is
+  # signed twice through an alias, and Contents/MacOS is left out because the bundle signature covers
+  # the main executable with the app's own entitlements.
+  find "$contents" -type f -not -path "$contents/MacOS/*" -print0 \
+    | xargs -0 file -F '|' --no-dereference \
+    | awk -F '|' '$2 ~ /Mach-O/ { print $1 }' > "$listing"
+
+  runtime_machos=()
+  helper_machos=()
+  while IFS= read -r macho; do
+    [ -n "$macho" ] || continue
+    if [ ! -f "$macho" ]; then
+      rm -f "$listing"
+      echo "$tag ERROR: the Mach-O scan produced a path that is not a file:"
+      echo "$tag            $macho"
+      echo "$tag        A '|' in a filename would do this. Refusing to sign a partial set, because a"
+      echo "$tag        missed Mach-O is invisible until Apple rejects the notarization."
+      exit 1
     fi
-    echo "$tag ERROR: signing keychain present but stable-identity signing FAILED."
-    echo "$tag        Aborting instead of ad-hoc signing, which would silently void the app's"
-    echo "$tag        Accessibility / Input-Monitoring grants. Fix the keychain and rebuild."
-    echo "$tag        Do NOT re-run setup-signing.sh — that mints a NEW identity and also"
-    echo "$tag        resets the grants."
+    case "$macho" in
+      "$contents"/Resources/python/*) runtime_machos+=("$macho") ;;
+      *) helper_machos+=("$macho") ;;
+    esac
+  done < "$listing"
+  rm -f "$listing"
+
+  # bash 3.2: expanding an empty array under `set -u` is an error, hence the counts.
+  if [ "${#helper_machos[@]}" -gt 0 ]; then
+    if ! codesign --force "${SIGN_ARGS[@]}" -o runtime "${helper_machos[@]}"; then
+      echo "$tag ERROR: signing the nested helper executables failed."
+      sign_failure_note "$tag"
+      exit 1
+    fi
+    echo "$tag signed ${#helper_machos[@]} nested helper Mach-O file(s) — hardened runtime"
+  fi
+
+  if [ "${#runtime_machos[@]}" -gt 0 ]; then
+    if ! codesign --force "${SIGN_ARGS[@]}" -o runtime --entitlements "$PY_ENTITLEMENTS" \
+         "${runtime_machos[@]}"; then
+      echo "$tag ERROR: signing the bundled Python runtime failed."
+      sign_failure_note "$tag"
+      exit 1
+    fi
+    echo "$tag signed ${#runtime_machos[@]} bundled-Python Mach-O file(s) — hardened runtime + PythonRuntime.entitlements"
+  fi
+}
+
+sign_bundle() {
+  bundle="$1"; tag="$2"
+  resolve_signing_mode
+  sign_nested_mach_o "$bundle" "$tag"
+
+  if ! codesign --force "${SIGN_ARGS[@]}" -o runtime --entitlements "$ENTITLEMENTS" "$bundle"; then
+    sign_failure_note "$tag"
     exit 1
   fi
 
-  codesign --force --sign - -o runtime --entitlements "$ENTITLEMENTS" "$bundle"
-  echo "$tag ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)"
+  case "$SIGN_MODE" in
+    release) echo "$tag signed for RELEASE ($VD_SIGN_IDENTITY), hardened runtime + secure timestamp" ;;
+    stable)  echo "$tag signed with STABLE identity ($SIGN_ID) — TCC grants persist across rebuilds" ;;
+    *)       echo "$tag ad-hoc signed (no signing keychain — run ./setup-signing.sh once for persistent TCC grants)" ;;
+  esac
+
+  # What notarization will do, done now. release.sh checks this too, but by then the build is spent
+  # and the failure is expensive; a broken seal is cheapest to find in the build that caused it.
+  if ! codesign --verify --deep --strict "$bundle"; then
+    echo "$tag ERROR: the sealed bundle does not verify. Notarization would reject it."
+    exit 1
+  fi
+  echo "$tag codesign --verify --deep --strict OK"
 }
+
+stage_bundled_python "$RES" "[build]"
 
 echo "[build] codesign"
 sign_bundle "$APP" "[build]"
@@ -255,6 +465,11 @@ cp "$RES/StickyNotes/theme.css" "$TEST_RES/StickyNotes/theme.css"
 
 echo "[build][tests] writing Info.plist"
 cp "$ROOT/Info-Tests.plist" "$TEST_APP/Contents/Info.plist"
+
+# The verification bundle gets the same runtime as the shipped one. Two bundles that differ in what
+# they contain is how a gate goes green over an app that is broken: every selftest that reaches for
+# the interpreter would be reaching for something the shipped app has and the test app does not.
+stage_bundled_python "$TEST_RES" "[build][tests]"
 
 echo "[build][tests] codesign"
 sign_bundle "$TEST_APP" "[build][tests]"

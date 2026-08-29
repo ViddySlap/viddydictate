@@ -13,6 +13,7 @@ enum ModelCapacitySelfTest {
         clientWiringAndGeminiOrderingChecks(reporter)
         productionCallSiteChecks(reporter)
         ownershipAndEvictionChecks(reporter)
+        missingRecencyEvictionChecks(reporter)
         onePassCheck(reporter)
         evictionSettleChecks(reporter)
 
@@ -51,11 +52,27 @@ enum ModelCapacitySelfTest {
         reporter.record(
             "lms ps parser fails closed on malformed JSON",
             ModelResidency.parseResidentModelsJSON(Data("not json".utf8)) == nil)
+        let generatingFixture = Data((
+            "[{\"identifier\":\"generating/model\",\"sizeBytes\":1234,"
+                + "\"lastUsedTime\":null,\"status\":\"generating\"}]"
+        ).utf8)
+        let generating = ModelResidency.parseResidentModelsJSON(generatingFixture)
         reporter.record(
-            "lms ps parser fails closed on an incomplete resident row",
-            ModelResidency.parseResidentModelsJSON(
-                Data("[{\"identifier\":\"missing-last-use\",\"sizeBytes\":1,\"status\":\"idle\"}]".utf8)
-            ) == nil)
+            "a generating row with null last-use time remains a complete resident snapshot",
+            generating?.count == 1 && generating?.first?.lastUsedTime == nil)
+        reporter.record(
+            "a generating row's size remains in the resident capacity total",
+            generating?.reduce(UInt64.zero) { $0 + $1.sizeBytes } == 1_234,
+            "residentBytes=\(generating?.reduce(UInt64.zero) { $0 + $1.sizeBytes } ?? 0)")
+        for (field, json) in [
+            ("identifier", "[{\"sizeBytes\":1,\"lastUsedTime\":1,\"status\":\"idle\"}]"),
+            ("sizeBytes", "[{\"identifier\":\"missing-size\",\"lastUsedTime\":1,\"status\":\"idle\"}]"),
+            ("status", "[{\"identifier\":\"missing-status\",\"sizeBytes\":1,\"lastUsedTime\":1}]"),
+        ] {
+            reporter.record(
+                "lms ps parser fails closed when required \(field) is missing",
+                ModelResidency.parseResidentModelsJSON(Data(json.utf8)) == nil)
+        }
     }
 
     private static func factorAndMissingFactChecks(_ reporter: SelfTestReporter) {
@@ -468,6 +485,54 @@ enum ModelCapacitySelfTest {
             "loads=\(precheckLoads)")
     }
 
+    private static func missingRecencyEvictionChecks(_ reporter: SelfTestReporter) {
+        let manager = ModelManager()
+        var residents: [ModelResidency.ResidentModel] = []
+        var unloads: [String] = []
+        var wired: UInt64 = 0
+        let installed = [
+            installedModel("owned/missing-recency", size: 100),
+            installedModel("owned/older", size: 100),
+            installedModel("owned/generating", size: 100),
+            installedModel("incoming", size: 100),
+        ]
+        let dependencies = ModelManager.CapacityDependencies(
+            availableInstalledModels: { installed },
+            residentModels: { residents },
+            wiredBytes: { wired },
+            budgetBytes: { _ in 250 },
+            ensureLoaded: { model, _ in
+                let lastUsedTime: UInt64? = model == "owned/older" ? 10 : nil
+                let status = model == "owned/generating" ? "generating" : "idle"
+                residents.append(resident(model, 100, lastUsedTime, status))
+                return true
+            },
+            unload: { model in
+                unloads.append(model)
+                residents.removeAll { $0.identifier == model }
+                wired = 0
+            })
+
+        _ = manager.ensureReady("owned/missing-recency", ttlOverrideSeconds: 600,
+                                dependencies: dependencies)
+        _ = manager.ensureReady("owned/older", ttlOverrideSeconds: 600, dependencies: dependencies)
+        _ = manager.ensureReady("owned/generating", ttlOverrideSeconds: 600,
+                                dependencies: dependencies)
+        wired = 300
+        let incoming = manager.ensureReady("incoming", ttlOverrideSeconds: 600,
+                                           dependencies: dependencies)
+
+        reporter.record(
+            "missing recency is ordered after a genuinely idle older model",
+            unloads == ["owned/older", "owned/missing-recency"],
+            "unloads=\(unloads)")
+        reporter.record(
+            "a generating row with missing recency is never an eviction candidate",
+            incoming == .ready && !unloads.contains("owned/generating")
+                && residents.contains { $0.identifier == "owned/generating" },
+            "result=\(incoming) unloads=\(unloads)")
+    }
+
     private static func onePassCheck(_ reporter: SelfTestReporter) {
         let manager = ModelManager()
         var residents: [ModelResidency.ResidentModel] = []
@@ -598,7 +663,7 @@ enum ModelCapacitySelfTest {
     }
 
     private static func resident(
-        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64, _ status: String,
+        _ identifier: String, _ sizeBytes: UInt64, _ lastUsedTime: UInt64?, _ status: String,
         ttl: Int? = nil
     ) -> ModelResidency.ResidentModel {
         .init(identifier: identifier, sizeBytes: sizeBytes,

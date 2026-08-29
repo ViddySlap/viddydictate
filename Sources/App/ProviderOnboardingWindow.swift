@@ -26,6 +26,10 @@ final class ProviderOnboardingWindowController: NSObject, NSWindowDelegate {
     private var rows: ProviderOnboardingView?
     private var recheck: NSButton?
     private var checking = false
+    /// Set when the window was opened from a point-of-use "Set up Claude" / "Set up Codex" button, so it
+    /// answers the question that was actually asked instead of showing both providers.
+    private var focusProvider: LLMProvider?
+    private var focusTokens: [NSObjectProtocol] = []
 
     private let contentWidth: CGFloat = 560
 
@@ -33,9 +37,46 @@ final class ProviderOnboardingWindowController: NSObject, NSWindowDelegate {
         self.observer = observer
         super.init()
         signIn.onFinished = { [weak self] in self?.check() }
+        observeFocus()
     }
 
-    func show() {
+    deinit {
+        focusTokens.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    /// B17: re-check whenever this panel regains focus.
+    ///
+    /// The install and sign-in steps both happen OUTSIDE ViddyDictate - in Terminal, in a browser, in the
+    /// Applications folder - so the moment that matters is the user coming back. Watching for that is what
+    /// removes the last "then check again" from the flow: the row flips to SIGNED IN on its own and the
+    /// user never has to find their way back to a button.
+    ///
+    /// Both notifications are needed and neither is redundant. Reactivating the app fires the application
+    /// notification while this window is already key, and clicking this window while the app is already
+    /// active fires only the window one.
+    private func observeFocus() {
+        let center = NotificationCenter.default
+        focusTokens.append(center.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.recheckOnFocus() })
+        focusTokens.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let window = self.window,
+                  (note.object as? NSWindow) === window else { return }
+            self.recheckOnFocus()
+        })
+    }
+
+    /// Only while the window is actually on screen. `check()` spawns provider processes, and a background
+    /// re-measure on every app activation for a window nobody opened is work the user did not ask for.
+    private func recheckOnFocus() {
+        guard let window, window.isVisible else { return }
+        check()
+    }
+
+    func show(focus provider: LLMProvider? = nil) {
+        focusProvider = provider
         if window == nil { build() }
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
@@ -55,12 +96,13 @@ final class ProviderOnboardingWindowController: NSObject, NSWindowDelegate {
             Self.onMain {
                 guard let self = self else { return }
                 self.checking = false
-                let plan = ProviderOnboarding.plan(providers: observation.providers)
-                Log.write("first-run onboarding: \(plan.logToken)")
+                let measured = ProviderOnboarding.plan(providers: observation.providers)
+                let plan = self.focusProvider.map(measured.focused(on:)) ?? measured
+                Log.write("first-run onboarding: \(measured.logToken)")
                 self.syncRecheckTitle()
                 self.rows?.apply(plan)
                 self.layoutContent()
-                self.onMeasured?(plan)
+                self.onMeasured?(measured)
             }
         }
     }

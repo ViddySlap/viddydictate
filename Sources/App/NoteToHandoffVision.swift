@@ -280,7 +280,7 @@ final class NoteToHandoffVisionProcessor {
     init(
         providerLookup: @escaping ProviderLookup = { mode in
             switch Settings.modelsPower.resolveRoute(mode.routeID, fallback: mode.model) {
-            case .pinned(let bundle), .degraded(let bundle, _, _): return bundle.provider
+            case .pinned(let bundle), .degraded(let bundle, _, _, _): return bundle.provider
             case .off: return nil
             }
         },

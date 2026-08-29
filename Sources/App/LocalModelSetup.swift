@@ -169,7 +169,8 @@ enum LocalModelSetup {
     /// plainly rather than left blank.
     static func residencyTTL(_ model: ModelResidency.ResidentModel, now: Date) -> String {
         guard let ttl = model.ttlSeconds else { return "no timeout" }
-        let lastUsed = Date(timeIntervalSince1970: Double(model.lastUsedTime) / 1000.0)
+        guard let lastUsedTime = model.lastUsedTime else { return "unload time unavailable" }
+        let lastUsed = Date(timeIntervalSince1970: Double(lastUsedTime) / 1000.0)
         // Clamped to the TTL itself: a `lastUsedTime` in the future (clock skew, or a machine that just
         // moved timezone) must not be able to promise more time than LM Studio ever granted.
         let remaining = min(Double(ttl), Double(ttl) - now.timeIntervalSince(lastUsed))

@@ -9,8 +9,8 @@ import Foundation
 /// backs off, so it is the robust source — and it is the SAME backend the signed-off bench used, so
 /// the production results match what was judged. Node is already an app dependency (the keep-alive),
 /// and Python is the search source; consistent with how the app already shells to `lms` and the STT
-/// daemon. The helper + venv live at stable absolute paths under ~/.local/share (out of the synced
-/// vault), installed by `install-websearch-helper.sh`.
+    /// daemon. The helper + venv live at stable absolute paths under ~/.local/share (out of the synced
+    /// vault), installed through the app's Setup surface.
 enum WebSearchBackend {
 
     /// One search hit (mirrors the bench's result shape).
@@ -39,8 +39,7 @@ enum WebSearchBackend {
     }
 
     /// Whether the backend is installed (both the venv python and the helper exist). Used by the
-    /// selftest + the controller to surface a clean "run install-websearch-helper.sh" message rather
-    /// than a cryptic failure.
+    /// selftest + the controller to surface a clean in-app Setup route rather than a cryptic failure.
     static var isInstalled: Bool {
         let fm = FileManager.default
         return fm.isExecutableFile(atPath: venvPython) && fm.isReadableFile(atPath: helper)

@@ -48,8 +48,32 @@ sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
 launchctl bootout "gui/$U/$OLD_LABEL" 2>/dev/null || true
 rm -f "$OLD_PLIST_DST"
 launchctl bootout "gui/$U/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$U" "$PLIST_DST"
+
+# `bootout` returns before launchd has finished tearing the job down, and bootstrapping into that
+# window fails with "Bootstrap failed: 5: Input/output error". Measured 2026-08-27: the identical
+# command succeeded on the very next attempt. Under `set -e` that one-line race aborted the deploy
+# AFTER the live app had already been replaced and unloaded — so the failure mode was not "the deploy
+# did not happen", it was "the app the user dictates with is now gone and nothing says so".
+#
+# Wait for the job to actually leave the domain, then bootstrap, and retry once if it still races.
+for _ in $(seq 1 50); do
+  launchctl print "gui/$U/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.2
+done
+if ! launchctl bootstrap "gui/$U" "$PLIST_DST"; then
+  echo "[deploy] launchd refused the first bootstrap; settling and retrying once"
+  sleep 2
+  launchctl bootstrap "gui/$U" "$PLIST_DST"
+fi
 launchctl kickstart "gui/$U/$LABEL" 2>/dev/null || true
+
+# Never end this script leaving the user without their app. If the agent is not loaded here, say so
+# in the terms that matter and hand back the one command that fixes it.
+if ! launchctl print "gui/$U/$LABEL" >/dev/null 2>&1; then
+  echo "[deploy] ERROR: the LaunchAgent is not loaded, so ViddyDictate is NOT running."
+  echo "[deploy]        Load it by hand:  launchctl bootstrap gui/$U \"$PLIST_DST\""
+  exit 1
+fi
 
 echo "[deploy] OK — live app: $LIVE (auto-starts at login, relaunches on crash)"
 echo "[deploy] launchd logs: /tmp/viddydictate.err.log ; app log: ~/Library/Logs/ViddyDictate.log"

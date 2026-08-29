@@ -508,6 +508,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenu()
         setupEditMenu()
         _ = controller   // Force the lazy required-callback graph before any controller-dependent setup.
+        // B17: "Set up Claude" / "Set up Codex" at the point of use open the SAME guided window the first
+        // run and the Setup tab drive, narrowed to the provider the user asked about. Wired here rather
+        // than inside `onboardingWC`'s own initialiser, which would only ever run if something else had
+        // already opened that window - and on the machine this matters for, nothing has.
+        PointOfUseOfferPresenter.shared.onOpenProviderSetup = { [weak self] provider in
+            self?.onboardingWC.show(focus: provider)
+        }
         // Re-bless the stable signing identity if a macOS update wiped trust settings (background,
         // never main-thread). Keeps future builds from ever ad-hoc-signing and voiding TCC grants.
         SigningTrustGuard.healIfNeeded()
@@ -817,6 +824,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureCloudUpdateChecks() {
         hydrateClaudeAvailability()
+        hydrateLocalAvailability()
         codexSchedule.launched(
             enabled: Settings.cloudUpdateAutoCheck,
             now: Date().timeIntervalSince1970)
@@ -873,6 +881,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            }) {
             Settings.modelsPower.setAvailabilityState(
                 .unavailable("last live alias probe failed"), for: .claude)
+        }
+    }
+
+    /// Local availability must begin fail-closed and become runnable only after LM Studio and its
+    /// installed-model catalog have both answered. The probe is off the main thread because it shells out
+    /// to `lms`; the catalog remains runtime-only and is never written under LM Studio or into durable app
+    /// settings.
+    private func hydrateLocalAvailability() {
+        DispatchQueue.global(qos: .utility).async {
+            let measured = LLMProviderDetection.observeLocal()
+            DispatchQueue.main.async {
+                Settings.modelsPower.setLocalAvailabilityState(
+                    measured.presence.state, models: measured.models)
+            }
         }
     }
 

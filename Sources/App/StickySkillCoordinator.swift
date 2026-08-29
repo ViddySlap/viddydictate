@@ -151,9 +151,15 @@ enum StickySkillPrompt {
     /// The one-line provenance quote. Content-free: see `CustomModeRunProvider`.
     static func providerProvenanceLine(_ ran: CustomModeRunProvider) -> String {
         let head = "> **Ran on**: \(ran.provider.displayName) (\(ran.modelID))"
-        guard let from = ran.degradedFrom else { return head }
-        let why = ran.degradedReason.map { " (\($0))" } ?? ""
-        return "\(head) - your \(from.displayName) pin could not run\(why)"
+        let provenance: String
+        if let from = ran.degradedFrom {
+            let why = ran.degradedReason.map { " (\($0))" } ?? ""
+            provenance = "\(head) - your \(from.displayName) pin could not run\(why)"
+        } else {
+            provenance = head
+        }
+        guard let offer = ran.upgradeOffer else { return provenance }
+        return "\(provenance)\n> **Upgrade available**: \(offer.message)"
     }
 
     /// Everything one run needs, resolved from the skill plus its backing mode. `mode` is a RUN-LOCAL copy

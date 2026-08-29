@@ -16,12 +16,13 @@ import Foundation
 enum ModelResidency {
 
     /// One row from `lms ps --json`. Capacity policy needs the provider's live identifier, footprint,
-    /// recency, and state as one coherent snapshot: size and recency are not looked up through a
-    /// second command that could describe a different resident set.
+    /// and state as one coherent snapshot: size and recency are not looked up through a second command
+    /// that could describe a different resident set. Recency is optional because LM Studio reports
+    /// `lastUsedTime: null` while a model is generating; it only controls eviction ordering.
     struct ResidentModel: Equatable {
         let identifier: String
         let sizeBytes: UInt64
-        let lastUsedTime: UInt64
+        let lastUsedTime: UInt64?
         let status: String
         /// The idle TTL LM Studio is currently holding this model with, or nil when it carries none.
         /// `ttlMs: null` is a legitimate row, not a broken one: a model loaded by hand in the LM Studio
@@ -33,7 +34,7 @@ enum ModelResidency {
 
         /// `ttlSeconds` is defaulted so callers that only care about the capacity fields - the policy
         /// gate and its fixtures - are not forced to state a TTL they do not read.
-        init(identifier: String, sizeBytes: UInt64, lastUsedTime: UInt64, status: String,
+        init(identifier: String, sizeBytes: UInt64, lastUsedTime: UInt64?, status: String,
              ttlSeconds: Int? = nil) {
             self.identifier = identifier
             self.sizeBytes = sizeBytes
@@ -106,8 +107,10 @@ enum ModelResidency {
     }
 
     /// The complete resident snapshot reported by `lms ps --json`, or nil when the command or any
-    /// required capacity field is unreadable. This deliberately shares `loadedModelRows()` with
-    /// `loadedTTLSeconds`: one JSON decoder and one failure discipline own this provider surface.
+    /// required capacity field is unreadable. `lastUsedTime` is recency metadata rather than a
+    /// capacity fact, so its absence does not discard an otherwise complete row. This deliberately
+    /// shares `loadedModelRows()` with `loadedTTLSeconds`: one JSON decoder and one failure discipline
+    /// own this provider surface.
     static func residentModels() -> [ResidentModel]? {
         guard let rows = loadedModelRows() else { return nil }
         return parseResidentModels(rows)
@@ -203,11 +206,11 @@ enum ModelResidency {
         var residents: [ResidentModel] = []
         residents.reserveCapacity(rows.count)
         for row in rows {
+            let lastUsedTime = unsignedInteger(row["lastUsedTime"])
             guard let identifier = (row["identifier"] as? String)?
                         .trimmingCharacters(in: .whitespacesAndNewlines),
                   !identifier.isEmpty,
                   let sizeBytes = unsignedInteger(row["sizeBytes"]),
-                  let lastUsedTime = unsignedInteger(row["lastUsedTime"]),
                   let status = (row["status"] as? String)?
                         .trimmingCharacters(in: .whitespacesAndNewlines),
                   !status.isEmpty

@@ -75,7 +75,7 @@ enum PreflightSurface {
         finding.isWarning ? "NEEDS ATTENTION" : "OK"
     }
 
-    /// P8 writes remedies as lowercase imperatives ("run ./install-daemon.sh...") precisely so a prefix
+    /// P8 writes remedies as lowercase imperatives ("open Settings > Setup...") precisely so a prefix
     /// like this can head them. nil for a passing check, which is why the view has nothing to lay out.
     static func remedyLine(_ finding: PreflightFinding) -> String? {
         finding.remedy.map { "Fix: \($0)" }

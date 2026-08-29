@@ -42,6 +42,13 @@ PORT="${VIDDYDICTATE_WHISPER_PORT:-8765}"
 # Compatible-release bound, not an open range: a minor bump of the STT stack must be a deliberate
 # repo change, because "install this app" has to keep working months from now.
 REQUIREMENT="mlx-whisper~=0.4.3"
+# B20's torch cut, kept identical to the in-app installer's descriptor in InstallerEngine.swift so a
+# developer venv and a stranger's venv are the same environment. mlx-whisper declares torch, but only
+# torch_whisper.py imports it and nothing in the package imports that module, so the reachable runtime
+# never executes 106 MiB of wheel / 638 MiB of disk. Proven by scripts/torch-free-proof.py (48/48 on
+# Metal). These are mlx-whisper's own Requires-Dist entries minus torch; each still resolves its own
+# dependencies, so --no-deps applies to exactly one package.
+DEPENDENCIES="mlx>=0.11 numba numpy tqdm more-itertools tiktoken huggingface_hub scipy"
 U="$(id -u)"
 
 [ -r "$SRC" ] || { echo "[install] FATAL: daemon source missing at $SRC"; exit 1; }
@@ -74,7 +81,16 @@ fi
 
 echo "[install] installing $REQUIREMENT into the venv (first run pulls a few hundred MB)"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet --upgrade "$REQUIREMENT"
+# shellcheck disable=SC2086 -- DEPENDENCIES is a deliberate word list, one requirement per word.
+"$VENV/bin/python" -m pip install --quiet --upgrade $DEPENDENCIES
+"$VENV/bin/python" -m pip install --quiet --upgrade --no-deps "$REQUIREMENT"
+# The --no-deps guard: this script now owns mlx-whisper's closure, so prove it is complete here
+# rather than letting the daemon discover it at transcribe time.
+if ! "$VENV/bin/python" -c "import mlx_whisper" 2>/tmp/vd-import-check.$$; then
+    echo "[install] FATAL: the installed packages are incomplete:"; cat /tmp/vd-import-check.$$
+    rm -f /tmp/vd-import-check.$$; exit 1
+fi
+rm -f /tmp/vd-import-check.$$
 
 # mlx-whisper shells out to ffmpeg by name to decode the recorded clip. launchd's PATH is set in
 # the plist below; if ffmpeg is not on it the daemon still starts and /health still answers, but

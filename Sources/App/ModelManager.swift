@@ -223,11 +223,7 @@ final class ModelManager {
                         && $0.identifier != model
                         && $0.isIdle
                 }
-                .sorted {
-                    $0.lastUsedTime == $1.lastUsedTime
-                        ? $0.identifier < $1.identifier
-                        : $0.lastUsedTime < $1.lastUsedTime
-                }
+                .sorted(by: Self.isOlderForEviction)
             for candidate in candidates {
                 dependencies.unload(candidate.identifier)
                 // Even a failed/no-op unload cannot justify a later, broader attempt. Forgetting the
@@ -263,6 +259,25 @@ final class ModelManager {
         return .loadAllowed
     }
 
+    /// Missing recency cannot prove that a model is stale, so it sorts after every row with a known
+    /// last-use time. This is deliberately explicit instead of using a zero sentinel: zero would make
+    /// an active row the first eviction candidate.
+    private static func isOlderForEviction(
+        _ lhs: ModelResidency.ResidentModel,
+        _ rhs: ModelResidency.ResidentModel
+    ) -> Bool {
+        switch (lhs.lastUsedTime, rhs.lastUsedTime) {
+        case let (left?, right?):
+            return left == right ? lhs.identifier < rhs.identifier : left < right
+        case (nil, nil):
+            return lhs.identifier < rhs.identifier
+        case (nil, _):
+            return false
+        case (_, nil):
+            return true
+        }
+    }
+
     static func estimatedIncomingBytes(sizeBytes: Int64) -> UInt64? {
         guard sizeBytes > 0 else { return nil }
         let estimate = (Double(sizeBytes) * incomingFootprintFactor).rounded(.up)
@@ -270,8 +285,12 @@ final class ModelManager {
         return UInt64(estimate)
     }
 
-    private static func fits(wiredBytes: UInt64, incomingBytes: UInt64,
-                             budgetBytes: UInt64) -> Bool {
+    /// Internal rather than private so the first-run picker can ask the LOADER's question instead of
+    /// asking a copy of it. A picker that pre-ticks a model this predicate would refuse is exactly the
+    /// lie spec B5 exists to prevent, and the only way to guarantee they cannot drift is for there to
+    /// be one predicate.
+    static func fits(wiredBytes: UInt64, incomingBytes: UInt64,
+                     budgetBytes: UInt64) -> Bool {
         let (total, overflow) = wiredBytes.addingReportingOverflow(incomingBytes)
         return !overflow && total <= budgetBytes
     }

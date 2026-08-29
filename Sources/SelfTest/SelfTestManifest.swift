@@ -107,6 +107,43 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .freshInstallRehearsal: .init(tier: .deterministic) { _ in
         FreshInstallRehearsal.run() ? 0 : 1
     },
+    .networkPathSelftest: .init(tier: .deterministic) { _ in
+        NetworkPathSelfTest.run() ? 0 : 1
+    },
+    // Pure: synthetic provider presences, a synthetic bootstrap snapshot, and an injected LM Studio
+    // performer. It never attaches a disk image, writes to /Applications, runs `lms`, or downloads a byte.
+    .pointOfUseOfferSelftest: .init(tier: .deterministic) { _ in
+        PointOfUseOfferSelfTest.run() ? 0 : 1
+    },
+    .lmStudioInstallerSelftest: .init(tier: .deterministic) { _ in
+        LMStudioInstallerSelfTest.run() ? 0 : 1
+    },
+    // Pure: every machine it reasons about is synthesized from a recorded kernel ratio, so the picker's
+    // 8 GB and 16 GB verdicts are pinned on a developer machine that is neither.
+    .componentPickerSelftest: .init(tier: .deterministic) { _ in
+        ComponentPickerSelfTest.run() ? 0 : 1
+    },
+    // Pure: the byte sampler is a stub and the clock is a number, so a download that takes minutes on a
+    // real network is stepped through here in microseconds.
+    .installProgressSelftest: .init(tier: .deterministic) { _ in
+        InstallProgressSelfTest.run() ? 0 : 1
+    },
+    .componentPickerRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--component-picker-render"), i + 1 < arguments.count
+        else {
+            print("[component-picker-render] FAIL: an output directory is required")
+            return 2
+        }
+        return ComponentPickerRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
+    .installProgressRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--install-progress-render"), i + 1 < arguments.count
+        else {
+            print("[install-progress-render] FAIL: an output directory is required")
+            return 2
+        }
+        return InstallProgressRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
     .lmStudioModelCatalogSelftest: .init(tier: .deterministic) { _ in
         LMStudioModelCatalogSelfTest.run() ? 0 : 1
     },
@@ -153,6 +190,19 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .secretStoreSelftest: .init(tier: .deterministic) { _ in
         SecretStoreSelfTest.run() ? 0 : 1
     },
+    // Offline and home-free: it inspects a built app bundle and runs the interpreter inside it. The
+    // venv it creates goes to TMPDIR, and `venv` installs pip from the stdlib's own wheel rather than
+    // from the network. Takes `--app <bundle>` so the same checks can be pointed at the DEPLOYED app
+    // in ~/Applications, which is the placement that actually has to work.
+    .bundledPythonSelftest: .init(tier: .deterministic) { arguments in
+        BundledPythonSelfTest.run(arguments: arguments) ? 0 : 1
+    },
+    .installerEngineSelftest: .init(tier: .deterministic) { _ in
+        InstallerEngineSelfTest.run() ? 0 : 1
+    },
+    .bootstrapStateSelftest: .init(tier: .deterministic) { _ in
+        BootstrapStateSelfTest.run() ? 0 : 1
+    },
     // Pure: every fixture is a synthetic observation, so no daemon, provider, keychain, or TCC grant is
     // consulted and the gate reports on the policy rather than on this machine's setup.
     .preflightSelftest: .init(tier: .deterministic) { _ in
@@ -188,6 +238,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         guard let i = arguments.firstIndex(of: "--setup-render") else { return 1 }
         let out = arguments.count > i + 1 ? arguments[i + 1] : "build/setup-render"
         return SetupRender.run(outDir: out) ? 0 : 1
+    },
+    .pointOfUseRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--point-of-use-render") else { return 1 }
+        let out = arguments.count > i + 1 ? arguments[i + 1] : "build/point-of-use-render"
+        return PointOfUseOfferRender.run(outDir: out) ? 0 : 1
     },
     .providerOnboardingRender: .init(tier: .gui) { arguments in
         guard let i = arguments.firstIndex(of: "--provider-onboarding-render") else { return 1 }
