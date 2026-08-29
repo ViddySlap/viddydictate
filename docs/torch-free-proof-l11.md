@@ -2,6 +2,11 @@
 
 Date: 2026-08-27
 
+> **Superseded by `torch-free-proof.md` (2026-08-29).** The proof was re-run unsandboxed on a
+> Metal-capable Mac and PASSED 48/48, so the cut shipped. This page is kept because its verdict
+> was correct on the evidence available to it, and because the reasons it could not close the
+> question - no Metal device, and an overlay rather than a cold venv - are what the re-run fixed.
+
 ## Result
 
 The proof is inconclusive in the Codex deterministic seatbelt. The installer therefore remains on the 1.0 path with `torch`; no cutover was made.

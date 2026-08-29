@@ -245,7 +245,7 @@ enum ComponentPickerRender {
                                  facts: mac(64, wiredGB: 5), environment: environment))
         let shown = label(ComponentPicker.totalIdentifier, in: view)?.stringValue ?? "missing"
         check("[detected] the total charges only for what is actually missing",
-              shown == expected && shown == "Total download: 19.1 GB", "\(shown) vs \(expected)")
+              shown == expected && shown == "Total download: 18.9 GB", "\(shown) vs \(expected)")
         assertLayout(view, state: "already-installed")
         capture(view, to: outDir + "/picker-already-installed.png", name: "already installed")
     }
@@ -259,7 +259,7 @@ enum ComponentPickerRender {
                             gateState: .meteredOrConstrained)
         let note = label(ComponentPicker.networkNoteIdentifier, in: hotspot)?.stringValue ?? ""
         check("[metered] the line names the user's actual situation and the real number",
-              note.contains("hotspot") && note.contains("8.7 GB"), note)
+              note.contains("hotspot") && note.contains("8.6 GB"), note)
         check("[metered] Wait for Wi-Fi appears beside Continue, not instead of it",
               find(ComponentPicker.waitForWiFiIdentifier, in: hotspot) != nil
                 && (find(ComponentPicker.continueIdentifier, in: hotspot) as? NSButton)?.isEnabled == true)
