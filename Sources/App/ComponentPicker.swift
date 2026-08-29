@@ -32,9 +32,10 @@ enum ComponentPicker {
     /// - **Transcription engine, web search:** the exact package lists in `BootstrapInstallPlan`,
     ///   resolved with `pip install --dry-run --report` using the app's own bundled 3.12.14
     ///   interpreter on arm64, then every resolved wheel's `Content-Length` summed from
-    ///   files.pythonhosted.org. That is transfer bytes, NOT installed footprint: the STT environment
-    ///   downloads 242 MB of wheels and expands to about 1.1 GB on disk, and quoting the larger number
-    ///   in a line that says "download" would be its own kind of lie.
+    ///   files.pythonhosted.org. That is transfer bytes, NOT installed footprint: after B20's torch
+    ///   cut the STT environment downloads 121 MB of wheels and expands to about 494 MB on disk (it
+    ///   was 242 MB expanding to 1.1 GB with torch, both re-measured cold on 2026-08-29), and quoting
+    ///   the larger number in a line that says "download" would be its own kind of lie.
     /// - **Voice model:** the published blob sizes of `mlx-community/whisper-large-v3-turbo` from the
     ///   Hugging Face model API, which is exactly what `snapshot_download` transfers.
     /// - **gemma / qwen:** `lms ls --llm --json` `sizeBytes` for the two model keys production already
@@ -59,7 +60,11 @@ enum ComponentPicker {
         var lmStudio: UInt64?
 
         static let measured = SizeCatalog(
-            transcriptionEngine: 242_159_990,
+            // Re-measured 2026-08-29 after B20's torch cut landed. The with-torch closure was
+            // 242_159_990 bytes across 35 wheels - reproduced to the byte on that date, independently
+            // of L5 - and the torch-free closure is 121_077_755 across 28. Both sums are every
+            // wheel's Content-Length from a real pip resolve on the app's own bundled interpreter.
+            transcriptionEngine: 121_077_755,
             voiceModel: 1_613_979_758,
             webSearch: 14_028_533,
             gemma: 6_861_935_454,
@@ -449,7 +454,7 @@ enum ComponentPicker {
 
     /// Decimal gigabytes, the unit downloads are always quoted in, delegating to `SystemMemory` above
     /// a gigabyte so there is one spelling of "GB" in the app. Whole megabytes below it, because
-    /// "0.2 GB" for a 242 MB download tells the user less than the number they would see anywhere else.
+    /// "0.1 GB" for a 121 MB download tells the user less than the number they would see anywhere else.
     static func downloadSize(_ bytes: UInt64) -> String {
         guard bytes >= 1_000_000_000 else {
             return "\(Int((Double(bytes) / 1_000_000.0).rounded())) MB"

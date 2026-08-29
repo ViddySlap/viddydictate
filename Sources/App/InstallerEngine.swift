@@ -11,10 +11,23 @@ import Foundation
 struct InstallerPackage: Equatable {
     let name: String
     let versionConstraint: String
+    /// `false` installs this package with `--no-deps`, which means the descriptor - not pip - now
+    /// owns its dependency closure. B20's whole reasoning is that this is the dangerous spelling: it
+    /// installs cleanly, runs cleanly on the tested path, and throws an `ImportError` months later on
+    /// a stranger's machine. So a package that opts out of resolution MUST carry `importCheck`.
+    let resolvesDependencies: Bool
+    /// The module that proves this package's closure is actually complete, imported in the finished
+    /// environment right after pip returns. This is what converts the `--no-deps` risk from a silent
+    /// runtime failure into a loud install-time one, in the row that caused it, with pip's real error
+    /// text - which is the same rule B10 applies to every other failure.
+    let importCheck: String?
 
-    init(name: String, versionConstraint: String = "") {
+    init(name: String, versionConstraint: String = "",
+         resolvesDependencies: Bool = true, importCheck: String? = nil) {
         self.name = name
         self.versionConstraint = versionConstraint
+        self.resolvesDependencies = resolvesDependencies
+        self.importCheck = importCheck
     }
 
     var pipRequirement: String { name + versionConstraint }
@@ -107,7 +120,34 @@ struct InstallerComponentDescriptor: Equatable {
 /// The first two rows owned by the headless installer. Later links can add UI and additional model
 /// rows by consuming these descriptors; they do not need to invent another package command.
 enum BootstrapInstallPlan {
-    static let mlxWhisper = InstallerPackage(name: "mlx-whisper", versionConstraint: "~=0.4.3")
+    /// mlx-whisper installed WITHOUT its declared dependencies, because exactly one of them - torch -
+    /// is 106 MiB of wheel and 638 MiB on disk that the shipped runtime never executes.
+    ///
+    /// This is B20's cut, and it ships only because `scripts/torch-free-proof.py` passed 48/48 on a
+    /// Metal-capable Mac: `torch_whisper.py` is the sole module in the package that imports torch and
+    /// nothing in the package imports it, so the reachable surface is torch-free; all three checkpoint
+    /// formats `load_models.load_model` can reach (safetensors, npz, quantized) load and transcribe
+    /// real speech; and all 18 of the daemon's control cases answer correctly over HTTP.
+    ///
+    /// `importCheck` is the guard on the risk this creates. Naming the closure here means a future
+    /// mlx-whisper that adds a dependency would otherwise install cleanly and fail at transcribe time;
+    /// instead the row fails at install time with pip's own error.
+    static let mlxWhisper = InstallerPackage(name: "mlx-whisper", versionConstraint: "~=0.4.3",
+                                             resolvesDependencies: false,
+                                             importCheck: "mlx_whisper")
+    /// mlx-whisper's own `Requires-Dist` list, measured from the 0.4.3 wheel, minus torch. Each of
+    /// these still resolves its OWN dependencies normally, so the `--no-deps` blast radius is exactly
+    /// one package rather than the whole tree.
+    static let mlxWhisperDependencies = [
+        InstallerPackage(name: "mlx", versionConstraint: ">=0.11"),
+        InstallerPackage(name: "numba"),
+        InstallerPackage(name: "numpy"),
+        InstallerPackage(name: "tqdm"),
+        InstallerPackage(name: "more-itertools"),
+        InstallerPackage(name: "tiktoken"),
+        InstallerPackage(name: "huggingface_hub"),
+        InstallerPackage(name: "scipy"),
+    ]
     static let ddgs = InstallerPackage(name: "ddgs")
 
     /// The speech model is cached under the app's own Application Support root. Its exact files and
@@ -121,7 +161,7 @@ enum BootstrapInstallPlan {
         title: "Transcription engine",
         detail: "Local speech-to-text and its voice model",
         virtualEnvironmentRelativePath: "stt-venv",
-        packages: [mlxWhisper],
+        packages: mlxWhisperDependencies + [mlxWhisper],
         modelArtifacts: [whisperModel])
 
     static let webSearch = InstallerComponentDescriptor(
@@ -470,13 +510,24 @@ final class InstallerEngine {
                     }
                 }
 
-                if !descriptor.packages.isEmpty {
-                    let outcome = try runWithRetry(
-                        executable: venvPython,
-                        arguments: Self.pipArguments(for: descriptor.packages))
+                for arguments in Self.pipInvocations(for: descriptor.packages) {
+                    let outcome = try runWithRetry(executable: venvPython, arguments: arguments)
                     attempts += outcome.attempts
                     guard outcome.result.succeeded else {
                         throw failure(for: outcome.result)
+                    }
+                }
+
+                // The `--no-deps` guard. Not retried: a missing module is a resolution fact, not a
+                // transport one, so O5's rule says trying twice more can only waste the user's time.
+                for arguments in Self.importCheckArguments(for: descriptor.packages) {
+                    let result = runner.run(executable: venvPython, arguments: arguments,
+                                            environment: environment, timeout: 5 * 60)
+                    attempts += 1
+                    guard result.succeeded else {
+                        throw InstallerFailure(
+                            category: .process,
+                            message: "the installed packages are incomplete: " + result.output)
                     }
                 }
 
@@ -540,10 +591,34 @@ final class InstallerEngine {
     /// Kept public to the same module so the deterministic self-test can pin the actual command shape:
     /// pip keeps its wheel cache and own resume/retry implementation, and the model path goes through
     /// huggingface_hub rather than a hand-written HTTP downloader.
-    static func pipArguments(for packages: [InstallerPackage]) -> [String] {
+    static func pipArguments(for packages: [InstallerPackage],
+                             resolvingDependencies: Bool = true) -> [String] {
         ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "--no-input",
          "--retries", String(InstallerRetryPolicy.maxAttempts), "--timeout", "30"]
+            + (resolvingDependencies ? [] : ["--no-deps"])
             + packages.map(\.pipRequirement)
+    }
+
+    /// One pip command per resolution mode, because `--no-deps` is a property of the invocation and
+    /// not of a requirement. The resolving group runs FIRST so the explicitly-named dependencies are
+    /// already present when the `--no-deps` package lands; the reverse order would leave the
+    /// environment correct only by the resolver's accident.
+    static func pipInvocations(for packages: [InstallerPackage]) -> [[String]] {
+        let resolving = packages.filter(\.resolvesDependencies)
+        let pinned = packages.filter { !$0.resolvesDependencies }
+        var invocations: [[String]] = []
+        if !resolving.isEmpty { invocations.append(pipArguments(for: resolving)) }
+        if !pinned.isEmpty {
+            invocations.append(pipArguments(for: pinned, resolvingDependencies: false))
+        }
+        return invocations
+    }
+
+    /// `python -c "import <module>"` for every package that opted out of dependency resolution.
+    /// Run after pip, in the environment pip just built, so an incomplete hand-owned closure fails the
+    /// row it belongs to instead of surfacing as a dead daemon later.
+    static func importCheckArguments(for packages: [InstallerPackage]) -> [[String]] {
+        packages.compactMap(\.importCheck).map { ["-c", "import \($0)"] }
     }
 
     static func modelDownloadArguments(for artifact: InstallerModelArtifact,

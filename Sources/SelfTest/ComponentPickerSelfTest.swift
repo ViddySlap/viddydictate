@@ -87,8 +87,11 @@ enum ComponentPickerSelfTest {
 
     private static func checkMeasuredSizes(_ check: SelfTestReporter) {
         let sizes = ComponentPicker.SizeCatalog.measured
-        check.record("the shipped sizes are the ones measured on 2026-08-27, not the grill's estimates",
-                     sizes.transcriptionEngine == 242_159_990 && sizes.voiceModel == 1_613_979_758
+        // The transcription engine was re-measured on 2026-08-29 when B20's torch cut landed: the
+        // with-torch closure was 242_159_990 bytes across 35 wheels, the torch-free one is
+        // 121_077_755 across 28. Every other figure is L5's 2026-08-27 measurement, unchanged.
+        check.record("the shipped sizes are the measured ones, not the grill's estimates",
+                     sizes.transcriptionEngine == 121_077_755 && sizes.voiceModel == 1_613_979_758
                         && sizes.webSearch == 14_028_533 && sizes.gemma == 6_861_935_454
                         && sizes.qwen == 17_190_793_452)
         // The two figures O1 named. gemma's estimate was out by 1.7x, which is the whole reason O1
@@ -101,10 +104,14 @@ enum ComponentPickerSelfTest {
                      ComponentPicker.downloadSize(sizes.qwen ?? 0))
         check.record("no size is ever presented as zero when it is simply unmeasured",
                      sizes.lmStudio == nil)
-        check.record("megabyte-scale rows are quoted in megabytes rather than as 0.2 GB",
-                     ComponentPicker.downloadSize(242_159_990) == "242 MB"
+        check.record("megabyte-scale rows are quoted in megabytes rather than as 0.1 GB",
+                     ComponentPicker.downloadSize(121_077_755) == "121 MB"
                         && ComponentPicker.downloadSize(14_028_533) == "14 MB",
-                     ComponentPicker.downloadSize(242_159_990))
+                     ComponentPicker.downloadSize(121_077_755))
+        // B20's cut is a user-visible number, so pin the saving itself rather than only the new total.
+        check.record("the torch cut took 121 MB off the transcription engine row",
+                     242_159_990 - (sizes.transcriptionEngine ?? 0) == 121_082_235,
+                     ComponentPicker.downloadSize(242_159_990 - (sizes.transcriptionEngine ?? 0)))
     }
 
     // MARK: - B6
@@ -113,10 +120,10 @@ enum ComponentPickerSelfTest {
         let core = ComponentPicker.rows(selection: .init(), facts: air8, environment: bare)
         let coreTotal = ComponentPicker.total(core)
         check.record("the core total is the sum of the measured core rows, in bytes",
-                     coreTotal.bytes == 242_159_990 + 1_613_979_758 + 14_028_533
+                     coreTotal.bytes == 121_077_755 + 1_613_979_758 + 14_028_533
                         && coreTotal.unmeasured.isEmpty, "\(coreTotal.bytes)")
-        check.record("the core total reads 1.9 GB, not the spec's estimated 2.1 GB",
-                     ComponentPicker.totalLine(core) == "Total download: 1.9 GB",
+        check.record("the core total reads 1.7 GB, below both the spec's 2.1 GB estimate and L5's 1.9 GB",
+                     ComponentPicker.totalLine(core) == "Total download: 1.7 GB",
                      ComponentPicker.totalLine(core))
 
         var everything = ComponentPicker.Selection(lmStudio: true, gemma: true, qwen: true)
@@ -127,7 +134,7 @@ enum ComponentPickerSelfTest {
                      "\(fullTotal.bytes)")
         check.record("a row whose size nobody measured is NAMED in the total, never dropped from it",
                      fullTotal.unmeasured == [.lmStudio]
-                        && ComponentPicker.totalLine(full) == "Total download: 25.9 GB, plus LM Studio",
+                        && ComponentPicker.totalLine(full) == "Total download: 25.8 GB, plus LM Studio",
                      ComponentPicker.totalLine(full))
 
         everything.qwen = false

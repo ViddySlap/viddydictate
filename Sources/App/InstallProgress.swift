@@ -181,7 +181,7 @@ enum InstallProgress {
     /// against a time vocabulary so that adding one reds a gate rather than shipping.
     ///
     /// It does not reuse the picker's size formatter, and the difference is the point: that one rounds
-    /// to whole megabytes because "0.2 GB" is a worse way to say 242 MB, while a rate needs its decimal
+    /// to whole megabytes because "0.1 GB" is a worse way to say 121 MB, while a rate needs its decimal
     /// - B7 writes `12.4 MB/s`, and a speed that only ever moves in whole megabytes reads as a stuck
     /// number on exactly the connections where the user is watching it most closely.
     static func speedLine(_ aggregate: Aggregate) -> String? {

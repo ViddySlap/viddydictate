@@ -11,6 +11,7 @@ enum InstallerEngineSelfTest {
         checkRetryRule(reporter)
         checkChecksumAndRealError(reporter)
         checkRowsContinueAfterFailure(reporter)
+        checkNoDepsGuard(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "installer engine"))
@@ -23,8 +24,29 @@ enum InstallerEngineSelfTest {
         check.record("the mandatory core is represented as independent descriptors", core.map(\.id)
             == ["stt-daemon", "web-search"])
         check.record("the STT package list is data, not a pip command string",
-                     BootstrapInstallPlan.sttDaemon.packages == [BootstrapInstallPlan.mlxWhisper]
-                        && BootstrapInstallPlan.sttDaemon.packages.first?.pipRequirement == "mlx-whisper~=0.4.3")
+                     BootstrapInstallPlan.sttDaemon.packages
+                        == BootstrapInstallPlan.mlxWhisperDependencies + [BootstrapInstallPlan.mlxWhisper]
+                        && BootstrapInstallPlan.sttDaemon.packages.last?.pipRequirement == "mlx-whisper~=0.4.3")
+
+        // B20's cut. These pin the OUTCOME of the proof, so a later edit that quietly reinstates torch
+        // - or that widens `--no-deps` past the one package the proof covered - reds the gate.
+        let stt = BootstrapInstallPlan.sttDaemon.packages
+        check.record("no STT package pulls torch back in",
+                     !stt.contains { ["torch", "torchaudio", "torchvision"].contains($0.name) },
+                     stt.map(\.pipRequirement).joined(separator: " "))
+        check.record("mlx-whisper is the ONLY package that opts out of dependency resolution",
+                     stt.filter { !$0.resolvesDependencies }.map(\.name) == ["mlx-whisper"],
+                     stt.filter { !$0.resolvesDependencies }.map(\.name).joined(separator: ", "))
+        check.record("every package that opts out of resolution carries an import check",
+                     stt.allSatisfy { $0.resolvesDependencies || $0.importCheck != nil }
+                        && BootstrapInstallPlan.mlxWhisper.importCheck == "mlx_whisper")
+        check.record("the hand-owned closure is mlx-whisper's own Requires-Dist minus torch",
+                     BootstrapInstallPlan.mlxWhisperDependencies.map(\.name)
+                        == ["mlx", "numba", "numpy", "tqdm", "more-itertools", "tiktoken",
+                            "huggingface_hub", "scipy"]
+                        && BootstrapInstallPlan.mlxWhisperDependencies.allSatisfy(\.resolvesDependencies))
+        check.record("the web-search row did not inherit the STT row's --no-deps",
+                     BootstrapInstallPlan.webSearch.packages.allSatisfy(\.resolvesDependencies))
         check.record("the web-search package list is independently data-driven",
                      BootstrapInstallPlan.webSearch.packages == [BootstrapInstallPlan.ddgs]
                         && BootstrapInstallPlan.webSearch.packages.first?.pipRequirement == "ddgs")
@@ -42,6 +64,25 @@ enum InstallerEngineSelfTest {
         check.record("pip receives a data-built package list with its own cache and retries",
                      pip.contains("--retries") && pip.contains("3") && pip.contains("mlx-whisper~=0.4.3")
                         && pip.contains("torch") && !pip.contains("--no-cache-dir"), pip.joined(separator: " "))
+        check.record("a resolving package list never carries --no-deps", !pip.contains("--no-deps"))
+
+        // `--no-deps` is a property of the INVOCATION, not of a requirement, so the split is what makes
+        // the descriptor's per-package flag mean anything. Order matters: the resolving group has to
+        // land before the pinned one, or the environment is only correct by the resolver's accident.
+        let invocations = InstallerEngine.pipInvocations(for: BootstrapInstallPlan.sttDaemon.packages)
+        check.record("the STT row installs as two pip commands, resolving first then --no-deps",
+                     invocations.count == 2
+                        && !invocations[0].contains("--no-deps")
+                        && invocations[0].contains("mlx>=0.11") && invocations[0].contains("scipy")
+                        && !invocations[0].contains("mlx-whisper~=0.4.3")
+                        && invocations[1].contains("--no-deps")
+                        && invocations[1].last == "mlx-whisper~=0.4.3",
+                     invocations.map { $0.joined(separator: " ") }.joined(separator: " | "))
+        check.record("a wholly-resolving row is still ONE pip command",
+                     InstallerEngine.pipInvocations(for: BootstrapInstallPlan.webSearch.packages).count == 1)
+        check.record("the import-check command is one python -c per hand-owned package",
+                     InstallerEngine.importCheckArguments(for: BootstrapInstallPlan.sttDaemon.packages)
+                        == [["-c", "import mlx_whisper"]])
 
         let modelArgs = InstallerEngine.modelDownloadArguments(
             for: InstallerModelArtifact(repository: "small/test", revision: "rev-1"),
@@ -135,6 +176,65 @@ enum InstallerEngineSelfTest {
         check.record("a 4xx row uses one attempt and preserves the response",
                      runner.invocations.count == 2 && results[0].attempts == 1,
                      "invocations=\(runner.invocations.count)")
+    }
+
+    /// The regression that guards B20's cut. `--no-deps` moves ownership of mlx-whisper's dependency
+    /// closure from pip to this repo, and the failure that creates is the one B20 names: the install
+    /// succeeds, and the ImportError arrives months later in a daemon on a stranger's machine. The
+    /// engine must therefore convert an incomplete closure into a failure of the row that caused it.
+    private static func checkNoDepsGuard(_ check: SelfTestReporter) {
+        let hand = InstallerComponentDescriptor(
+            id: "hand-owned", title: "Hand-owned closure",
+            virtualEnvironmentRelativePath: "hand-venv",
+            packages: [InstallerPackage(name: "mlx-whisper", versionConstraint: "~=0.4.3",
+                                        resolvesDependencies: false, importCheck: "mlx_whisper")])
+
+        var root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("viddydictate-nodeps-bad-\(UUID().uuidString)", isDirectory: true)
+        // venv PASS, pip --no-deps PASS, then `python -c "import mlx_whisper"` FAILS.
+        var runner = FakeInstallerRunner(responses: [
+            InstallerCommandResult(exitCode: 0),
+            InstallerCommandResult(exitCode: 0),
+            InstallerCommandResult(exitCode: 1, stderr: "ModuleNotFoundError: No module named 'numba'"),
+        ])
+        var engine = InstallerEngine(paths: testPaths(root: root), runner: runner, sleep: { _ in })
+        var result = engine.install(hand)
+        try? FileManager.default.removeItem(at: root)
+        check.record("a clean pip install with an incomplete closure still fails the row",
+                     !result.succeeded)
+        var message = "no failure recorded"
+        if case .failed(let failure, _) = result.state { message = failure.message }
+        check.record("the row carries python's real ModuleNotFoundError, not a generic message",
+                     message.contains("No module named 'numba'") && message.contains("incomplete"),
+                     message)
+        check.record("a missing module is not retried, because it is a resolution fact not a transport one",
+                     runner.invocations.filter { $0.1.contains("-c") }.count == 1,
+                     "import-check invocations=\(runner.invocations.filter { $0.1.contains("-c") }.count)")
+
+        root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("viddydictate-nodeps-good-\(UUID().uuidString)", isDirectory: true)
+        runner = FakeInstallerRunner(responses: [])
+        engine = InstallerEngine(paths: testPaths(root: root), runner: runner, sleep: { _ in })
+        result = engine.install(hand)
+        let ordered = runner.invocations.map(\.1)
+        try? FileManager.default.removeItem(at: root)
+        check.record("a complete closure installs and the import check runs LAST, in the built venv",
+                     result.succeeded && ordered.count == 3
+                        && ordered[1].contains("--no-deps")
+                        && ordered[2] == ["-c", "import mlx_whisper"],
+                     ordered.map { $0.joined(separator: " ") }.joined(separator: " | "))
+
+        // A row with no hand-owned package must not gain a check it never asked for.
+        root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("viddydictate-nodeps-none-\(UUID().uuidString)", isDirectory: true)
+        runner = FakeInstallerRunner(responses: [])
+        engine = InstallerEngine(paths: testPaths(root: root), runner: runner, sleep: { _ in })
+        _ = engine.install(BootstrapInstallPlan.webSearch)
+        let webSearch = runner.invocations.map(\.1)
+        try? FileManager.default.removeItem(at: root)
+        check.record("a fully-resolved row runs no import check",
+                     !webSearch.contains { $0.first == "-c" },
+                     webSearch.map { $0.joined(separator: " ") }.joined(separator: " | "))
     }
 
     private static func testPaths(root: URL) -> InstallerPaths {

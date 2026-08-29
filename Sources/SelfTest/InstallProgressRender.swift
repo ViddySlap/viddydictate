@@ -219,7 +219,11 @@ enum InstallProgressRender {
         // way a first run does rather than a delta against wheels that were already there.
         let installing = snapshot([BootstrapInstallPlan.sttDaemon.id: .installing])
         state.apply(snapshot: installing, sampler: sampler, at: 0)
-        sampler.package = 190_000_000
+        // Two thirds of the row's OWN measured size, rather than a literal: a fixture that claims more
+        // bytes than the row costs is clamped to the row total, so a hardcoded number silently stops
+        // being mid-download the next time the package list changes. B20's torch cut is exactly that.
+        let sttBytes = ComponentPicker.SizeCatalog.measured.transcriptionEngine ?? 0
+        sampler.package = sttBytes * 2 / 3
         state.apply(snapshot: installing, sampler: sampler, at: 1)
 
         let view = PermissionsSetupView(width: 620, status: PermissionsStatus(),
@@ -232,8 +236,8 @@ enum InstallProgressRender {
               })
         check("[none] the download is visibly running underneath, in the strip",
               find(PermissionsScreen.stripIdentifier, in: view) != nil
-                && label(InstallProgress.totalIdentifier, in: view)?.stringValue.contains("190 MB")
-                    == true,
+                && label(InstallProgress.totalIdentifier, in: view)?.stringValue
+                    .contains(ComponentPicker.downloadSize(sampler.package)) == true,
               label(InstallProgress.totalIdentifier, in: view)?.stringValue ?? "no total")
         capture(view, to: outDir + "/permissions-none.png",
                 name: "B19, nothing granted yet, download running")
