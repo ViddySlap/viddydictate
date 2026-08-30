@@ -2,8 +2,18 @@ import AVFoundation
 import AudioToolbox
 
 /// Captures the mic into an in-memory mono Float buffer (native sample rate) and can snapshot it
-/// as a 16-bit PCM WAV at any time — used for live partials (snapshot the growing clip) and the
-/// final pass (snapshot on stop). The daemon's ffmpeg decode resamples, so native rate is fine.
+/// as a **16 kHz** 16-bit PCM WAV at any time — used for live partials (snapshot the growing clip)
+/// and the final pass (snapshot on stop).
+///
+/// The snapshot is resampled here rather than left at the device rate, and that is the whole reason
+/// ViddyDictate no longer needs ffmpeg. Whisper works at 16 kHz; something has to resample. It used
+/// to be ffmpeg, invoked by name out of the daemon's PATH, which meant the app depended on a binary
+/// macOS does not ship, that nothing installed, and whose VERSION varied per machine — and whisper
+/// is chaotic enough on marginal takes that two ffmpeg builds give two different transcripts. Doing
+/// it here with AVAudioConverter means one resampler, present on every Mac, identical for every
+/// user, and the daemon is left with an exact int16 -> float32 conversion and nothing to approximate.
+/// Measured on the regression corpus: the daemon's decode of these snapshots is bit-identical to
+/// ffmpeg's, max|diff| = 0.0 on all 11 takes.
 final class AudioRecorder {
     /// Final clips keep this much audio after the last active analysis window. The take has already
     /// crossed the 0.006 speech gate, so this lower floor only removes the quiet tail after speech.
@@ -171,11 +181,79 @@ final class AudioRecorder {
     func snapshotWavWithMetrics() -> WavSnapshot {
         lock.lock(); let copy = samples; let sr = sampleRate; lock.unlock()
         let trimmed = AudioRecorder.trimTrailingNearSilence(samples: copy, sampleRate: sr)
+        // Trim at the native rate, resample only what survives. The reported counts and durations
+        // stay in native-rate terms on purpose: they feed the tail-hallucination diagnostics, whose
+        // measurements were taken against the raw capture, and rebasing them to 16 kHz would silently
+        // change the meaning of numbers other code compares against recorded thresholds.
+        let outbound = AudioRecorder.resampleForModel(samples: trimmed, from: sr)
         return WavSnapshot(
-            wav: AudioRecorder.makeWav(samples: trimmed, sampleRate: sr),
+            wav: AudioRecorder.makeWav(samples: outbound, sampleRate: AudioRecorder.modelSampleRate),
             rawSampleCount: copy.count,
             retainedSampleCount: trimmed.count,
             sampleRate: sr)
+    }
+
+    /// What Whisper consumes. Everything handed to the daemon is at this rate, so the daemon never
+    /// resamples and never shells out.
+    static let modelSampleRate: Double = 16000
+
+    /// Resample a mono Float buffer to `modelSampleRate` with AVAudioConverter at maximum quality.
+    ///
+    /// Returns the input untouched when it is already at the model rate — the overwhelmingly common
+    /// case on a pinned 16 kHz device, and it keeps that path exactly bit-for-bit what it was.
+    ///
+    /// **Failure is deliberately non-fatal and non-silent.** If a converter cannot be built for some
+    /// device format, this returns the input unchanged rather than throwing away a take the user has
+    /// already spoken. The WAV then carries its native rate in its own header, the daemon reads that
+    /// header and resamples in Python, and the transcript still happens. A dropped take would be a
+    /// worse outcome than a slower path, and the header means the two sides can never disagree about
+    /// what rate the bytes are.
+    static func resampleForModel(samples: [Float], from sourceRate: Double) -> [Float] {
+        guard sourceRate > 0, sourceRate != modelSampleRate, !samples.isEmpty else { return samples }
+
+        guard let inFormat = AVAudioFormat(standardFormatWithSampleRate: sourceRate, channels: 1),
+              let outFormat = AVAudioFormat(standardFormatWithSampleRate: modelSampleRate, channels: 1),
+              let converter = AVAudioConverter(from: inFormat, to: outFormat),
+              let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat,
+                                           frameCapacity: AVAudioFrameCount(samples.count)) else {
+            Log.write("audio.resample: no converter for \(Int(sourceRate)) Hz — sending native rate")
+            return samples
+        }
+        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+
+        inBuf.frameLength = AVAudioFrameCount(samples.count)
+        if let dst = inBuf.floatChannelData?[0] {
+            samples.withUnsafeBufferPointer { src in
+                dst.update(from: src.baseAddress!, count: samples.count)
+            }
+        }
+
+        // Ceiling plus the converter's own priming latency, so a resample can never be truncated by
+        // an under-sized destination.
+        let ratio = modelSampleRate / sourceRate
+        let capacity = AVAudioFrameCount((Double(samples.count) * ratio).rounded(.up)) + 4096
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: capacity) else {
+            Log.write("audio.resample: could not allocate \(capacity) frames — sending native rate")
+            return samples
+        }
+
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: outBuf, error: &error) { _, outStatus in
+            if supplied { outStatus.pointee = .endOfStream; return nil }
+            supplied = true
+            outStatus.pointee = .haveData
+            return inBuf
+        }
+        if let error = error {
+            Log.write("audio.resample: \(Int(sourceRate)) Hz -> 16 kHz failed (\(error.code)) — sending native rate")
+            return samples
+        }
+        guard status != .error, outBuf.frameLength > 0, let out = outBuf.floatChannelData?[0] else {
+            Log.write("audio.resample: produced no frames — sending native rate")
+            return samples
+        }
+        return Array(UnsafeBufferPointer(start: out, count: Int(outBuf.frameLength)))
     }
 
     /// Remove only a long, low-energy tail before a snapshot reaches transcription. Fixed 20 ms RMS

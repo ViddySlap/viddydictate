@@ -14,7 +14,6 @@ the provider client. An optional Gemini key is stored in the macOS login keychai
 
 - An Apple Silicon Mac running macOS 13 Ventura or newer. Intel Macs are not supported.
 - About 2.1 GB of downloads and roughly 15 minutes on first launch, once. See [Install](#install).
-- `ffmpeg` on `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, or `/bin`.
 - For text transforms, either:
   - Claude Code installed and signed in with a supported claude.ai subscription, or
   - ChatGPT.app installed in `/Applications`, followed by ViddyDictate's in-app Codex device login.
@@ -24,7 +23,7 @@ local-provider path, but the current local cleanup and search route uses a 30B m
 fit on a 16 GB Mac. On modest hardware, use Claude or Codex.
 
 Nothing else is a prerequisite. The app brings its own Python, and you do not need Xcode, the
-Command Line Tools, Homebrew, or Node to run it. Those are needed only to
+Command Line Tools, Homebrew, `ffmpeg`, or Node to run it. Those are needed only to
 [build from source](#build-from-source).
 
 ## Install
@@ -230,7 +229,8 @@ tail -n 100 /tmp/viddydictate.err.log
 - If daemon health never answers, reopen Settings > Setup and re-run the failed component. On a
   source install, `./install-daemon.sh` does the same thing and prints more.
 - If health says the model is not ready, allow the first model download and warmup to finish.
-- If every transcribe fails while health still answers, confirm `ffmpeg` is on the daemon's PATH.
+- If every transcribe fails while health still answers, check the daemon's error log. Transcription
+  needs no external tools; the daemon decodes the audio itself.
 - If global hotkeys do nothing, recheck Accessibility and Input Monitoring, then relaunch the app.
 - If the keyboard itself becomes unresponsive, a ViddyDictate process holding the event tap was
   destroyed rather than stopped, usually by rebuilding over a live install. Log out and back in to

@@ -92,13 +92,10 @@ if ! "$VENV/bin/python" -c "import mlx_whisper" 2>/tmp/vd-import-check.$$; then
 fi
 rm -f /tmp/vd-import-check.$$
 
-# mlx-whisper shells out to ffmpeg by name to decode the recorded clip. launchd's PATH is set in
-# the plist below; if ffmpeg is not on it the daemon still starts and /health still answers, but
-# every transcribe fails, so say so now rather than at first dictation.
-if ! PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" command -v ffmpeg >/dev/null 2>&1; then
-    echo "[install] WARNING: ffmpeg not found on the daemon's PATH. Transcribes will fail until you"
-    echo "          install it (brew install ffmpeg)."
-fi
+# No ffmpeg check here any more, and no ffmpeg dependency to check for. mlx-whisper only shells out
+# to ffmpeg when it is handed a PATH; the daemon hands it a decoded array, and the app sends 16 kHz
+# audio so that decode is exact. This used to be a warning, which meant a stranger without Homebrew
+# got a daemon that started, answered /health, warmed a 1.5 GB model, and failed every transcribe.
 
 echo "[install] daemon -> $DEST"
 cp "$SRC" "$DEST"
