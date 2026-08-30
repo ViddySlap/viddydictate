@@ -76,18 +76,55 @@ fi
 SIGN_DESC="$(printf '%s\n' "$IDENTITIES" | grep -F "$SIGN_HASH" | sed 's/^ *[0-9]*) *//')"
 echo "[release] signing identity: $SIGN_DESC"
 
+# The Team ID is the parenthesised suffix of a Developer ID common name, and it is what every signed
+# Mach-O in the shipped bundle has to carry. Extracted here so the nested sweep below can assert it.
+TEAM_ID="$(printf '%s\n' "$SIGN_DESC" | sed -n 's/.*(\([A-Z0-9]\{10\}\))"*$/\1/p')"
+[ -n "$TEAM_ID" ] || die "could not read a Team ID out of the identity name: $SIGN_DESC"
+echo "[release] team identifier: $TEAM_ID"
+
 command -v xcrun >/dev/null || die "xcrun not found (install Apple Command Line Tools)"
 xcrun --find notarytool >/dev/null 2>&1 || die "notarytool not found (needs Xcode or recent Command Line Tools)"
 xcrun --find stapler   >/dev/null 2>&1 || die "stapler not found (needs Xcode or recent Command Line Tools)"
 
-# Cheap local check that the credential profile exists at all, before spending a build on it.
-if ! security find-generic-password -s "com.apple.gke.notary.tool" >/dev/null 2>&1; then
-  echo "[release] WARNING: no stored notarytool credentials found in the login keychain."
-  echo "[release]          If submission fails with an auth error, create the profile once with:"
-  echo "[release]              xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\"
-  echo "[release]                --apple-id <your-apple-id> --team-id <your-team-id>"
-  echo "[release]          It will prompt for an app-specific password from appleid.apple.com."
-  echo "[release]          Type it into that prompt yourself; never put it in a script or a file."
+# Check the credential profile BEFORE spending a build on it — and check the thing that matters,
+# which is whether notarytool can authenticate, not whether a keychain item exists.
+#
+# This used to grep the login keychain for a "com.apple.gke.notary.tool" generic password. That check
+# is obsolete and was a permanent false negative here (measured 2026-08-29: the profile authenticates
+# and submits, and `security find-generic-password` finds nothing in any keychain on the search
+# list). notarytool stores profiles in the data-protection keychain, which the `security` CLI cannot
+# see at all. A preflight that always warns teaches the operator to ignore preflight warnings, which
+# is worse than having none.
+#
+# `notarytool history` is one authenticated round trip, seconds, and it is the same credential path
+# the two submissions below use. An auth failure is fatal here — it costs a whole build otherwise —
+# but a network failure is not, because the release may well be cut on bad hotel wifi and the
+# submissions do their own retrying.
+step "checking the notarization credential"
+NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>&1)" && NOTARY_RC=0 || NOTARY_RC=$?
+if [ "$NOTARY_RC" -eq 0 ]; then
+  echo "[release] notarytool profile '$NOTARY_PROFILE' authenticates"
+elif printf '%s' "$NOTARY_CHECK" | grep -qiE "could not find|no keychain profile|unable to (find|load)|not found"; then
+  echo "[release] No stored notarytool credential profile named '$NOTARY_PROFILE'."
+  echo "[release]"
+  echo "[release] Create it once, and type the password into its prompt yourself — never put an"
+  echo "[release] app-specific password into a script, a file, or a chat window:"
+  echo "[release]     xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\"
+  echo "[release]       --apple-id <your-apple-id> --team-id <your-team-id>"
+  echo "[release]"
+  printf '%s\n' "$NOTARY_CHECK" | sed 's/^/[release]     /'
+  exit 1
+elif printf '%s' "$NOTARY_CHECK" | grep -qiE "unauthorized|authentication|invalid|forbidden|password"; then
+  echo "[release] The notarytool profile '$NOTARY_PROFILE' exists but Apple rejected it."
+  echo "[release] Re-create it (app-specific passwords are revoked when the Apple ID password changes):"
+  echo "[release]     xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <id> --team-id <team>"
+  echo "[release]"
+  printf '%s\n' "$NOTARY_CHECK" | sed 's/^/[release]     /'
+  exit 1
+else
+  echo "[release] WARNING: could not reach Apple to check the notarization credential."
+  echo "[release]          Continuing — the submissions below will surface the real problem."
+  printf '%s\n' "$NOTARY_CHECK" | sed 's/^/[release]     /'
 fi
 
 # ---- Gate --------------------------------------------------------------------------------------
@@ -119,6 +156,53 @@ esac
 codesign -dv "$APP" 2>&1 | grep -q "flags=0x10000(runtime)" \
   || die "hardened runtime missing; notarization would reject this"
 echo "[release] hardened runtime confirmed"
+
+# Every check above inspects the OUTER bundle only, and that is not enough. Notarization refuses a
+# submission in which any nested Mach-O is unsigned, signed by another identity, or missing the
+# hardened runtime — and `codesign --verify --deep --strict` reports such a bundle VALID. That is not
+# hypothetical: on 5391750 the three Contents/Helpers binaries were linker-signed ad-hoc, --deep
+# --strict passed, and Apple would have rejected the release (see build.sh sign_nested_mach_o).
+#
+# build.sh signs them correctly now. This re-checks the artifact actually being shipped rather than
+# trusting the script that produced it, because the whole cost of being wrong lands minutes later on
+# an Apple round trip, and the failure Apple reports names a file, not a cause.
+step "verifying every nested Mach-O in the bundle"
+NESTED_LIST="$(mktemp)"
+find "$APP/Contents" -type f -not -path "$APP/Contents/MacOS/*" -print0 \
+  | xargs -0 file -F '|' --no-dereference \
+  | awk -F '|' '$2 ~ /Mach-O/ { print $1 }' > "$NESTED_LIST"
+
+NESTED_TOTAL=0
+NESTED_BAD=0
+while IFS= read -r macho; do
+  [ -n "$macho" ] || continue
+  NESTED_TOTAL=$((NESTED_TOTAL + 1))
+  info="$(codesign -dv --verbose=4 "$macho" 2>&1 || true)"
+  rel="${macho#"$APP/"}"
+  case "$info" in
+    *"flags=0x10000(runtime)"*) ;;
+    *) echo "[release]     NO HARDENED RUNTIME: $rel"; NESTED_BAD=$((NESTED_BAD + 1)); continue ;;
+  esac
+  # Identity, not by name. `codesign -dv` never prints the certificate's SHA-1, so the hash the
+  # identity was SELECTED by is not available here; the two facts that ARE available and cannot be
+  # produced by a local or ad-hoc signature are the Apple anchor in the designated requirement and
+  # the Team ID. A self-signed nested binary anchors to its own leaf and carries "TeamIdentifier=not
+  # set" — measured on the stable-signed build, which is exactly the mistake being guarded against.
+  case "$info" in
+    *"TeamIdentifier=$TEAM_ID"*) ;;
+    *) echo "[release]     WRONG OR MISSING TEAM IDENTIFIER: $rel"; NESTED_BAD=$((NESTED_BAD + 1)); continue ;;
+  esac
+  nested_dr="$(codesign -d -r- "$macho" 2>&1 || true)"
+  case "$nested_dr" in
+    *"anchor apple generic"*) ;;
+    *) echo "[release]     DESIGNATED REQUIREMENT DOES NOT ANCHOR TO APPLE: $rel"; NESTED_BAD=$((NESTED_BAD + 1)) ;;
+  esac
+done < "$NESTED_LIST"
+rm -f "$NESTED_LIST"
+
+[ "$NESTED_TOTAL" -gt 0 ] || die "found no nested Mach-O files at all — the bundle scan is broken, not the bundle"
+[ "$NESTED_BAD" -eq 0 ] || die "$NESTED_BAD of $NESTED_TOTAL nested Mach-O file(s) would fail notarization"
+echo "[release] $NESTED_TOTAL nested Mach-O file(s): hardened runtime + release identity, all of them"
 
 # ---- Notarize the app itself -------------------------------------------------------------------
 # Done in addition to the DMG so the .app carries its own stapled ticket. A DMG-only staple still

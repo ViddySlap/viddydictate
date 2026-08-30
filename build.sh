@@ -102,12 +102,33 @@ fi
 KC="$HOME/Library/Keychains/vd-signing.keychain-db"
 SIGN_ID="ViddyDictate Self-Signed"
 
+# Prove the identity can SIGN. Measured 2026-08-29: `security find-identity -v -p codesigning
+# <keychain>` lists the identity of a LOCKED keychain just as happily as an unlocked one, so the
+# listing is not evidence that codesign will work — it enumerates certificates, which need no key
+# material, while signing needs the private key the lock is protecting. That is why the old
+# find-identity probe below never reached its own unlock branch, and why an unattended build against
+# a locked keychain died with errSecInternalComponent minutes later, inside the signing step, with
+# no mention of a keychain anywhere in the error.
+#
+# Signing a throwaway Mach-O is the only check whose success means what the caller needs it to mean.
+# /usr/bin/true rather than a compiled probe: it is a real signable Mach-O, it is always present, and
+# it needs no toolchain, so this works in the scratch-HOME verification tier too.
+signing_identity_can_sign() {
+  probe_dir="$(mktemp -d)"
+  cp /usr/bin/true "$probe_dir/probe" 2>/dev/null || { rm -rf "$probe_dir"; return 1; }
+  chmod u+w "$probe_dir/probe"
+  if codesign --force --sign "$SIGN_ID" --keychain "$KC" "$probe_dir/probe" >/dev/null 2>&1; then
+    rm -rf "$probe_dir"
+    return 0
+  fi
+  rm -rf "$probe_dir"
+  return 1
+}
+
 # Make the signing keychain usable, prompting only when it is actually necessary.
 #
-# Order matters. A LOCKED keychain resolves to zero identities, indistinguishable from the
-# 2026-07-13 trust-settings wipe, so check first, unlock only if the identity is not already
-# resolvable, and re-check before concluding trust is broken. Without that, a hardened (lockable)
-# keychain would trigger the trust heal on every single build.
+# Order matters. Probe first, unlock only if the probe fails, and re-probe before concluding trust is
+# broken. Without that, a hardened (lockable) keychain would trigger the trust heal on every build.
 prepare_signing_keychain() {
   # codesign resolves identities through the keychain SEARCH LIST; `--keychain` does not add one
   # (measured 2026-08-16). A keychain missing from the list signs nothing and reports the very
@@ -121,7 +142,7 @@ prepare_signing_keychain() {
   fi
 
   # Explicit ifs, not && chains: under `set -e` a failing && list is a foot-gun here.
-  if security find-identity -v -p codesigning "$KC" 2>/dev/null | grep -q "$SIGN_ID"; then
+  if signing_identity_can_sign; then
     return 0
   fi
 
@@ -132,11 +153,11 @@ prepare_signing_keychain() {
     security unlock-keychain "$KC"
   fi
 
-  if security find-identity -v -p codesigning "$KC" 2>/dev/null | grep -q "$SIGN_ID"; then
+  if signing_identity_can_sign; then
     return 0
   fi
 
-  # Still unresolvable with the keychain unlocked, so this is the trust-settings wipe. Re-bless the
+  # Still unable to sign with the keychain unlocked, so this is the trust-settings wipe. Re-bless the
   # existing cert. NEVER mint a new one; that resets the TCC grants.
   echo "[build] stable identity not trusted (trust-settings wipe?) — restoring trust"
   HEAL_PEM="$(mktemp)"
@@ -148,6 +169,13 @@ prepare_signing_keychain() {
     echo "[build] WARNING: could not restore trust for $SIGN_ID (needs your authorization)."
   fi
   rm -f "$HEAL_PEM"
+
+  # Say so here rather than letting the build die inside codesign. Every remedy this function has is
+  # spent by now, so a third failure is a real problem the person running the build has to see.
+  if ! signing_identity_can_sign; then
+    echo "[build] WARNING: $SIGN_ID still cannot sign after unlocking and restoring trust."
+    echo "[build]          The signing step below will fail. See docs/signing-and-tcc.md."
+  fi
 }
 
 # Put the pinned interpreter in vendor/ (gitignored), verified, exactly once. Cached like
