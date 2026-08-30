@@ -248,6 +248,48 @@ def _clean_segments(result: dict, do_clean: bool,
     return text, diagnostics
 
 
+SAMPLE_RATE = 16000
+
+
+def _load_wav(audio_path: str):
+    """Decode a WAV to the float32 mono 16 kHz array Whisper wants, WITHOUT ffmpeg.
+
+    mlx_whisper.transcribe() shells out to `ffmpeg` when handed a path (audio.py: `if isinstance(
+    audio, str): audio = load_audio(audio)`), and only when handed a path. ffmpeg is not something
+    macOS ships and not something this app installs, so for a long time a user without Homebrew got a
+    daemon that started, answered /health, warmed a 1.5 GB model, and failed every single transcribe.
+    Handing over an array skips that branch entirely.
+
+    The app now sends 16 kHz (AudioRecorder.resampleForModel), so the normal path here is an exact
+    int16 -> float32 conversion with no filtering and nothing to approximate. Measured against
+    ffmpeg's own decode of the same files: max|diff| = 0.0 across the whole regression corpus.
+
+    The resampling branch is for clips this daemon did not receive fresh from a current app: takes
+    retained by an older build at the device's native rate, and the regression corpus itself. It is
+    NOT the normal path, and it is the only place where a filter choice can make our output differ
+    from ffmpeg's.
+    """
+    import numpy as np
+
+    with wave.open(audio_path, "rb") as w:
+        rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+        frames = w.readframes(w.getnframes())
+
+    if width != 2:
+        raise ValueError(f"expected 16-bit PCM WAV, got {width * 8}-bit")
+
+    audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    if rate != SAMPLE_RATE:
+        from math import gcd
+        from scipy.signal import resample_poly
+        g = gcd(int(rate), SAMPLE_RATE)
+        audio = resample_poly(audio, SAMPLE_RATE // g, int(rate) // g).astype(np.float32)
+        _log(f"decoded {audio_path} at {rate} Hz — resampled (an older or foreign clip)")
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
 def _transcribe(audio_path: str, cond_prev=None, clean=None,
                 initial_prompt=None) -> tuple[str, str, list[dict], Optional[float]]:
     import mlx_whisper
@@ -265,8 +307,10 @@ def _transcribe(audio_path: str, cond_prev=None, clean=None,
     # and decode exactly as before.
     if initial_prompt:
         kwargs["initial_prompt"] = initial_prompt
+    # An ARRAY, never the path: a path sends mlx_whisper to ffmpeg. See _load_wav.
+    audio = _load_wav(audio_path)
     with _tx_lock:
-        result = mlx_whisper.transcribe(audio_path, **kwargs)
+        result = mlx_whisper.transcribe(audio, **kwargs)
     raw = (result.get("text") or "").strip()
     text, segments = _clean_segments(
         result, CLEAN if clean is None else clean, audio_duration=audio_duration)

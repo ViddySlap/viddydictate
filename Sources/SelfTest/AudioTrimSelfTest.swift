@@ -96,10 +96,78 @@ enum AudioTrimSelfTest {
             aggressiveTrimmed.count <= quietWordStart,
             "kept=\(aggressiveTrimmed.count) quietWordStart=\(quietWordStart)")
 
+        // ---- The 16 kHz snapshot contract -------------------------------------------------------
+        // This is what replaced ffmpeg. The daemon no longer resamples and no longer shells out; it
+        // does an exact int16 -> float32 conversion, which is only correct because everything the app
+        // sends is already at the model rate. If any assertion here goes red, the daemon silently
+        // falls back to resampling in Python and the two sides stop agreeing about the audio.
+
+        reporter.record(
+            "the model rate the app targets is Whisper's 16 kHz",
+            AudioRecorder.modelSampleRate == 16_000)
+
+        // Identity at the model rate. The pinned case: a clip already at 16 kHz must come back
+        // bit-for-bit, never round-tripped through a converter that would perturb it for no reason.
+        let atModelRate = voicedSamples(seconds: 0.5, amplitude: 0.02)
+        let passedThrough = AudioRecorder.resampleForModel(
+            samples: atModelRate, from: AudioRecorder.modelSampleRate)
+        reporter.record(
+            "audio already at 16 kHz is returned untouched, sample for sample",
+            passedThrough == atModelRate,
+            "in=\(atModelRate.count) out=\(passedThrough.count)")
+
+        reporter.record(
+            "an empty clip resamples to an empty clip rather than trapping",
+            AudioRecorder.resampleForModel(samples: [], from: 44_100).isEmpty)
+
+        // Real device rates. The count is checked against the exact ratio with a small tolerance,
+        // because a sample-rate converter's priming latency legitimately shifts the tail by a few
+        // frames; what must NOT happen is a wholesale truncation or a doubling.
+        for deviceRate in [44_100.0, 48_000.0] {
+            let oneSecond = (0..<Int(deviceRate)).map { index -> Float in
+                Float(0.2 * sin(2.0 * Double.pi * 440.0 * Double(index) / deviceRate))
+            }
+            let resampled = AudioRecorder.resampleForModel(samples: oneSecond, from: deviceRate)
+            let expected = Int(AudioRecorder.modelSampleRate)
+            reporter.record(
+                "\(Int(deviceRate)) Hz resamples to within a few frames of 16 kHz",
+                abs(resampled.count - expected) <= 256,
+                "out=\(resampled.count) expected=\(expected)")
+
+            // A resample that produced silence, or clipped, would still have the right length. Check
+            // the signal actually survived: a 440 Hz tone is far below the 8 kHz Nyquist limit here,
+            // so its amplitude must come through essentially intact.
+            let peak = resampled.map(abs).max() ?? 0
+            reporter.record(
+                "\(Int(deviceRate)) Hz resample preserves the tone rather than gating it",
+                peak > 0.15 && peak < 0.25,
+                "peak=\(peak) source=0.2")
+        }
+
+        // The header is the contract the daemon reads. Whatever the device was doing, the bytes that
+        // leave this app must announce 16 kHz, because that is what makes the daemon's exact decode
+        // path correct rather than merely lucky.
+        let snapshotRate = readWavSampleRate(
+            AudioRecorder.makeWav(samples: AudioRecorder.resampleForModel(
+                samples: (0..<48_000).map { Float(0.1 * sin(Double($0) / 12.0)) }, from: 48_000),
+                sampleRate: AudioRecorder.modelSampleRate))
+        reporter.record(
+            "a snapshot taken from a 48 kHz device declares 16 kHz in its WAV header",
+            snapshotRate == 16_000,
+            "header=\(snapshotRate ?? -1)")
+
         print(reporter.summaryLine(prefix: reporter.passed
             ? "[audio-trim-selftest] PASS"
             : "[audio-trim-selftest] FAIL"))
         return reporter.passed
+    }
+
+    /// Read the sample rate straight out of the RIFF header, so the assertion is against the bytes
+    /// the daemon will actually parse rather than against the value we passed in.
+    private static func readWavSampleRate(_ wav: Data) -> Int? {
+        guard wav.count >= 28 else { return nil }
+        let bytes = [UInt8](wav[24..<28])
+        return Int(UInt32(bytes[0]) | UInt32(bytes[1]) << 8 | UInt32(bytes[2]) << 16 | UInt32(bytes[3]) << 24)
     }
 
     private static func nearSilence(seconds: Double) -> [Float] {

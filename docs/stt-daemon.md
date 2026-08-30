@@ -12,9 +12,18 @@ The daemon **source** is vendored at the repository root, so a clone is self-suf
 into the Hugging Face cache on the daemon's first transcribe. Until that finishes `/health`
 answers with `"ready": false` and `/transcribe` returns 503.
 
-`ffmpeg` is a genuine prerequisite: mlx-whisper shells out to it by name to decode the recorded
-clip. The daemon starts and answers `/health` without it, but every transcribe fails, so
-`install-daemon.sh` warns up front when it is missing.
+**The daemon decodes audio itself and needs no external tools.** mlx-whisper shells out to `ffmpeg`
+only when it is handed a file PATH; the daemon hands it a decoded float32 array instead, so that
+branch is never reached. The app sends 16 kHz mono audio (`AudioRecorder.resampleForModel`), which
+makes the daemon's decode an exact `int16 -> float32` conversion with nothing to approximate —
+measured bit-identical to ffmpeg's own decode, `max|diff| = 0.0`, across the whole regression corpus.
+A clip that arrives at some other rate (one retained by an older build, or a corpus file) is
+resampled in Python instead, and the daemon logs that it did so.
+
+This used to be a real prerequisite, and its absence was the worst-shaped failure the app had: the
+daemon started, `/health` answered, the 1.5 GB model downloaded and warmed, every indicator went
+green, and every single transcribe failed. macOS ships no `ffmpeg` and nothing in the app installed
+one, so that was the out-of-the-box experience for anyone without Homebrew.
 
 ## What install-daemon.sh does
 

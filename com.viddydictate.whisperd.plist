@@ -16,8 +16,10 @@
   <dict>
     <key>VIDDYDICTATE_WHISPER_PORT</key>
     <string>8765</string>
-    <!-- launchd's default PATH omits Homebrew; mlx-whisper shells out to ffmpeg by name. Both
-         Homebrew prefixes are listed so a hand-installed /usr/local/bin/ffmpeg also resolves. -->
+    <!-- launchd's default PATH is minimal. The daemon needs nothing from Homebrew any more - it
+         decodes WAVs itself and never shells out - but the prefixes stay so that a user's own
+         tooling on the PATH keeps behaving as it did, and so downgrading to an older daemon on the
+         same plist still finds ffmpeg. -->
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

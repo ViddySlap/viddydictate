@@ -32,7 +32,6 @@ xcode-select -p
 command -v swiftc
 command -v python3
 python3 -c 'import sys; assert sys.version_info >= (3, 9)'
-command -v ffmpeg
 command -v openssl
 command -v curl
 command -v node
@@ -40,9 +39,9 @@ command -v npm
 ```
 
 The macOS major version must be at least 13. If Command Line Tools are absent, run
-`xcode-select --install` and pause while the user completes Apple's installer. If `ffmpeg` is absent
-and Homebrew is already installed, run `brew install ffmpeg`; otherwise ask the user how they want
-to install it. Do not silently install a new system package manager.
+`xcode-select --install` and pause while the user completes Apple's installer. Do not silently
+install a new system package manager. ViddyDictate needs no `ffmpeg` and no Homebrew packages: the
+app resamples to 16 kHz itself and the daemon decodes the WAV in Python.
 
 Node.js and npm are verification dependencies, not runtime dependencies. If they are available, use
 the deterministic gate below. If they are missing, explain that the committed web bundle can still
@@ -249,7 +248,7 @@ Raw local dictation can be reported separately if it works before a provider is 
 5. If the user reports the keyboard itself is unresponsive, stop installing and say so plainly: a
    process holding the event tap was destroyed rather than stopped. Logging out and back in clears
    it. Then complete section 2 before touching the build again.
-6. If transcription fails while `/health` answers, confirm `ffmpeg` is on the daemon's configured
-   PATH and wait for the first model warmup.
+6. If transcription fails while `/health` answers, wait for the first model warmup and then read the
+   daemon's error log. Transcription needs no external tools; the daemon decodes the audio itself.
 7. If Claude transforms fail, use the Setup tab and `claude auth status --json`. If Codex transforms
    fail, use the Setup tab because ViddyDictate's dedicated Codex state is intentionally separate.
