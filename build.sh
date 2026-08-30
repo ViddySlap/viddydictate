@@ -109,6 +109,17 @@ SIGN_ID="ViddyDictate Self-Signed"
 # resolvable, and re-check before concluding trust is broken. Without that, a hardened (lockable)
 # keychain would trigger the trust heal on every single build.
 prepare_signing_keychain() {
+  # codesign resolves identities through the keychain SEARCH LIST; `--keychain` does not add one
+  # (measured 2026-08-16). A keychain missing from the list signs nothing and reports the very
+  # confusing "no identity found" while find-identity happily lists it. Ensure membership first,
+  # appending so login/System/other signing keychains survive. Needs no keychain password.
+  if ! security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//' | grep -qxF "$KC"; then
+    echo "[build] adding the signing keychain to the search list"
+    # shellcheck disable=SC2046,SC2086
+    security list-keychains -d user -s \
+      $(security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//' | tr '\n' ' ') "$KC"
+  fi
+
   # Explicit ifs, not && chains: under `set -e` a failing && list is a foot-gun here.
   if security find-identity -v -p codesigning "$KC" 2>/dev/null | grep -q "$SIGN_ID"; then
     return 0
@@ -130,7 +141,12 @@ prepare_signing_keychain() {
   echo "[build] stable identity not trusted (trust-settings wipe?) — restoring trust"
   HEAL_PEM="$(mktemp)"
   security find-certificate -c "$SIGN_ID" -p "$KC" > "$HEAL_PEM"
-  security add-trusted-cert -p codeSign -k "$KC" "$HEAL_PEM" || true
+  # -r trustRoot: the cert IS the root, so it must be blessed as one. No -k: trust settings belong
+  # in the user trust domain where evaluation happens, not inside the app-specific keychain, which
+  # is where this used to write them. Failure is reported rather than swallowed by `|| true`.
+  if ! security add-trusted-cert -r trustRoot -p codeSign "$HEAL_PEM"; then
+    echo "[build] WARNING: could not restore trust for $SIGN_ID (needs your authorization)."
+  fi
   rm -f "$HEAL_PEM"
 }
 

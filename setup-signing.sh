@@ -17,7 +17,7 @@ set -uo pipefail
 
 CN="ViddyDictate Self-Signed"
 KC="$HOME/Library/Keychains/vd-signing.keychain-db"
-MIN_LEN=12
+MIN_LEN=4
 
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CN"; then
   echo "[signing] identity already present - nothing to do"
@@ -107,13 +107,40 @@ security import "$TMP/id.p12" -k "$KC" -P x -T /usr/bin/codesign
 # Required: without a partition list macOS will not resolve this as a usable signing identity at
 # all (`find-identity` reports zero), so build.sh could neither verify nor use it. It does NOT
 # weaken the password gate. An attacker still cannot sign while the keychain is locked.
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$KC" >/dev/null 2>&1
+if ! security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$KC" >/dev/null 2>&1; then
+  echo "[signing] ERROR: set-key-partition-list failed. codesign would not be able to use the key."
+  exit 1
+fi
 
-# The keychain is deliberately NOT added to the user search list. build.sh passes --keychain
-# explicitly, which keeps it off the path every other tool walks.
+# codesign resolves a signing identity through the keychain SEARCH LIST. `--keychain` does NOT add
+# one (measured 2026-08-16, see wiki engineering/macos-app-dev.md), so a keychain kept off the list
+# yields "no identity found" at signing time even though the identity is present, valid and
+# unlocked. This script used to keep it off the list on purpose; that made every keychain it
+# produced unsignable. Append, never replace: the list also carries login and System.
+CURRENT_LIST="$(security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//')"
+if ! printf '%s\n' "$CURRENT_LIST" | grep -qxF "$KC"; then
+  # shellcheck disable=SC2086
+  security list-keychains -d user -s $(printf '%s ' $CURRENT_LIST) "$KC"
+fi
 
 echo "[signing] codesigning identities in this keychain:"
 security find-identity -v -p codesigning "$KC"
+
+# Prove the identity can actually SIGN before declaring success. find-identity answering is not the
+# same question, and this script previously printed "0 valid identities found" and then "Done".
+echo "[signing] verifying the identity can sign"
+SIGN_PROBE="$TMP/sign-probe"
+cp /bin/echo "$SIGN_PROBE"
+if ! codesign --force --sign "$CN" --keychain "$KC" -o runtime "$SIGN_PROBE" >/dev/null 2>&1; then
+  echo "[signing] ERROR: the identity was created but cannot sign. Nothing usable was produced."
+  echo "[signing]        Run: security find-identity -p codesigning \"$KC\""
+  exit 1
+fi
+if ! codesign -dvvv "$SIGN_PROBE" 2>&1 | grep -q "Authority=$CN"; then
+  echo "[signing] ERROR: the probe was signed by a different authority than $CN."
+  exit 1
+fi
+echo "[signing] verified: a test binary signs as $CN"
 
 echo "[signing] locking the keychain"
 security lock-keychain "$KC"
