@@ -149,7 +149,10 @@ if [ -f "$PREFS" ]; then
   # Both forms: the binary plist restores byte-for-byte, the xml one can be read by a human in five
   # years when the binary format has moved on and this backup is all that is left.
   cp "$PREFS" "$DEST/settings.plist"
-  plutil -convert xml1 -o "$DEST/settings.xml.plist" "$PREFS" 2>/dev/null || true
+  # plutil reports parse errors on stdout, not stderr, so both are silenced: a settings file this
+  # cannot convert is not a reason to spoil the run, and the binary copy above is the one that
+  # actually restores.
+  plutil -convert xml1 -o "$DEST/settings.xml.plist" "$PREFS" >/dev/null 2>&1 || true
   printf '  %-24s %s\n' "settings.plist" "$(human "$PREFS")" >> "$MANIFEST"
 fi
 
