@@ -17,7 +17,7 @@ set -uo pipefail
 
 CN="ViddyDictate Self-Signed"
 KC="$HOME/Library/Keychains/vd-signing.keychain-db"
-MIN_LEN=4
+MIN_LEN=12
 
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CN"; then
   echo "[signing] identity already present - nothing to do"
