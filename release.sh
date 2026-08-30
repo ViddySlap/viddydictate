@@ -20,7 +20,6 @@ BUILD="$ROOT/build"
 APP="$BUILD/$APP_NAME.app"
 DIST="$ROOT/dist"
 NOTARY_PROFILE="${VD_NOTARY_PROFILE:-viddydictate-notary}"
-STAGE="$DIST/stage"
 
 die() { echo "[release] ERROR: $*" >&2; exit 1; }
 step() { echo; echo "[release] ===== $* ====="; }
@@ -138,7 +137,7 @@ fi
 # ---- Build + sign ------------------------------------------------------------------------------
 step "building and signing $VERSION with the Developer ID"
 rm -rf "$DIST"
-mkdir -p "$STAGE"
+mkdir -p "$DIST"
 VD_SIGN_IDENTITY="$SIGN_HASH" VD_APP_VERSION="$VERSION" "$ROOT/build.sh"
 
 step "verifying the signature before we spend a notarization on it"
@@ -234,36 +233,48 @@ echo "[release] app notarized and stapled"
 
 # ---- Package the DMG ---------------------------------------------------------------------------
 step "packaging the disk image"
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"     # the familiar drag-to-install layout
+# Build the image at a mountpoint WE choose, never under /Volumes.
+#
+# `hdiutil create -srcfolder` mounts a scratch volume at /Volumes/<volname> and copies the source in.
+# That fails with a bare "Operation not permitted" when an app bundle has previously been mounted AND
+# RUN from that exact path, which is precisely what happens when you do the sensible thing and test a
+# DMG before shipping it. Measured 2026-08-30, and the isolation is unambiguous: same staged app under
+# volname "ViddyDictate 1.0.1" succeeds, a plain text file under "ViddyDictate 1.0.0" succeeds, and
+# the app under "ViddyDictate 1.0.0" fails - because last night's DMG was mounted there and its
+# bundled interpreter executed. macOS records the app path and then refuses to let an unprivileged
+# process write an app bundle over it.
+#
+# So the version you just tested is the one version you can no longer re-cut, on the machine where
+# you tested it. Attaching at our own path sidesteps /Volumes entirely, which also means a release
+# can be cut while a previous DMG of the same name is still mounted in Finder.
+APP_MB="$(du -sm "$APP" | awk '{print $1}')"
+IMG_MB=$((APP_MB + 60))
+RW_IMG="$DIST/$APP_NAME-$VERSION-rw.dmg"
+MNT="$DIST/mnt"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
 
-# Retried, because this step is not reliable and it fails EXPENSIVELY. hdiutil builds the image by
-# mounting a scratch volume under /Volumes and copying the source into it, and that copy can come
-# back "Operation not permitted" against a freshly notarized-and-stapled bundle - observed
-# 2026-08-30, then succeeding immediately on an identical retry with the same staged input. The cost
-# of not retrying is not a rerun of this line: by the time packaging starts, the app notarization has
-# already been submitted, waited on, and stapled, so a transient failure here throws away a complete
-# Apple round trip.
-#
-# Bounded and loud. A permission problem that is real must still fail the release rather than be
-# papered over by three attempts, so every retry says so and the last failure is fatal.
-dmg_created=0
-for attempt in 1 2 3; do
-  if hdiutil_err="$(hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" \
-       -ov -format UDZO "$DMG" 2>&1 >/dev/null)"; then
-    dmg_created=1
-    [ "$attempt" -eq 1 ] || echo "[release] disk image created on attempt $attempt"
-    break
-  fi
-  echo "[release] hdiutil attempt $attempt/3 failed:"
-  printf '%s\n' "$hdiutil_err" | sed 's/^/[release]     /'
-  rm -f "$DMG"
-  sleep 5
-done
-[ "$dmg_created" -eq 1 ] || die "could not create the disk image after 3 attempts (the app notarization above is already spent; re-running this script is safe)"
+# Detach on ANY exit path. A mounted scratch image left behind by a failed release would make the
+# next run fail for a different reason than the one that stopped this one.
+cleanup_mount() {
+  if mount | grep -q " ${MNT} "; then hdiutil detach "$MNT" -force >/dev/null 2>&1 || true; fi
+}
+trap cleanup_mount EXIT
 
-rm -rf "$STAGE"
+hdiutil create -size "${IMG_MB}m" -fs HFS+ -volname "$APP_NAME $VERSION" "$RW_IMG" >/dev/null \
+  || die "could not create the scratch disk image"
+mkdir -p "$MNT"
+hdiutil attach "$RW_IMG" -mountpoint "$MNT" -nobrowse >/dev/null \
+  || die "could not attach the scratch disk image at $MNT"
+
+ditto "$APP" "$MNT/$APP_NAME.app" || die "could not copy the app into the disk image"
+ln -s /Applications "$MNT/Applications"     # the familiar drag-to-install layout
+
+hdiutil detach "$MNT" >/dev/null || die "could not detach the scratch disk image"
+trap - EXIT
+rm -rf "$MNT"
+
+hdiutil convert "$RW_IMG" -format UDZO -o "$DMG" >/dev/null || die "could not compress the disk image"
+rm -f "$RW_IMG"
 
 codesign --force --sign "$SIGN_HASH" --timestamp "$DMG" || die "signing the DMG failed"
 
