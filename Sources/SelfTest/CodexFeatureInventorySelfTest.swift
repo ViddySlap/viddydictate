@@ -102,10 +102,10 @@ enum CodexFeatureInventorySelfTest {
                 currentFirst)
             let currentSecondInventory = try CodexIsolationFoundation.parseFeatureInventory(
                 currentSecond)
-            check("current 0.146 staged two-pass inventory is compatibility-auditable",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+            check("current 0.146 staged two-pass inventory reports no drift",
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: currentFirstInventory,
-                    restrictivePass: currentSecondInventory) == nil)
+                    restrictivePass: currentSecondInventory).isEmpty)
             let acceptedTombstones =
                 CodexIsolationFoundation.acceptedUnforceableEnabledFeatures
             check("0.146 removed-true tombstone allowlist is exact and does not generalize",
@@ -158,9 +158,9 @@ enum CodexFeatureInventorySelfTest {
                 "future_forceable": .init(
                     name: "future_forceable", stage: .underDevelopment, enabled: false),
             ]) { _, new in new }
-            check("a future added false forceable feature passes without a source pin",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
-                    firstPass: futureAddedFirst, restrictivePass: futureAddedSecond) == nil)
+            check("a future added false forceable feature reports no drift",
+                  CodexIsolationFoundation.featureInventoryDrift(
+                    firstPass: futureAddedFirst, restrictivePass: futureAddedSecond).isEmpty)
 
             let truncatedFirst = currentFirstInventory.filter {
                 ["apply_patch_freeform", "item_ids"].contains($0.key)
@@ -168,31 +168,31 @@ enum CodexFeatureInventorySelfTest {
             let truncatedSecond = currentSecondInventory.filter {
                 ["apply_patch_freeform", "item_ids"].contains($0.key)
             }
-            check("identical truncated inventories cannot satisfy reviewed continuity",
+            check("identical truncated inventories are reported as continuity drift",
                   CodexIsolationFoundation.featureInventoryAuditBaseline.count
                     == currentFirstInventory.count
-                    && CodexIsolationFoundation.featureInventoryBoundaryFailure(
+                    && CodexIsolationFoundation.featureInventoryDrift(
                         firstPass: truncatedFirst,
-                        restrictivePass: truncatedSecond) != nil)
+                        restrictivePass: truncatedSecond).isEmpty == false)
 
             var futureRemovedFirst = currentFirstInventory
             var futureRemovedSecond = currentSecondInventory
             futureRemovedFirst.removeValue(forKey: "apply_patch_streaming_events")
             futureRemovedSecond.removeValue(forKey: "apply_patch_streaming_events")
-            check("disappearance of a prior forceable row fails continuity",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+            check("disappearance of a prior forceable row is reported as continuity drift",
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: futureRemovedFirst,
                     restrictivePass: futureRemovedSecond)
-                    == "prior forceable feature disappeared: apply_patch_streaming_events")
+                    == ["prior forceable feature disappeared: apply_patch_streaming_events"])
 
             var removedDeprecatedFirst = currentFirstInventory
             var removedDeprecatedSecond = currentSecondInventory
             removedDeprecatedFirst.removeValue(forKey: "use_legacy_landlock")
             removedDeprecatedSecond.removeValue(forKey: "use_legacy_landlock")
             check("disappearance of a prior deprecated row remains acceptable",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: removedDeprecatedFirst,
-                    restrictivePass: removedDeprecatedSecond) == nil)
+                    restrictivePass: removedDeprecatedSecond).isEmpty)
 
             var futureTrue = currentSecondInventory
             futureTrue["future_forceable"] = .init(
@@ -200,10 +200,10 @@ enum CodexFeatureInventorySelfTest {
             var futureTrueFirst = currentFirstInventory
             futureTrueFirst["future_forceable"] = .init(
                 name: "future_forceable", stage: .stable, enabled: true)
-            check("a future unforceable true feature fails closed",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+            check("a feature that ignores its force-off is reported as drift, not blocked",
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: futureTrueFirst, restrictivePass: futureTrue)
-                    == "forceable feature remained enabled: future_forceable")
+                    == ["forceable feature remained enabled: future_forceable"])
 
             var unknownTombstoneFirst = currentFirstInventory
             var unknownTombstoneSecond = currentSecondInventory
@@ -211,29 +211,36 @@ enum CodexFeatureInventorySelfTest {
                 name: "future_tombstone", stage: .removed, enabled: true)
             unknownTombstoneSecond["future_tombstone"] = .init(
                 name: "future_tombstone", stage: .removed, enabled: true)
-            check("a new removed-stage true tombstone fails without exact source review",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+            check("a new removed-stage true tombstone is reported as drift",
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: unknownTombstoneFirst,
                     restrictivePass: unknownTombstoneSecond)
-                    == "unforceable enabled feature lacks an exact allowance: future_tombstone")
+                    == ["unforceable enabled feature lacks an exact allowance: future_tombstone"])
 
             var contradictorySecond = currentSecondInventory
             contradictorySecond["apps"] = .init(
                 name: "apps", stage: .removed, enabled: false)
-            check("a lifecycle-stage contradiction between passes fails closed",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
+            check("a lifecycle-stage contradiction between passes is reported as drift",
+                  CodexIsolationFoundation.featureInventoryDrift(
                     firstPass: currentFirstInventory,
                     restrictivePass: contradictorySecond)
-                    == "feature inventory changed between audit passes: apps")
+                    == ["feature inventory changed between audit passes: apps"])
 
             var contradictoryTombstoneSecond = currentSecondInventory
             contradictoryTombstoneSecond["item_ids"] = .init(
                 name: "item_ids", stage: .removed, enabled: false)
-            check("an unforceable tombstone state contradiction between passes fails closed",
-                  CodexIsolationFoundation.featureInventoryBoundaryFailure(
-                    firstPass: currentFirstInventory,
-                    restrictivePass: contradictoryTombstoneSecond)
-                    == "unforceable feature changed between audit passes: item_ids")
+            // Accumulating rather than returning on the first hit means one disabled tombstone now
+            // reports both the between-pass change and the stale allowance. Reporting every
+            // consequence is the point: a single early return hid a second blocker for an entire
+            // investigation.
+            let tombstoneDrift = CodexIsolationFoundation.featureInventoryDrift(
+                firstPass: currentFirstInventory,
+                restrictivePass: contradictoryTombstoneSecond)
+            check("an unforceable tombstone state contradiction between passes is reported as drift",
+                  tombstoneDrift == [
+                    "unforceable feature changed between audit passes: item_ids",
+                    "enabled tombstone allowance does not match inventory: item_ids",
+                  ])
         } catch {
             reporter.record("synthetic feature fixture setup", false, String(describing: error))
         }

@@ -728,21 +728,103 @@ enum CodexIsolationSelfTest {
             let realPromptEnvelopeError = try promptAuditError(
                 realPromptMessages, returnPreflightDescription: true)
             reporter.record(
-                "real five-message prompt-input envelope is accepted",
+                "real 0.149 five-message prompt-input envelope is accepted",
                 realPromptEnvelopeError == nil,
                 realPromptEnvelopeError ?? "")
 
+            // ADR 0020. Measured from codex-cli 0.150.0-alpha.8 on 2026-08-29. The prompt shape is
+            // MODEL-dependent, not version-dependent: the fixture above is gpt-5.6-sol, what the app
+            // is configured to use. gpt-5.1-codex-max, on the same binary and the same restrictive
+            // config, collapses the three developer messages into one, drops <multi_agent_mode>, and
+            // moves <environment_context> ahead of the user turn. Nothing the sandbox cares about
+            // differs between them. The old audit pinned the first shape and would have rejected the
+            // second during model qualification, so both must pass the same audit.
+            let realPrompt0150Messages: [[String: Any]] = [
+                [
+                    "role": "developer",
+                    "content": [
+                        ["type": "input_text", "text": instructions],
+                        [
+                            "type": "input_text",
+                            "text": """
+                            <permissions instructions>
+                            Synthetic restrictive sandbox profile.
+                            </permissions instructions>
+                            """,
+                        ],
+                    ],
+                    "id": "msg_synthetic_0150_001",
+                    "type": "message",
+                    "internal_chat_message_metadata_passthrough": [
+                        "turn_id": "auto-compact-0",
+                        "content_item_kinds": ["generic.developer_instructions"],
+                    ],
+                ],
+                [
+                    "role": "user",
+                    "content": [[
+                        "type": "input_text",
+                        "text": """
+                        <environment_context>
+                          <cwd>/private/tmp/viddydictate-synthetic/cwd</cwd>
+                        </environment_context>
+                        """,
+                    ]],
+                    "id": "msg_synthetic_0150_002",
+                    "type": "message",
+                    "internal_chat_message_metadata_passthrough": [
+                        "turn_id": "auto-compact-0",
+                        "content_item_kinds": ["environments.environment_context"],
+                    ],
+                ],
+                [
+                    "role": "user",
+                    "content": [[
+                        "type": "input_text",
+                        "text": CodexIsolationFoundation.userAuditMarker,
+                    ]],
+                    "id": "msg_synthetic_0150_003",
+                    "type": "message",
+                    "internal_chat_message_metadata_passthrough": [
+                        "turn_id": "auto-compact-0",
+                        "content_item_kinds": ["user.text"],
+                    ],
+                ],
+            ]
+            let real0150EnvelopeError = try promptAuditError(
+                realPrompt0150Messages, returnPreflightDescription: true)
+            reporter.record(
+                "real 0.150 three-message prompt-input envelope is accepted",
+                real0150EnvelopeError == nil,
+                real0150EnvelopeError ?? "")
+
+            // ADR 0020: an added key is upstream's business, but the contamination scan walks the
+            // whole payload, so nothing of ours can hide inside one.
             var extraMessageKey = realPromptMessages
             extraMessageKey[1]["unexpected"] = true
-            check("prompt envelope rejects an extra message key precisely",
-                  try promptAuditError(extraMessageKey)
-                    == "Codex prompt message keys changed")
+            check("prompt envelope accepts an added upstream message key",
+                  try promptAuditError(extraMessageKey) == nil)
+
+            var contaminatedExtraKey = realPromptMessages
+            contaminatedExtraKey[1]["unexpected"] = "leaks ~/.codex"
+            check("contamination scan reaches a value hidden in an added message key",
+                  try promptAuditError(contaminatedExtraKey)
+                    == "Codex prompt context contamination was detected")
+
+            var contaminatedMetadataValue = realPromptMessages
+            contaminatedMetadataValue[1][
+                "internal_chat_message_metadata_passthrough"] = [
+                    "turn_id": "synthetic-turn-001",
+                    "nested": ["leaks ViddyVault"],
+                ]
+            check("contamination scan reaches a value nested in passthrough metadata",
+                  try promptAuditError(contaminatedMetadataValue)
+                    == "Codex prompt context contamination was detected")
 
             var wrongMessageType = realPromptMessages
             wrongMessageType[1]["type"] = "response"
-            check("prompt envelope rejects a wrong message type precisely",
-                  try promptAuditError(wrongMessageType)
-                    == "Codex prompt message type changed")
+            check("prompt envelope accepts an upstream message type it does not know",
+                  try promptAuditError(wrongMessageType) == nil)
 
             var malformedMessageID = realPromptMessages
             malformedMessageID[1]["id"] = "message_synthetic_002"
@@ -785,28 +867,39 @@ enum CodexIsolationSelfTest {
                 "text": "synthetic",
                 "unexpected": true,
             ]]
-            check("prompt envelope rejects a bad block shape precisely",
-                  try promptAuditError(badBlockShape)
-                    == "Codex prompt block shape changed")
+            check("prompt envelope accepts an added upstream block key",
+                  try promptAuditError(badBlockShape) == nil)
 
             var wrongBlockType = realPromptMessages
             wrongBlockType[1]["content"] = [[
                 "type": "output_text",
                 "text": "synthetic",
             ]]
-            check("prompt envelope rejects non-input_text blocks precisely",
-                  try promptAuditError(wrongBlockType)
-                    == "Codex prompt block type changed")
+            check("prompt envelope accepts an upstream block type it does not know",
+                  try promptAuditError(wrongBlockType) == nil)
+
+            var missingBlockText = realPromptMessages
+            missingBlockText[1]["content"] = [["type": "input_text"]]
+            check("prompt envelope still rejects a block with no readable text",
+                  try promptAuditError(missingBlockText)
+                    == "Codex prompt block shape changed")
 
             var tooManyBlocks = realPromptMessages
-            tooManyBlocks[1]["content"] = [
-                ["type": "input_text", "text": "synthetic-one"],
-                ["type": "input_text", "text": "synthetic-two"],
-                ["type": "input_text", "text": "synthetic-three"],
-            ]
-            check("prompt envelope rejects out-of-bounds block counts precisely",
+            tooManyBlocks[1]["content"] = (0...32).map {
+                ["type": "input_text", "text": "synthetic-\($0)"]
+            }
+            check("prompt envelope rejects a block count past its own bound",
                   try promptAuditError(tooManyBlocks)
-                    == "Codex prompt block count changed")
+                    == "Codex prompt block shape changed")
+
+            let tooManyMessages = (0...64).map { index in
+                var message = realPromptMessages[1]
+                message["id"] = "msg_synthetic_bulk_\(index)"
+                return message
+            }
+            check("prompt envelope rejects a message count past its own bound",
+                  try promptAuditError(tooManyMessages)
+                    == "Codex prompt message count bound exceeded")
 
             let oversizedBlock = replacingPromptBlockText(
                 realPromptMessages,
@@ -819,29 +912,41 @@ enum CodexIsolationSelfTest {
                   try promptAuditError(oversizedBlock)
                     == "Codex prompt block text bound exceeded")
 
+            // ADR 0020: upstream may reorder its own turns. What must hold is the role of the two
+            // messages that carry our content.
             var wrongRoleSequence = realPromptMessages
             wrongRoleSequence[1]["role"] = "user"
-            check("prompt envelope rejects a wrong role sequence precisely",
-                  try promptAuditError(wrongRoleSequence)
-                    == "Codex prompt role sequence changed")
+            check("prompt envelope accepts an upstream role reordering",
+                  try promptAuditError(wrongRoleSequence) == nil)
 
-            let malformedPermissionsContext = replacingPromptBlockText(
+            var routeInstructionsAsUser = realPromptMessages
+            routeInstructionsAsUser[0]["role"] = "user"
+            check("route instructions outside a developer message are rejected",
+                  try promptAuditError(routeInstructionsAsUser)
+                    == "Codex prompt marker placement changed")
+
+            var userMarkerAsDeveloper = realPromptMessages
+            userMarkerAsDeveloper[4]["role"] = "developer"
+            check("user text outside a user message is rejected",
+                  try promptAuditError(userMarkerAsDeveloper)
+                    == "Codex prompt marker placement changed")
+
+            let mutatedRouteInstructions = replacingPromptBlockText(
+                realPromptMessages,
+                messageIndex: 0,
+                blockIndex: 0,
+                text: instructions + " tampered")
+            check("route instructions must arrive as one byte-identical block",
+                  try promptAuditError(mutatedRouteInstructions)
+                    == "Codex prompt marker placement changed")
+
+            let permissionsProseWithoutItsTag = replacingPromptBlockText(
                 realPromptMessages,
                 messageIndex: 0,
                 blockIndex: 1,
                 text: "Synthetic permissions prose without its structural tag")
-            check("permissions boilerplate keeps its structural tag without pinning prose",
-                  try promptAuditError(malformedPermissionsContext)
-                    == "Codex prompt CLI context structure changed")
-
-            let malformedMultiAgentContext = replacingPromptBlockText(
-                realPromptMessages,
-                messageIndex: 2,
-                blockIndex: 0,
-                text: "Synthetic multi-agent prose without its structural tag")
-            check("multi-agent retraction keeps its structural tag without pinning prose",
-                  try promptAuditError(malformedMultiAgentContext)
-                    == "Codex prompt CLI context structure changed")
+            check("upstream boilerplate may lose its structural tag",
+                  try promptAuditError(permissionsProseWithoutItsTag) == nil)
 
             var markerInBoilerplate = realPromptMessages
             markerInBoilerplate = replacingPromptBlockText(
@@ -895,17 +1000,30 @@ enum CodexIsolationSelfTest {
                     skillNames: ["synthetic-skill-canary"])
                     == "Codex prompt context contamination was detected")
 
-            let contaminatedSkillBlock = replacingPromptBlockText(
+            // ADR 0020: codex-cli 0.150 emits <skills_instructions> unconditionally, before the
+            // per-leaf disable is applied, so the bare tag is no longer evidence of anything. What
+            // must never appear is a seeded skill's name or its path, and those are still rejected.
+            let reintroducedSkillsBlock = replacingPromptBlockText(
+                realPromptMessages,
+                messageIndex: 2,
+                blockIndex: 0,
+                text: "<skills_instructions>\n</skills_instructions>")
+            check("an empty skills block alone is no longer treated as contamination",
+                  try promptAuditError(reintroducedSkillsBlock) == nil)
+
+            let reintroducedSkillListing = replacingPromptBlockText(
                 realPromptMessages,
                 messageIndex: 2,
                 blockIndex: 0,
                 text: """
-                <multi_agent_mode>
-                <skills_instructions>synthetic</skills_instructions>
-                </multi_agent_mode>
+                <skills_instructions>
+                - synthetic-skill-canary: reintroduced by upstream
+                </skills_instructions>
                 """)
-            check("prompt contamination rejects a reintroduced skills block",
-                  try promptAuditError(contaminatedSkillBlock)
+            check("a skills block that lists a seeded skill is still rejected",
+                  try promptAuditError(
+                    reintroducedSkillListing,
+                    skillNames: ["synthetic-skill-canary"])
                     == "Codex prompt context contamination was detected")
 
             let malformedEnvironment = replacingPromptBlockText(
@@ -913,9 +1031,8 @@ enum CodexIsolationSelfTest {
                 messageIndex: 3,
                 blockIndex: 0,
                 text: "synthetic-prefix\n<environment_context></environment_context>")
-            check("environment context must begin with its exact structural tag",
-                  try promptAuditError(malformedEnvironment)
-                    == "Codex prompt environment context changed")
+            check("upstream environment context may change its own framing",
+                  try promptAuditError(malformedEnvironment) == nil)
 
             let finalMarkerWithExtraText = replacingPromptBlockText(
                 realPromptMessages,
@@ -926,12 +1043,13 @@ enum CodexIsolationSelfTest {
                   try promptAuditError(finalMarkerWithExtraText)
                     == "Codex prompt marker placement changed")
 
-            let oldTwoMessageShape = [
+            // ADR 0020: message count does not decide availability. Substance does, and this shape
+            // carries our instructions and our user text correctly.
+            let twoMessageShape = [
                 realPromptMessages[0], realPromptMessages[4],
             ]
-            check("legacy two-message prompt shape is no longer accepted",
-                  try promptAuditError(oldTwoMessageShape)
-                    == "Codex prompt message count changed")
+            check("a shorter upstream prompt shape is accepted on its substance",
+                  try promptAuditError(twoMessageShape) == nil)
 
             for tombstone in ["collaboration_modes", "item_ids", "sqlite", "steer"] {
                 let plantedEvent = valid.replacingOccurrences(
@@ -980,9 +1098,25 @@ enum CodexIsolationSelfTest {
                         "turn_id": "synthetic-turn-001",
                     ],
                 ])
-                check("anonymous extra \(role) prompt context fails exact structure",
-                      try promptAuditError(contaminatedPrompt)
-                        == "Codex prompt message count changed")
+                check("anonymous extra \(role) prompt context is accepted",
+                      try promptAuditError(contaminatedPrompt) == nil)
+
+                var markerBearingPrompt = realPromptMessages
+                markerBearingPrompt.append([
+                    "role": role,
+                    "content": [[
+                        "type": "input_text",
+                        "text": CodexIsolationFoundation.routeAuditMarker,
+                    ]],
+                    "id": "msg_synthetic_marker_\(role)",
+                    "type": "message",
+                    "internal_chat_message_metadata_passthrough": [
+                        "turn_id": "synthetic-turn-001",
+                    ],
+                ])
+                check("an extra \(role) message echoing the route marker is rejected",
+                      try promptAuditError(markerBearingPrompt)
+                        == "Codex prompt marker placement changed")
             }
 
             let deprecationFixture = try Data(contentsOf: URL(fileURLWithPath:
