@@ -78,10 +78,14 @@ enum CodexFeatureInventoryTool {
             }
             let restrictive = try CodexIsolationFoundation.parseFeatureInventory(
                 try decoded(restrictiveResult.stdout, label: "restrictive feature inventory"))
-            if let failure = CodexIsolationFoundation.featureInventoryBoundaryFailure(
-                firstPass: first, restrictivePass: restrictive) {
-                print("[codex-feature-inventory] BLOCKED: \(failure)")
-                return 3
+            // ADR 0020: this is the drift-reporting surface. It prints every finding and exits 0.
+            // Availability is decided by containment, not by the inventory.
+            let drift = CodexIsolationFoundation.featureInventoryDrift(
+                firstPass: first, restrictivePass: restrictive)
+            if drift.isEmpty {
+                print("[codex-feature-inventory] DRIFT: none")
+            } else {
+                for entry in drift { print("[codex-feature-inventory] DRIFT: \(entry)") }
             }
 
             print("[codex-feature-inventory] cli=\(version) reviewed=\(CodexIsolationFoundation.lastReviewedCLIVersion)")

@@ -193,9 +193,15 @@ enum CodexProviderRuntime {
         "internal_chat_message_metadata_passthrough",
     ]
     private static let promptInputBlockKeys: Set<String> = ["type", "text"]
-    private static let promptInputRoles = [
-        "developer", "developer", "developer", "user", "user",
-    ]
+    // ADR 0020: the prompt audit bounds the payload and asserts marker placement by role. It does not
+    // assert how many messages upstream emits, in what order, or under which section tags.
+    private static let promptInputMaxPayloadBytes = 2_097_152
+    private static let promptInputMaxMessages = 64
+    private static let promptInputMaxBlocksPerMessage = 32
+    private static let promptInputMaxRoleBytes = 64
+    private static let promptInputMaxPayloadStrings = 4_096
+    private static let promptInputMaxPayloadNodes = 16_384
+    private static let promptInputMaxPayloadDepth = 16
     private static let promptInputMaxIDBytes = 4_096
     private static let promptInputMaxMetadataBytes = 4_096
     private static let promptInputMaxMetadataDepth = 8
@@ -226,6 +232,28 @@ enum CodexProviderRuntime {
             .appendingPathComponent("Contents/Helpers/CodexContainmentRunner", isDirectory: false).path
     }
 
+    /// ADR 0020. The one user-facing sentence for a boundary refusal. Operator detail goes to the log
+    /// where Ben can read it; this is what a user can actually act on. It is an app-authored literal
+    /// with no provider or transport text in it, which is why CleanupClient allowlists it for verbatim
+    /// display instead of collapsing it to the bare category.
+    static let sandboxUnverifiedMessage =
+        "Codex could not be sandboxed after a Codex update. Claude and local models still work."
+
+    /// Records the operator-facing cause of a boundary refusal and returns the user-facing sentence.
+    static func recordedBoundaryRefusal(_ error: Error) -> String {
+        if let boundary = error as? BoundaryError {
+            Log.write("[codex-boundary] refused: \(boundary.description)"
+                      + (boundary.preflightDescription.map { " (\($0))" } ?? ""))
+            return sandboxUnverifiedMessage
+        }
+        if let isolation = error as? CodexIsolationError {
+            Log.write("[codex-boundary] refused: \(isolation.description)")
+            return sandboxUnverifiedMessage
+        }
+        Log.write("[codex-boundary] refused: unexpected boundary error")
+        return sandboxUnverifiedMessage
+    }
+
     static let deviceLoginArguments = ["login", "--device-auth"]
 
     static func connectionState(runnerPath: String = bundledRunnerPath) -> CodexConnectionState {
@@ -237,12 +265,8 @@ enum CodexProviderRuntime {
                     paths: paths, runnerPath: runnerPath)
                 return try rawConnectionState(paths: paths, receipt: receipt)
             }
-        } catch let error as BoundaryError {
-            return .unavailable(error.description)
-        } catch let error as CodexIsolationError {
-            return .unavailable(error.description)
         } catch {
-            return .unavailable("Codex isolation setup failed")
+            return .unavailable(recordedBoundaryRefusal(error))
         }
     }
 
@@ -367,12 +391,8 @@ enum CodexProviderRuntime {
                     return .unavailable(reason)
                 }
             }
-        } catch let error as BoundaryError {
-            return .unavailable(error.description)
-        } catch let error as CodexIsolationError {
-            return .unavailable(error.description)
         } catch {
-            return .unavailable("Codex process setup failed")
+            return .unavailable(recordedBoundaryRefusal(error))
         }
     }
 
@@ -554,6 +574,52 @@ enum CodexProviderRuntime {
 
     // MARK: boundary preparation/audit
 
+    /// ADR 0020. A boundary refusal used to cost a full quarantine on every availability probe,
+    /// forever, because `validInstalledReceipt` returns nil and nothing remembers the refusal. Version
+    /// plus two feature passes alone measured 2.83s including a 227 MB snapshot copy, and the real
+    /// quarantine adds seed, mcp, plugins, prompt, and preflight on top of that.
+    ///
+    /// The refusal is remembered in process memory only, keyed to the exact Codex binary that produced
+    /// it and bounded by a short TTL. Keying on the binary means the next Codex update retries
+    /// immediately; the TTL means a transient failure does not stick; process-memory only means a
+    /// relaunch always retries. A refusal must never be more durable than the thing that caused it.
+    private struct BoundaryRefusal {
+        let identity: CodexIsolationFoundation.CheapFileIdentity
+        let error: Error
+        let recordedAt: Date
+    }
+
+    private static let boundaryRefusalTTL: TimeInterval = 60
+    private static let boundaryRefusalLock = NSLock()
+    private static var boundaryRefusal: BoundaryRefusal?
+
+    private static func cachedBoundaryRefusal(
+        for identity: CodexIsolationFoundation.CheapFileIdentity
+    ) -> Error? {
+        boundaryRefusalLock.lock()
+        defer { boundaryRefusalLock.unlock() }
+        guard let refusal = boundaryRefusal, refusal.identity == identity,
+              Date().timeIntervalSince(refusal.recordedAt) < boundaryRefusalTTL else {
+            return nil
+        }
+        return refusal.error
+    }
+
+    private static func recordBoundaryRefusal(
+        _ error: Error, identity: CodexIsolationFoundation.CheapFileIdentity
+    ) {
+        boundaryRefusalLock.lock()
+        boundaryRefusal = BoundaryRefusal(
+            identity: identity, error: error, recordedAt: Date())
+        boundaryRefusalLock.unlock()
+    }
+
+    private static func clearBoundaryRefusal() {
+        boundaryRefusalLock.lock()
+        boundaryRefusal = nil
+        boundaryRefusalLock.unlock()
+    }
+
     private static func prepareAndAuditBoundary(paths: CodexIsolationFoundation.Paths,
                                                 runnerPath: String,
                                                 isExecutableFile: (String) -> Bool = {
@@ -567,7 +633,13 @@ enum CodexProviderRuntime {
         try CodexIsolationFoundation.prepareDirectories(paths)
         if let receipt = try validInstalledReceipt(
             paths: paths, runnerPath: runnerPath) {
+            clearBoundaryRefusal()
             return receipt
+        }
+        let originIdentity = try? CodexIsolationFoundation.cheapFileIdentity(
+            at: URL(fileURLWithPath: CodexIsolationFoundation.codexBinary))
+        if let originIdentity, let cached = cachedBoundaryRefusal(for: originIdentity) {
+            throw cached
         }
         NotificationCenter.default.post(
             name: compatibilityQuarantineWillBegin,
@@ -575,11 +647,15 @@ enum CodexProviderRuntime {
         do {
             let receipt = try quarantineAndInstallCompatibility(
                 livePaths: paths, runnerPath: runnerPath)
+            clearBoundaryRefusal()
             NotificationCenter.default.post(
                 name: compatibilityQuarantineDidFinish,
                 object: NSNumber(value: true))
             return receipt
         } catch {
+            if let originIdentity {
+                recordBoundaryRefusal(error, identity: originIdentity)
+            }
             NotificationCenter.default.post(
                 name: compatibilityQuarantineDidFinish,
                 object: NSNumber(value: false))
@@ -789,13 +865,15 @@ enum CodexProviderRuntime {
                 executableIdentity: executableIdentity,
                 runnerIdentity: runnerIdentity))
         let continuityBaseline = compatibilityContinuityBaseline(paths: livePaths)
-        if let failure = CodexIsolationFoundation.featureInventoryBoundaryFailure(
+        // ADR 0020: recorded, not enforced. Upstream promotes features roughly weekly and a stage
+        // label does not describe what the contained process can do. Containment is asserted per call
+        // by the runner; this is drift evidence for verify.sh.
+        let featureDrift = CodexIsolationFoundation.featureInventoryDrift(
             firstPass: firstInventory,
             restrictivePass: restrictiveInventory,
-            continuityBaseline: continuityBaseline) {
-            throw BoundaryError(
-                description: "Codex compatibility quarantine rejected feature inventory",
-                preflightDescription: failure)
+            continuityBaseline: continuityBaseline)
+        for entry in featureDrift {
+            Log.write("[codex-boundary] feature drift: \(entry)")
         }
 
         try CodexIsolationFoundation.stageSchema(paths: scratch)
@@ -833,10 +911,11 @@ enum CodexProviderRuntime {
                 executablePath: executableURL.path,
                 executableIdentity: executableIdentity,
                 runnerIdentity: runnerIdentity))
-        guard CodexIsolationFoundation.featureInventoryDiff(
-            current: finalInventory, expected: restrictiveInventory).isEmpty else {
-            throw BoundaryError(
-                description: "Codex compatibility quarantine config is contradictory")
+        // ADR 0020: recorded, not enforced. A feature that responds differently once the seeded-skill
+        // entries are staged is drift, not sandbox degradation.
+        if !CodexIsolationFoundation.featureInventoryDiff(
+            current: finalInventory, expected: restrictiveInventory).isEmpty {
+            Log.write("[codex-boundary] feature drift: final inventory differs from restrictive pass")
         }
         try verifyQuarantineMCPAndPlugins(
             paths: scratch,
@@ -905,7 +984,8 @@ enum CodexProviderRuntime {
             schemaSHA256: CodexIsolationFoundation.sha256Hex(
                 CodexIsolationFoundation.schemaBytes),
             executionContractSHA256:
-                CodexIsolationFoundation.executionContractSHA256)
+                CodexIsolationFoundation.executionContractSHA256,
+            observedPromptShape: promptShapeDescriptor(prompt))
 
         // Recompute strong identities after the entire no-auth audit. Any binary or runner race
         // invalidates the candidate before app-owned assets can be installed.
@@ -1169,11 +1249,10 @@ enum CodexProviderRuntime {
                 description: "Codex feature inventory could not be parsed",
                 preflightDescription: "feature inventory output could not be parsed")
         }
-        if let failure = CodexIsolationFoundation.featureInventoryBoundaryFailure(
+        // ADR 0020: recorded, not enforced. See featureInventoryDrift.
+        for entry in CodexIsolationFoundation.featureInventoryDrift(
             firstPass: states, restrictivePass: states) {
-            throw BoundaryError(
-                description: "A Codex external-capability feature is enabled",
-                preflightDescription: failure)
+            Log.write("[codex-boundary] feature drift: \(entry)")
         }
     }
 
@@ -1305,42 +1384,44 @@ enum CodexProviderRuntime {
         return .unavailable("Codex dedicated-home authentication status is invalid")
     }
 
+    /// Substance-only prompt audit, ADR 0020. Asserts that our staged route instructions and our user
+    /// text arrive intact and exactly once in the right role, and that nothing forbidden appears
+    /// anywhere in the payload. Upstream's message count, ordering, and section tags are recorded as
+    /// drift by `promptShapeDescriptor`, never asserted here: they change on routine Codex releases
+    /// without changing what the contained process can do.
     static func auditPromptInput(_ data: Data,
                                  paths: CodexIsolationFoundation.Paths,
                                  skillNames: Set<String>,
                                  routeMarker: String,
                                  userMarker: String,
                                  expectedDeveloperContent: String?) throws -> [String] {
-        guard !data.isEmpty, data.count <= 2_097_152,
+        guard !data.isEmpty, data.count <= promptInputMaxPayloadBytes,
               let object = try? JSONSerialization.jsonObject(with: data),
               let messages = object as? [[String: Any]] else {
             throw BoundaryError(
                 description: "Codex prompt-role output shape changed",
                 preflightDescription: "prompt-input output is not the expected JSON array")
         }
-        guard messages.count == promptInputRoles.count else {
+        guard (1...promptInputMaxMessages).contains(messages.count) else {
             throw BoundaryError(
-                description: "Codex prompt message count changed",
-                preflightDescription: "prompt-input message count changed")
+                description: "Codex prompt message count bound exceeded",
+                preflightDescription: "prompt-input message count bound exceeded")
         }
+
         var roles: [String] = []
-        var messageBlocks: [[String]] = []
+        var messageTexts: [[String]] = []
         var messageIDs: Set<String> = []
         for message in messages {
-            guard Set(message.keys) == promptInputMessageKeys else {
+            guard promptInputMessageKeys.isSubset(of: Set(message.keys)) else {
                 throw BoundaryError(
                     description: "Codex prompt message keys changed",
-                    preflightDescription: "prompt-input message keys changed")
+                    preflightDescription: "prompt-input message is missing a required key")
             }
-            guard let role = message["role"] as? String else {
+            guard let role = message["role"] as? String,
+                  !role.isEmpty, role.utf8.count <= promptInputMaxRoleBytes else {
                 throw BoundaryError(
                     description: "Codex prompt message role changed",
-                    preflightDescription: "prompt-input message role changed")
-            }
-            guard message["type"] as? String == "message" else {
-                throw BoundaryError(
-                    description: "Codex prompt message type changed",
-                    preflightDescription: "prompt-input message type changed")
+                    preflightDescription: "prompt-input message role is invalid")
             }
             guard let id = message["id"] as? String,
                   promptMessageIDIsValid(id),
@@ -1357,28 +1438,20 @@ enum CodexProviderRuntime {
                     description: "Codex prompt message metadata changed",
                     preflightDescription: "prompt-input message metadata changed")
             }
-            guard let blocks = message["content"] as? [[String: Any]] else {
+            guard let blocks = message["content"] as? [[String: Any]],
+                  (1...promptInputMaxBlocksPerMessage).contains(blocks.count) else {
                 throw BoundaryError(
                     description: "Codex prompt block shape changed",
                     preflightDescription: "prompt-input content block shape changed")
             }
-            guard (1...2).contains(blocks.count) else {
-                throw BoundaryError(
-                    description: "Codex prompt block count changed",
-                    preflightDescription: "prompt-input content block count changed")
-            }
             var texts: [String] = []
             for block in blocks {
-                guard Set(block.keys) == promptInputBlockKeys,
-                      let text = block["text"] as? String else {
+                guard promptInputBlockKeys.isSubset(of: Set(block.keys)),
+                      let text = block["text"] as? String,
+                      block["type"] is String else {
                     throw BoundaryError(
                         description: "Codex prompt block shape changed",
                         preflightDescription: "prompt-input content block shape changed")
-                }
-                guard block["type"] as? String == "input_text" else {
-                    throw BoundaryError(
-                        description: "Codex prompt block type changed",
-                        preflightDescription: "prompt-input content block type changed")
                 }
                 guard !text.isEmpty,
                       text.utf8.count <= promptInputMaxBlockTextBytes else {
@@ -1389,88 +1462,135 @@ enum CodexProviderRuntime {
                 texts.append(text)
             }
             roles.append(role)
-            messageBlocks.append(texts)
+            messageTexts.append(texts)
         }
-        guard roles == promptInputRoles else {
-            throw BoundaryError(
-                description: "Codex prompt role sequence changed",
-                preflightDescription: "prompt-input role sequence changed")
-        }
-        guard messageBlocks[0].count == 2,
-              messageBlocks[4].count == 1 else {
-            throw BoundaryError(
-                description: "Codex prompt block count changed",
-                preflightDescription: "prompt-input content block count changed")
-        }
-        guard messageBlocks[0][1].hasPrefix("<permissions instructions>"),
-              messageBlocks[2][0].hasPrefix("<multi_agent_mode>") else {
-            throw BoundaryError(
-                description: "Codex prompt CLI context structure changed",
-                preflightDescription: "prompt-input CLI context structure changed")
-        }
+
+        // Every string anywhere in the payload, not only the known content blocks. Text hidden in a
+        // key upstream adds later cannot evade the contamination scan, and collecting from the parsed
+        // tree rather than the raw bytes makes JSON escaping irrelevant.
+        let payloadStrings = try promptPayloadStrings(object)
 
         let expectedDeveloper = expectedDeveloperContent ?? ""
         guard !routeMarker.isEmpty, !userMarker.isEmpty,
-              !expectedDeveloper.isEmpty,
-              messageBlocks[0][0] == expectedDeveloper,
-              messageBlocks[4][0] == userMarker else {
+              !expectedDeveloper.isEmpty else {
             throw BoundaryError(
                 description: "Codex prompt marker placement changed",
-                preflightDescription: "prompt-input marker placement changed")
+                preflightDescription: "prompt-input marker contract is incomplete")
         }
-        var routeCount = 0
-        var userCount = 0
-        for (messageIndex, blocks) in messageBlocks.enumerated() {
-            for (blockIndex, text) in blocks.enumerated() {
-                let blockRouteCount =
-                    text.components(separatedBy: routeMarker).count - 1
-                let blockUserCount =
-                    text.components(separatedBy: userMarker).count - 1
-                routeCount += blockRouteCount
-                userCount += blockUserCount
-                if blockRouteCount > 0
-                    && (messageIndex != 0 || blockIndex != 0) {
-                    throw BoundaryError(
-                        description: "Codex prompt marker placement changed",
-                        preflightDescription: "prompt-input marker placement changed")
-                }
-                if blockUserCount > 0
-                    && (messageIndex != 4 || blockIndex != 0) {
-                    throw BoundaryError(
-                        description: "Codex prompt marker placement changed",
-                        preflightDescription: "prompt-input marker placement changed")
-                }
-            }
+
+        let routeTotal = payloadStrings.reduce(0) {
+            $0 + ($1.components(separatedBy: routeMarker).count - 1)
         }
-        guard routeCount == 1, userCount == 1 else {
+        let userTotal = payloadStrings.reduce(0) {
+            $0 + ($1.components(separatedBy: userMarker).count - 1)
+        }
+        guard routeTotal == 1, userTotal == 1 else {
             throw BoundaryError(
                 description: "Codex prompt marker placement changed",
-                preflightDescription: "prompt-input marker placement changed")
+                preflightDescription: "prompt-input marker is duplicated or missing")
+        }
+
+        // Our route instructions must arrive byte-identical, as one whole block, inside a developer
+        // message. Position within the developer turn is upstream's business.
+        guard let routeIndex = messageTexts.firstIndex(where: {
+            $0.contains(expectedDeveloper)
+        }), roles[routeIndex] == "developer" else {
+            throw BoundaryError(
+                description: "Codex prompt marker placement changed",
+                preflightDescription: "route instructions are not an intact developer block")
+        }
+
+        // Our user text must arrive as a user message carrying the marker and nothing else.
+        guard let userIndex = messageTexts.firstIndex(where: {
+            $0.joined().contains(userMarker)
+        }), roles[userIndex] == "user",
+              messageTexts[userIndex] == [userMarker] else {
+            throw BoundaryError(
+                description: "Codex prompt marker placement changed",
+                preflightDescription: "user text is not an isolated user message")
         }
 
         var forbidden = CodexIsolationFoundation.vaultLeakMarkers + [
             NSHomeDirectory() + "/.codex", "~/.codex",
-            paths.systemSkills.path, "<skills_instructions>",
+            paths.systemSkills.path,
         ]
         forbidden.append(contentsOf: skillNames)
         forbidden.append(contentsOf:
             CodexIsolationFoundation.acceptedUnforceableEnabledFeatures.keys)
         forbidden = forbidden.filter { !$0.isEmpty }
-        guard !messageBlocks.joined().contains(where: { block in
+        guard !payloadStrings.contains(where: { text in
             forbidden.contains(where: {
-                block.localizedCaseInsensitiveContains($0)
+                text.localizedCaseInsensitiveContains($0)
             })
         }) else {
             throw BoundaryError(
                 description: "Codex prompt context contamination was detected",
                 preflightDescription: "prompt contamination detected")
         }
-        guard messageBlocks[3][0].hasPrefix("<environment_context>") else {
-            throw BoundaryError(
-                description: "Codex prompt environment context changed",
-                preflightDescription: "prompt-input environment context changed")
+        for marker in CodexIsolationFoundation.skillPreambleDriftMarkers
+        where payloadStrings.contains(where: {
+            $0.localizedCaseInsensitiveContains(marker)
+        }) {
+            Log.write("[codex-boundary] prompt drift: skills preamble marker present: \(marker)")
         }
         return roles
+    }
+
+    /// Recursively collects every string in the parsed payload, bounded so a pathological document
+    /// cannot make the scan unbounded work.
+    private static func promptPayloadStrings(_ root: Any) throws -> [String] {
+        var collected: [String] = []
+        var stack: [(node: Any, depth: Int)] = [(root, 0)]
+        var visited = 0
+        while let (node, depth) = stack.popLast() {
+            visited += 1
+            guard visited <= promptInputMaxPayloadNodes,
+                  depth <= promptInputMaxPayloadDepth else {
+                throw BoundaryError(
+                    description: "Codex prompt payload bound exceeded",
+                    preflightDescription: "prompt-input payload bound exceeded")
+            }
+            switch node {
+            case let text as String:
+                guard collected.count < promptInputMaxPayloadStrings else {
+                    throw BoundaryError(
+                        description: "Codex prompt payload bound exceeded",
+                        preflightDescription: "prompt-input payload bound exceeded")
+                }
+                collected.append(text)
+            case let array as [Any]:
+                for element in array { stack.append((element, depth + 1)) }
+            case let dictionary as [String: Any]:
+                for (key, value) in dictionary {
+                    stack.append((key, depth + 1))
+                    stack.append((value, depth + 1))
+                }
+            default:
+                continue
+            }
+        }
+        return collected
+    }
+
+    /// Content-free description of upstream's current prompt shape, recorded in the compatibility
+    /// receipt as drift evidence. Never asserted, per ADR 0020.
+    static func promptShapeDescriptor(_ data: Data) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let messages = object as? [[String: Any]] else {
+            return "prompt-shape=unparsed"
+        }
+        let parts = messages.map { message -> String in
+            let role = (message["role"] as? String) ?? "?"
+            let blocks = (message["content"] as? [[String: Any]]) ?? []
+            let tags = blocks.map { block -> String in
+                guard let text = block["text"] as? String,
+                      text.hasPrefix("<"),
+                      let close = text.firstIndex(of: ">") else { return "-" }
+                return String(text[text.startIndex...close])
+            }
+            return "\(role)[\(blocks.count)]{\(tags.joined(separator: ","))}"
+        }
+        return "prompt-shape=" + parts.joined(separator: "|")
     }
 
 #if SELFTEST

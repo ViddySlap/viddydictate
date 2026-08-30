@@ -315,9 +315,12 @@ private func auditProductionInventory(paths: CodexIsolationFoundation.Paths,
     let features = try runCodex(
         ["features", "list"], paths: paths, receipt: receipt)
     let featureStates = try CodexIsolationFoundation.parseFeatureInventory(try text(features.stdout))
-    if let failure = CodexIsolationFoundation.featureInventoryBoundaryFailure(
+    // ADR 0020: drift is reported here, loudly and in full, but does not fail the audit. This is the
+    // notification channel that replaced the runtime gate; a stranger's Codex must not go dark because
+    // upstream renamed a feature.
+    for entry in CodexIsolationFoundation.featureInventoryDrift(
         firstPass: featureStates, restrictivePass: featureStates) {
-        throw AuditError.failed(failure)
+        print("[codex-s2][DRIFT] \(entry)")
     }
 
     let mcp = try runCodex(

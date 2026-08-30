@@ -49,6 +49,9 @@ enum CodexIsolationPreflight {
         print("[codex-s1-preflight][\(label)] skills_disabled=\(skillURLs.count) tree_sha256=\(tree.identitySHA256)")
         print("[codex-s1-preflight][\(label)] features=\(receipt.effectiveFeatures.count) \(CodexIsolationFoundation.featureInventoryPinStatus) mcp=empty plugins=empty")
         print("[codex-s1-preflight][\(label)] prompt_roles=audited route_marker=developer-only user_marker=user-only")
+        // ADR 0020 drift evidence. Diff this line across Codex releases to see upstream restructure
+        // the prompt; it is reported, never enforced.
+        print("[codex-s1-preflight][\(label)] \(receipt.observedPromptShape ?? "prompt-shape=unrecorded")")
         print("[codex-s1-preflight][\(label)] receipt_binary_sha256=\(receipt.executable.sha256) config_sha256=\(receipt.restrictiveConfigSHA256)")
         print("[codex-s1-preflight][\(label)] dirs=0700 immutable_files=0400 cwd=empty login=Not_logged_in")
     }

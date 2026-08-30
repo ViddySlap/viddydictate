@@ -118,6 +118,10 @@ enum CleanupClient {
             return geminiSpendCapMessage
         case "gemini HTTP 401", "gemini HTTP 403":
             return geminiRejectedKeyMessage
+        // ADR 0020: an app-authored literal with no provider or transport text in it. The operator
+        // cause is in the log; without this the user met a dead hotkey and a category with no reason.
+        case CodexProviderRuntime.sandboxUnverifiedMessage:
+            return CodexProviderRuntime.sandboxUnverifiedMessage
         default:
             return nil
         }

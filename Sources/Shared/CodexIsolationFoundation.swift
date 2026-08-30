@@ -21,7 +21,7 @@ enum CodexIsolationFoundation {
     static let codexBinary = "/Applications/ChatGPT.app/Contents/Resources/codex"
     /// Diagnostic evidence only. Compatibility is earned by an exact-binary receipt, never by
     /// comparing this text to the candidate CLI's reported version.
-    static let lastReviewedCLIVersion = "codex-cli 0.146.0-alpha.3.1"
+    static let lastReviewedCLIVersion = "codex-cli 0.150.0-alpha.8"
     static let pinnedCLIVersion = lastReviewedCLIVersion
     static let model = "gpt-5.6-sol"
     static let effort = "xhigh"
@@ -30,7 +30,15 @@ enum CodexIsolationFoundation {
     static let schemaFilename = "transform-output.schema.json"
     static let routeAuditMarker = "VIDDYDICTATE_SYNTHETIC_ROUTE_AUDIT_S1"
     static let userAuditMarker = "VIDDYDICTATE_SYNTHETIC_USER_AUDIT_S1"
-    static let vaultLeakMarkers = ["Available skills", "skills_instructions", "SKILL.md", "ViddyVault"]
+    /// Substance, per ADR 0020. `SKILL.md` is the file locator every skill listing carries, so it
+    /// catches an actual leaked skill entry regardless of the skill's name, its origin, or what
+    /// upstream calls the surrounding block. `ViddyVault` catches a vault path.
+    static let vaultLeakMarkers = ["SKILL.md", "ViddyVault"]
+
+    /// Shape, per ADR 0020. codex-cli 0.150 emits the skills preamble unconditionally, before the
+    /// per-leaf disable is applied, so the bare tags no longer evidence a leak. An empty preamble is
+    /// recorded as drift; a preamble that actually lists a skill still trips `vaultLeakMarkers`.
+    static let skillPreambleDriftMarkers = ["Available skills", "skills_instructions"]
 
     static let maxFeatureInventoryBytes = 262_144
     static let maxFeatureInventoryLines = 512
@@ -312,28 +320,41 @@ enum CodexIsolationFoundation {
         return FeatureInventoryDiff(added: added, removed: removed, stateChanged: stateChanged)
     }
 
-    static func featureInventoryBoundaryFailure(
+    /// ADR 0020: drift evidence, not a gate.
+    ///
+    /// A feature stage says nothing about whether the contained process can escape the sandbox, and
+    /// upstream has now proven the label unreliable at its source: `unified_exec` reports `stable`
+    /// while ignoring both `= false` and `= true`. This reports every way the observed inventory
+    /// departs from a fully forceable, fully ratified one, so `verify.sh` can show Ben the whole
+    /// picture. It never decides availability.
+    ///
+    /// Every finding is accumulated rather than returned on the first hit. The previous early return
+    /// masked a second blocker behind the first for an entire investigation.
+    static func featureInventoryDrift(
         firstPass: [String: FeatureInventoryEntry],
         restrictivePass: [String: FeatureInventoryEntry],
         continuityBaseline: [String: FeatureInventoryEntry] = featureInventoryAuditBaseline,
         acceptedEnabled:
             [String: UnforceableEnabledFeatureAllowance] =
                 acceptedUnforceableEnabledFeatures
-    ) -> String? {
+    ) -> [String] {
+        var drift: [String] = []
         let names = Set(firstPass.keys).union(restrictivePass.keys).sorted()
         for name in names {
             guard let first = firstPass[name], let restrictive = restrictivePass[name],
                   first.name == name, restrictive.name == name,
                   first.stage == restrictive.stage else {
-                return "feature inventory changed between audit passes: \(name)"
+                drift.append("feature inventory changed between audit passes: \(name)")
+                continue
             }
             if first.stage.isForceable {
                 if restrictive.enabled {
-                    return "forceable feature remained enabled: \(name)"
+                    drift.append("forceable feature remained enabled: \(name)")
                 }
             } else {
-                guard first.enabled == restrictive.enabled else {
-                    return "unforceable feature changed between audit passes: \(name)"
+                if first.enabled != restrictive.enabled {
+                    drift.append("unforceable feature changed between audit passes: \(name)")
+                    continue
                 }
                 if !restrictive.enabled { continue }
                 guard let allowance = acceptedEnabled[name],
@@ -341,21 +362,22 @@ enum CodexIsolationFoundation {
                       allowance.transformToolNames.isEmpty,
                       allowance.modelVisiblePromptMarkers.isEmpty,
                       allowance.acceptedJSONLEventTypes.isEmpty else {
-                    return "unforceable enabled feature lacks an exact allowance: \(name)"
+                    drift.append("unforceable enabled feature lacks an exact allowance: \(name)")
+                    continue
                 }
             }
         }
-        if let stale = acceptedEnabled.keys.sorted().first(where: {
-            guard let entry = restrictivePass[$0] else { return false }
-            return !entry.enabled || entry.stage != acceptedEnabled[$0]?.stage
-        }) {
-            return "enabled tombstone allowance does not match inventory: \(stale)"
+        for stale in acceptedEnabled.keys.sorted() {
+            guard let entry = restrictivePass[stale] else { continue }
+            if !entry.enabled || entry.stage != acceptedEnabled[stale]?.stage {
+                drift.append("enabled tombstone allowance does not match inventory: \(stale)")
+            }
         }
         if let continuity = featureInventoryContinuityFailure(
             current: firstPass, baseline: continuityBaseline) {
-            return continuity
+            drift.append(continuity)
         }
-        return nil
+        return drift
     }
 
     static func featureInventoryContinuityFailure(
@@ -476,6 +498,9 @@ enum CodexIsolationFoundation {
         let skillsRootSHA256: String
         let schemaSHA256: String
         let executionContractSHA256: String
+        /// ADR 0020 drift evidence: upstream's observed prompt structure at the time this receipt was
+        /// minted. Recorded so the shape can be diffed across Codex binaries. Never asserted.
+        let observedPromptShape: String?
 
         init(
             originExecutable: StrongFileIdentity,
@@ -491,9 +516,11 @@ enum CodexIsolationFoundation {
             seededSkillTreeSHA256: String,
             skillsRootSHA256: String,
             schemaSHA256: String,
-            executionContractSHA256: String
+            executionContractSHA256: String,
+            observedPromptShape: String? = nil
         ) {
             self.formatVersion = Self.currentFormatVersion
+            self.observedPromptShape = observedPromptShape
             self.originExecutable = originExecutable
             self.executable = executable
             self.executableSnapshotFilename = executableSnapshotFilename
@@ -1082,34 +1109,22 @@ enum CodexIsolationFoundation {
               receipt.executionContractSHA256 == executionContractSHA256 else {
             return "Codex envelope/schema identity changed"
         }
-        var inventory: [String: FeatureInventoryEntry] = [:]
+        // ADR 0020: the receipt records the observed inventory as drift evidence. Its contents no
+        // longer decide whether the receipt is valid, because a feature stage does not describe what
+        // the contained process can do, and rejecting a stored receipt on those grounds forced a full
+        // re-quarantine on every availability probe. Only the receipt's own internal consistency is
+        // enforced here; the sandbox is enforced per call by the containment runner.
+        var seenFeatures: Set<String> = []
         for entry in receipt.effectiveFeatures {
-            guard inventory.updateValue(entry, forKey: entry.name) == nil else {
+            guard seenFeatures.insert(entry.name).inserted else {
                 return "Codex receipt feature inventory is contradictory"
             }
-            if entry.stage.isForceable && entry.enabled {
-                return "Codex receipt contains an enabled forceable feature"
-            }
-            if !entry.stage.isForceable && entry.enabled {
-                guard acceptedUnforceableEnabledFeatures[entry.name]?.stage == entry.stage else {
-                    return "Codex receipt contains an unreviewed enabled tombstone"
-                }
-            }
         }
-        var baseline: [String: FeatureInventoryEntry] = [:]
+        var seenBaseline: Set<String> = []
         for entry in receipt.featureContinuityBaseline {
-            guard baseline.updateValue(entry, forKey: entry.name) == nil else {
+            guard seenBaseline.insert(entry.name).inserted else {
                 return "Codex receipt continuity evidence is contradictory"
             }
-        }
-        if featureInventoryContinuityFailure(
-            current: baseline,
-            baseline: featureInventoryAuditBaseline) != nil {
-            return "Codex receipt continuity baseline is incomplete"
-        }
-        if featureInventoryContinuityFailure(
-            current: inventory, baseline: baseline) != nil {
-            return "Codex receipt feature continuity evidence failed"
         }
         return nil
     }
