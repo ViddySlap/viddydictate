@@ -237,7 +237,32 @@ step "packaging the disk image"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"     # the familiar drag-to-install layout
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
-hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+
+# Retried, because this step is not reliable and it fails EXPENSIVELY. hdiutil builds the image by
+# mounting a scratch volume under /Volumes and copying the source into it, and that copy can come
+# back "Operation not permitted" against a freshly notarized-and-stapled bundle - observed
+# 2026-08-30, then succeeding immediately on an identical retry with the same staged input. The cost
+# of not retrying is not a rerun of this line: by the time packaging starts, the app notarization has
+# already been submitted, waited on, and stapled, so a transient failure here throws away a complete
+# Apple round trip.
+#
+# Bounded and loud. A permission problem that is real must still fail the release rather than be
+# papered over by three attempts, so every retry says so and the last failure is fatal.
+dmg_created=0
+for attempt in 1 2 3; do
+  if hdiutil_err="$(hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" \
+       -ov -format UDZO "$DMG" 2>&1 >/dev/null)"; then
+    dmg_created=1
+    [ "$attempt" -eq 1 ] || echo "[release] disk image created on attempt $attempt"
+    break
+  fi
+  echo "[release] hdiutil attempt $attempt/3 failed:"
+  printf '%s\n' "$hdiutil_err" | sed 's/^/[release]     /'
+  rm -f "$DMG"
+  sleep 5
+done
+[ "$dmg_created" -eq 1 ] || die "could not create the disk image after 3 attempts (the app notarization above is already spent; re-running this script is safe)"
+
 rm -rf "$STAGE"
 
 codesign --force --sign "$SIGN_HASH" --timestamp "$DMG" || die "signing the DMG failed"
