@@ -13,6 +13,8 @@ troubleshooting.
   for agents and companion apps.
 - [Markdown file access](markdown-file-access.md): how an opened `.md` is classified read-write,
   read-only, or refused, and what the hardcoded denied root does.
+- [Backup and uninstall](uninstall-and-backup.md): where your data lives, how to copy it somewhere
+  safe, and how to remove ViddyDictate in the order that does not strand the keyboard event tap.
 
 ## Contributor and maintainer reference
 

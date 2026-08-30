@@ -198,7 +198,7 @@ run_fresh_install_rehearsal() {
         "$TEST_APP" --fresh-install-rehearsal 2>&1 | tee "$log"
     local rc=${PIPESTATUS[0]}
     local populated=0
-    if [[ -d "$app_support" ]] && find "$app_support" -mindepth 1 -print -quit | grep -q .; then
+    if [[ -d "$app_support" && -n "$(find "$app_support" -mindepth 1 -print -quit)" ]]; then
         populated=1
         printf '[verify][deterministic][PASS] fresh-install scratch Application Support populated: %s\n' \
             "$app_support"

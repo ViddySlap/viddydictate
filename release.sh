@@ -104,7 +104,7 @@ step "checking the notarization credential"
 NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>&1)" && NOTARY_RC=0 || NOTARY_RC=$?
 if [ "$NOTARY_RC" -eq 0 ]; then
   echo "[release] notarytool profile '$NOTARY_PROFILE' authenticates"
-elif printf '%s' "$NOTARY_CHECK" | grep -qiE "could not find|no keychain profile|unable to (find|load)|not found"; then
+elif printf '%s' "$NOTARY_CHECK" | grep -iE "could not find|no keychain profile|unable to (find|load)|not found" >/dev/null; then
   echo "[release] No stored notarytool credential profile named '$NOTARY_PROFILE'."
   echo "[release]"
   echo "[release] Create it once, and type the password into its prompt yourself — never put an"
@@ -114,7 +114,7 @@ elif printf '%s' "$NOTARY_CHECK" | grep -qiE "could not find|no keychain profile
   echo "[release]"
   printf '%s\n' "$NOTARY_CHECK" | sed 's/^/[release]     /'
   exit 1
-elif printf '%s' "$NOTARY_CHECK" | grep -qiE "unauthorized|authentication|invalid|forbidden|password"; then
+elif printf '%s' "$NOTARY_CHECK" | grep -iE "unauthorized|authentication|invalid|forbidden|password" >/dev/null; then
   echo "[release] The notarytool profile '$NOTARY_PROFILE' exists but Apple rejected it."
   echo "[release] Re-create it (app-specific passwords are revoked when the Apple ID password changes):"
   echo "[release]     xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <id> --team-id <team>"
@@ -153,8 +153,23 @@ case "$DR" in
   *) die "designated requirement does not anchor to Apple. The Developer ID was not used: $DR" ;;
 esac
 
-codesign -dv "$APP" 2>&1 | grep -q "flags=0x10000(runtime)" \
-  || die "hardened runtime missing; notarization would reject this"
+# Captured, then matched. NOT `codesign -dv | grep -q`, which is what this was and which failed a
+# perfectly good 1.0.0 build on the first real run of this pipeline: `grep -q` exits the moment it
+# matches, closing the pipe; codesign is still writing the seven lines that follow CodeDirectory and
+# dies of SIGPIPE; `pipefail` then reports 141 for the pipeline, so a SUCCESSFUL match arrives as a
+# failure. The bundle was hardened the whole time. Worse, `2>&1` had fed codesign's own stderr into
+# grep, so the error message that would have explained it was swallowed too.
+#
+# Every `producer | grep -q` under `set -o pipefail` has this shape. See install-app-agent.sh, where
+# the same construct inverted a safety check rather than merely tripping one.
+APP_SIG_INFO="$(codesign -dv "$APP" 2>&1 || true)"
+case "$APP_SIG_INFO" in
+  *"flags=0x10000(runtime)"*) ;;
+  *)
+    printf '%s\n' "$APP_SIG_INFO" | sed 's/^/[release]     /'
+    die "hardened runtime missing; notarization would reject this"
+    ;;
+esac
 echo "[release] hardened runtime confirmed"
 
 # Every check above inspects the OUTER bundle only, and that is not enough. Notarization refuses a

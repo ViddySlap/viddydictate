@@ -134,12 +134,21 @@ prepare_signing_keychain() {
   # (measured 2026-08-16). A keychain missing from the list signs nothing and reports the very
   # confusing "no identity found" while find-identity happily lists it. Ensure membership first,
   # appending so login/System/other signing keychains survive. Needs no keychain password.
-  if ! security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//' | grep -qxF "$KC"; then
-    echo "[build] adding the signing keychain to the search list"
-    # shellcheck disable=SC2046,SC2086
-    security list-keychains -d user -s \
-      $(security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//' | tr '\n' ' ') "$KC"
-  fi
+  # Exact-line membership by shell pattern rather than `| grep -qxF`, which under `pipefail`
+  # reports 141 when grep matches and exits before its producer has finished writing.
+  kc_list="$(security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//')"
+  case "
+$kc_list
+" in
+    *"
+$KC
+"*) ;;
+    *)
+      echo "[build] adding the signing keychain to the search list"
+      # shellcheck disable=SC2046,SC2086
+      security list-keychains -d user -s $(printf '%s ' $kc_list) "$KC"
+      ;;
+  esac
 
   # Explicit ifs, not && chains: under `set -e` a failing && list is a foot-gun here.
   if signing_identity_can_sign; then

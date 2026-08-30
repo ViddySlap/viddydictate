@@ -38,8 +38,13 @@ echo "[install] copying helper -> $HELPER"
 cp "$SRC" "$HELPER"
 
 echo "[install] smoke test"
-if printf '%s\n' '{"query":"what year did the chernobyl disaster happen","maxResults":2}' \
-    | "$VENV/bin/python" "$HELPER" | grep -q '"title"'; then
+SMOKE_OUT="$(printf '%s\n' '{"query":"what year did the chernobyl disaster happen","maxResults":2}' \
+    | "$VENV/bin/python" "$HELPER" 2>&1 || true)"
+case "$SMOKE_OUT" in
+  *'"title"'*) SMOKE_OK=1 ;;
+  *) SMOKE_OK=0 ;;
+esac
+if [ "$SMOKE_OK" -eq 1 ]; then
   echo "[install] OK — search backend live (venv + ddgs + helper)."
 else
   echo "[install] WARNING: smoke test returned no results (DuckDuckGo may be throttling right now)."

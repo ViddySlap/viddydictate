@@ -13,12 +13,8 @@ the provider client. An optional Gemini key is stored in the macOS login keychai
 ## Requirements
 
 - An Apple Silicon Mac running macOS 13 Ventura or newer. Intel Macs are not supported.
-- Apple Command Line Tools for `swiftc`. The macOS `codesign` and `security` utilities are also used.
-  Xcode is not required.
-- Python 3.9 or newer.
+- About 2.1 GB of downloads and roughly 15 minutes on first launch, once. See [Install](#install).
 - `ffmpeg` on `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, or `/bin`.
-- Internet access during setup. Python packages download during daemon installation, and the Whisper
-  model downloads and warms when the daemon first starts.
 - For text transforms, either:
   - Claude Code installed and signed in with a supported claude.ai subscription, or
   - ChatGPT.app installed in `/Applications`, followed by ViddyDictate's in-app Codex device login.
@@ -27,12 +23,50 @@ Only one cloud provider is required. Raw dictation works without one. LM Studio 
 local-provider path, but the current local cleanup and search route uses a 30B model that does not
 fit on a 16 GB Mac. On modest hardware, use Claude or Codex.
 
-Node.js and npm are needed only to rebuild the Sticky Notes web bundle or run the deterministic
-verification rail. They are not runtime dependencies; the built web bundle is committed.
+Nothing else is a prerequisite. The app brings its own Python, and you do not need Xcode, the
+Command Line Tools, Homebrew, or Node to run it. Those are needed only to
+[build from source](#build-from-source).
 
-## Build
+## Install
 
-From the repository root:
+Download `ViddyDictate-<version>.dmg` from
+[Releases](https://github.com/ViddySlap/viddydictate/releases), open it, and drag ViddyDictate to
+Applications. It is signed with an Apple Developer ID and notarized by Apple, so it opens without a
+Gatekeeper warning and without right-click-Open.
+
+The first launch shows a component picker rather than a progress bar you cannot argue with. A
+mandatory core of about 2.1 GB — the bundled Python runtime, the speech-to-text environment, the
+`whisper-large-v3-turbo` voice model, and the web-search helper — is not a choice, because
+dictation without the voice model is a different program. Everything beyond that is a tick row that
+tells you its size and what you lose by leaving it off, with defaults chosen from how much RAM your
+Mac has.
+
+Then it downloads, and while it does:
+
+- macOS asks for **Microphone**, **Accessibility**, and **Input Monitoring**. Grant all three; those
+  are, respectively, recording, delivering text into the focused field, and noticing the hotkey.
+  Only you can grant them — no installer or agent can do it for you.
+- Each component starts working as it lands, rather than at the end.
+- You can close the window. The download continues.
+
+You can also choose **Set up later** and land in a working, reduced app. Nothing goes quietly
+missing: a feature you skipped explains itself and offers to install itself at the moment you reach
+for it.
+
+Measured cold on an empty account: **3m25s to working dictation**, and the rest of the core arrives
+behind it.
+
+To remove it again, or to back your data up first, see
+[docs/uninstall-and-backup.md](docs/uninstall-and-backup.md).
+
+## Build from source
+
+You do not need to do this to use ViddyDictate; the release above is the same app. Build if you want
+to read the code you are running, change it, or work on it.
+
+Building additionally needs Apple Command Line Tools for `swiftc` (Xcode is not required) and
+Python 3.9 or newer. Node.js and npm are needed only to rebuild the Sticky Notes web bundle or run
+the deterministic verification rail; the built web bundle is committed.
 
 ```sh
 ./build.sh
@@ -81,7 +115,10 @@ Because the current bundle identifier is `com.viddydictate.app`, macOS treats th
 new client. Grant Microphone, Accessibility, and Input Monitoring again after installing, and remove
 any stale ViddyDictate entry from System Settings > Privacy & Security so the list stays unambiguous.
 
-## Install
+## Installing a build of your own
+
+Skip this if you installed the release DMG; it is already signed, notarized, and self-contained,
+and it installs its own daemon on first launch. This section is for a build you made yourself.
 
 For a first install, create a stable local signing identity before the final build. The stable
 identity lets macOS preserve Accessibility and Input Monitoring grants across rebuilds. See
@@ -180,7 +217,7 @@ guidance and [docs/verification.md](docs/verification.md) for the exact tier con
 Start with Settings > Setup > Check again. It distinguishes a missing install, a signed-out provider,
 a stopped daemon, missing macOS permissions, and optional search setup.
 
-Useful checks from the repository root:
+Useful checks. These need no repository and work on a DMG install:
 
 ```sh
 curl -fsS http://127.0.0.1:8765/health
@@ -190,7 +227,8 @@ tail -n 100 /tmp/viddydictate-whisperd.err.log
 tail -n 100 /tmp/viddydictate.err.log
 ```
 
-- If daemon health never answers, rerun `./install-daemon.sh` and inspect its error log.
+- If daemon health never answers, reopen Settings > Setup and re-run the failed component. On a
+  source install, `./install-daemon.sh` does the same thing and prints more.
 - If health says the model is not ready, allow the first model download and warmup to finish.
 - If every transcribe fails while health still answers, confirm `ffmpeg` is on the daemon's PATH.
 - If global hotkeys do nothing, recheck Accessibility and Input Monitoring, then relaunch the app.
@@ -202,7 +240,12 @@ tail -n 100 /tmp/viddydictate.err.log
   also be checked with `claude auth status --json`; Codex connection state is checked inside the app
   because ViddyDictate uses its own dedicated login.
 - If a rebuilt app loses permissions, rerun `./setup-signing.sh`, rebuild, and reinstall. Do not
-  deploy the ad-hoc build directly.
+  deploy the ad-hoc build directly. This cannot happen to a DMG install: the release identity does
+  not change between versions, so an upgrade keeps its grants.
+- To remove ViddyDictate, or to back up your transcripts and notes before you do, see
+  [docs/uninstall-and-backup.md](docs/uninstall-and-backup.md). Do not delete the app bundle while
+  it is running; it holds a keyboard event tap, and yanking it can leave the keyboard unresponsive
+  until you log out. The uninstall script stops it properly first.
 
 ## Support and license
 

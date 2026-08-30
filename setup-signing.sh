@@ -19,7 +19,9 @@ CN="ViddyDictate Self-Signed"
 KC="$HOME/Library/Keychains/vd-signing.keychain-db"
 MIN_LEN=12
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CN"; then
+EXISTING_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+case "$EXISTING_IDENTITIES" in *"$CN"*) IDENTITY_EXISTS=1 ;; *) IDENTITY_EXISTS=0 ;; esac
+if [ "$IDENTITY_EXISTS" -eq 1 ]; then
   echo "[signing] identity already present - nothing to do"
   exit 0
 fi
@@ -118,10 +120,17 @@ fi
 # unlocked. This script used to keep it off the list on purpose; that made every keychain it
 # produced unsignable. Append, never replace: the list also carries login and System.
 CURRENT_LIST="$(security list-keychains -d user | sed 's/[[:space:]]*"//;s/"$//')"
-if ! printf '%s\n' "$CURRENT_LIST" | grep -qxF "$KC"; then
-  # shellcheck disable=SC2086
-  security list-keychains -d user -s $(printf '%s ' $CURRENT_LIST) "$KC"
-fi
+case "
+$CURRENT_LIST
+" in
+  *"
+$KC
+"*) ;;
+  *)
+    # shellcheck disable=SC2086
+    security list-keychains -d user -s $(printf '%s ' $CURRENT_LIST) "$KC"
+    ;;
+esac
 
 echo "[signing] codesigning identities in this keychain:"
 security find-identity -v -p codesigning "$KC"
@@ -136,10 +145,17 @@ if ! codesign --force --sign "$CN" --keychain "$KC" -o runtime "$SIGN_PROBE" >/d
   echo "[signing]        Run: security find-identity -p codesigning \"$KC\""
   exit 1
 fi
-if ! codesign -dvvv "$SIGN_PROBE" 2>&1 | grep -q "Authority=$CN"; then
-  echo "[signing] ERROR: the probe was signed by a different authority than $CN."
-  exit 1
-fi
+# Captured, then matched: `codesign -dvvv | grep -q` under `pipefail` reports 141 when grep matches
+# and exits early, which would declare a perfectly good identity to be signed by the wrong authority.
+PROBE_SIG_INFO="$(codesign -dvvv "$SIGN_PROBE" 2>&1 || true)"
+case "$PROBE_SIG_INFO" in
+  *"Authority=$CN"*) ;;
+  *)
+    echo "[signing] ERROR: the probe was signed by a different authority than $CN."
+    printf '%s\n' "$PROBE_SIG_INFO" | sed 's/^/[signing]     /'
+    exit 1
+    ;;
+esac
 echo "[signing] verified: a test binary signs as $CN"
 
 echo "[signing] locking the keychain"

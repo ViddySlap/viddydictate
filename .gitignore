@@ -8,3 +8,7 @@ Sources-backup-*/
 
 # vendored, hash-pinned build inputs (the bundled Python runtime); re-fetched by build.sh
 vendor/
+
+# release artifacts (release.sh writes here, and refuses to run against a dirty tree - so its own
+# output would block the next release if this were tracked)
+dist/

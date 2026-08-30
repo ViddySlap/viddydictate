@@ -58,8 +58,9 @@ Override the profile name with `VD_NOTARY_PROFILE` if you use a different one.
 ./release.sh 1.0.0
 ```
 
-That runs, in order: the deterministic verification gate, a hardened-runtime build signed with the
-Developer ID, a signature check, notarization and stapling of the app, DMG packaging, signing,
+That runs, in order: a check that the notarization credential authenticates, the deterministic
+verification gate, a hardened-runtime build signed with the Developer ID, a signature check, a sweep
+of every nested Mach-O in the bundle, notarization and stapling of the app, DMG packaging, signing,
 notarization and stapling of the DMG, and finally a Gatekeeper check of both artifacts the way a
 downloader's Mac would perform it. Output lands in `dist/`.
 
@@ -68,8 +69,9 @@ deliberate: a DMG-only staple validates while Gatekeeper can reach Apple, but a 
 validates offline and keeps working after the user drags it out of the disk image.
 
 The script refuses rather than degrading, on: a dirty working tree, a missing or ambiguous Developer
-ID, a designated requirement that does not anchor to Apple, a missing hardened runtime, a failed gate,
-or a failed notarization. **A release that cannot be signed properly must not silently become a
+ID, a missing or rejected notarization credential, a designated requirement that does not anchor to
+Apple, a missing hardened runtime on the bundle or on any nested Mach-O, a nested Mach-O carrying the
+wrong Team ID, a failed gate, or a failed notarization. **A release that cannot be signed properly must not silently become a
 locally-signed or ad-hoc one**, because that difference is invisible downstream and lands on the
 user as a Gatekeeper block.
 
@@ -97,6 +99,13 @@ and `--keychain` does not disambiguate them — a sign explicitly scoped to one 
 using a same-named certificate from the search list instead, detectable only in the leaf hash of the
 designated requirement. `release.sh` resolves the identity to its hash and passes that.
 
+**The credential check asks notarytool, not the keychain.** It used to grep the login keychain for a
+`com.apple.gke.notary.tool` generic password, which was a permanent false negative: notarytool stores
+profiles in the data-protection keychain, which the `security` CLI cannot see at all. It now runs one
+authenticated `notarytool history` round trip. A missing or rejected credential is fatal there, since
+otherwise it costs a whole build to discover; a network failure is only a warning, because a release
+may well be cut on bad hotel wifi and the submissions do their own retrying.
+
 **Local builds are unaffected.** `build.sh` with no `VD_SIGN_IDENTITY` behaves exactly as before,
 using the self-signed keychain if present and ad-hoc if not. Contributors need none of this page.
 
@@ -114,9 +123,15 @@ submit output:
 xcrun notarytool log <submission-id> --keychain-profile "viddydictate-notary"
 ```
 
-The common causes are a missing hardened runtime, a missing secure timestamp, or an unsigned nested
-binary — `release.sh` checks the first two before submitting, and `codesign --verify --deep --strict`
-catches the third.
+The common causes are a missing hardened runtime, a missing secure timestamp, and an unsigned or
+foreign-signed nested binary. `release.sh` checks all three before submitting, and the third is
+checked explicitly because **`codesign --verify --deep --strict` does not catch it**. Measured on
+`5391750`: three `Contents/Helpers` binaries were linker-signed ad-hoc, `--deep --strict` reported
+the bundle valid, and Apple would have rejected the submission. `build.sh` signs them correctly now
+and `release.sh` re-checks the artifact being shipped rather than trusting the script that made it —
+asserting hardened runtime, the Team ID, and an Apple anchor on each one. Not by certificate hash:
+`codesign` never prints one, and a Team ID and an Apple anchor are two things a local or ad-hoc
+signature cannot produce.
 
 If `spctl` rejects the app while `stapler validate` passes, the ticket is attached but the signature
 itself is the problem; re-read the designated requirement and confirm it anchors to Apple.

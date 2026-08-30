@@ -24,11 +24,22 @@ U="$(id -u)"
 # exact failure this topology exists to prevent. Check the signature flags, NOT the Authority=
 # line — codesign omits Authority when the trust store is wiped, and a cert-signed build is still
 # deployable then (the launch-time SigningTrustGuard heals the trust store afterwards).
-if codesign -dv "$BUILT" 2>&1 | grep -Eq 'Signature=adhoc|flags=0x2\(adhoc\)'; then
-  echo "[deploy] ERROR: build is ad-hoc signed — refusing to deploy."
-  echo "[deploy]        Fix signing (build.sh self-heals trust; see setup-signing.sh) and rebuild."
-  exit 1
-fi
+#
+# Captured, then matched, and the capture is not optional. `codesign -dv | grep -Eq` under
+# `set -o pipefail` INVERTS this check: grep exits the instant it matches "adhoc", the pipe closes,
+# codesign dies of SIGPIPE mid-output, pipefail reports 141, the `if` is therefore false, and the
+# ad-hoc build this refusal exists to stop gets deployed - silently resetting the Accessibility and
+# Input Monitoring grants. A guard that fails open on a match is worse than no guard, because it
+# reads as protection. Observed as a false NEGATIVE in release.sh on 2026-08-29; the failure mode
+# here is the dangerous direction of the same bug.
+BUILT_SIG_INFO="$(codesign -dv "$BUILT" 2>&1 || true)"
+case "$BUILT_SIG_INFO" in
+  *"Signature=adhoc"*|*"flags=0x2(adhoc)"*)
+    echo "[deploy] ERROR: build is ad-hoc signed — refusing to deploy."
+    echo "[deploy]        Fix signing (build.sh self-heals trust; see setup-signing.sh) and rebuild."
+    exit 1
+    ;;
+esac
 
 echo "[deploy] copy -> $LIVE"
 mkdir -p "$HOME/Applications"
