@@ -363,6 +363,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         let uid = arguments.count > i + 1 ? arguments[i + 1] : nil
         return MicProbe.runRecorderTest(forcedUID: uid) ? 0 : 1
     },
+    // Chain vdfit GA1: five arms are deliberately RED until a later chain link lands the fix;
+    // `preference` is the control and must stay green. `--only <arm>` is required.
+    .modelFitSelftest: .init(tier: .excluded) { arguments in
+        ModelFitSelfTest.run(arguments: arguments)
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

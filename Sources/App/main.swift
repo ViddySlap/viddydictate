@@ -83,6 +83,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case micProbe = "--mic-probe"
     case micCaptureTest = "--mic-capture-test"
     case recorderTest = "--recorder-test"
+    // Chain vdfit GA1: the six model-fit arms (--only <arm>). Excluded tier on purpose — WIRE1 promotes
+    // this once the arms pass; wiring a deliberately-red test into deterministic now would fail
+    // check_selftest_flag_drift and make verify.sh red at HEAD.
+    case modelFitSelftest = "--modelfit-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
