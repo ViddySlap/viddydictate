@@ -117,15 +117,41 @@ enum ModelFitSelfTest {
 
     // MARK: - search-retrieval
 
-    /// SearchClient's retrieval leg now goes through one seam, `SearchClient.retrievalModelID()`, that
+    /// SearchClient's retrieval leg goes through one seam, `SearchClient.retrievalModelID(store:)`, that
     /// both production call sites (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read
-    /// instead of `Settings.searchModel` directly — the question "what will retrieval actually ask LM
-    /// Studio for" has one testable answer. (A) pins qwen as the intended preference (fixture sanity,
-    /// not the defect — qwen stays correct to prefer). (B), modeled on `runFit`, asserts against what
-    /// the seam RESOLVES to, not the raw scalar: today the seam is a pass-through, so it resolves to
-    /// qwen, qwen does not fit this budget, and the arm is red because the RESOLVED model does not fit —
-    /// not because the assertion is unsatisfiable. A route-resolution fix that makes the seam resolve a
-    /// fitting model with (A) still true turns this arm green with no further change here.
+    /// instead of `Settings.searchModel` directly. (A) pins qwen as the intended preference (fixture
+    /// sanity, not the defect — qwen stays correct to prefer).
+    ///
+    /// (B) seeds a `freshStore()` the same way `runPreference()`/`runRetry()` already do, so a route
+    /// resolution reading `store` has a real catalog to consult — closing the gap the un-seeded arm had
+    /// before: `SearchClient.retrievalModelID()` took no store parameter, so a real
+    /// `ModelsPowerSettingsStore.resolveRoute`-based fix could only ever see a nil catalog, fall back to
+    /// the raw `Settings.searchModel` scalar, and fail the readiness check below for exactly the same
+    /// reason the unpatched pass-through does — an unsatisfiable arm that could not tell a correct route
+    /// resolution from one that never runs at all.
+    ///
+    /// The fixture's one installed model carries a name NEITHER `qwenID` NOR `gemmaID` — not one of the
+    /// two ids production code already has memorized. This is deliberate, not incidental: seeding
+    /// literally `[gemma, qwen]` cannot discriminate a route resolution that actually reads `store` from
+    /// one that hardcodes its own `[qwen, gemma]` catalog inline (the exact defect a prior worker's
+    /// patch shipped, and the reason this arm exists) — both would end up naming a real id this file
+    /// already knows, passing either way. Naming the fixture's installed model something a hardcoded
+    /// catalog cannot possibly guess is what makes (B) actually exercise "did this read the injected
+    /// store", not merely "did this land on a model that fits".
+    ///
+    /// The fixture model is seeded with NO `sizeBytes` (unmeasured), matching how `runRetry()` and
+    /// `runPreference()` already seed their catalogs, and deliberately NOT with a real measured size.
+    /// `ModelsPowerSettingsStore.resolveRoute`'s capacity check is not an injectable seam — it always
+    /// reads the live kernel's CURRENT wired bytes plus the configured budget
+    /// (`ModelManager.fits: wiredBytes + incomingBytes <= budgetBytes`), and wired bytes is whatever
+    /// else happens to be resident on the machine at test time, not a fixture value. Measured directly
+    /// on this machine while writing this arm: wired was already ~41 GB against a ~34 GB budget, so
+    /// EVERY model — including one the size of gemma — failed that live check regardless of its size.
+    /// An unmeasured entry short-circuits `LLMLocalCapacityFacts.fits` to `true` ("unmeasured: do not
+    /// block a model we cannot size"), which is what keeps this arm's outcome independent of whatever
+    /// else is running on the box. The FITS/DOES-NOT-FIT distinction this arm actually cares about
+    /// (readiness assertion B) is carried entirely by `capacityDependencies`/`ensureReady` below, which
+    /// remains fully injectable.
     private static func runSearchRetrieval() -> Bool {
         print("=== ViddyDictate modelfit — search-retrieval arm ===")
         let reporter = SelfTestReporter()
@@ -134,15 +160,25 @@ enum ModelFitSelfTest {
             "Settings.searchModel is the tested-default local retrieval model in this fixture",
             Settings.searchModel == qwenID, "got=\(Settings.searchModel)")
 
+        let installedID = "modelfit-fixture-actually-installed"
+        let installedSizeBytes = gemmaSizeBytes
+        let store = freshStore()
+        store.setLocalAvailabilityState(.available, models: [
+            LMStudioModelOption(modelID: installedID, label: "fixture-installed"),
+        ])
+
+        let resolvedModelID = SearchClient.retrievalModelID(store: store)
+        reporter.record(
+            "the retrieval leg resolves to the model this fixture's store actually has installed, "
+                + "not a hardcoded guess at what is installed",
+            resolvedModelID == installedID, "resolved=\(resolvedModelID)")
+
         let dependencies = capacityDependencies(
-            installedSizes: [qwenID: qwenSizeBytes, gemmaID: gemmaSizeBytes],
-            budget: fixtureBudgetBytes)
-        let resolvedModelID = SearchClient.retrievalModelID()
+            installedSizes: [installedID: installedSizeBytes], budget: fixtureBudgetBytes)
         let readiness = ModelManager().ensureReady(
             resolvedModelID, ttlOverrideSeconds: 60, dependencies: dependencies)
         reporter.record(
-            "the model the retrieval leg resolves to is loadable on this machine, even though a "
-                + "smaller installed model would fit",
+            "the model the retrieval leg resolves to is loadable on this machine",
             readiness == .ready, "resolved=\(resolvedModelID) readiness=\(readiness)")
 
         print("\n=== RESULT ===")

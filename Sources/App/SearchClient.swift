@@ -170,7 +170,13 @@ enum SearchClient {
     /// sites below (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read instead of
     /// `Settings.searchModel` directly, so "what will retrieval actually ask for" is one testable
     /// question. Returns the raw configured scalar verbatim today; this seam changes no behavior.
-    static func retrievalModelID() -> String {
+    ///
+    /// `store` is an injectable measuring point, not a fix: a future route-resolution change can read
+    /// it instead of reaching for the global `Settings.modelsPower` directly, so a self-test can hand
+    /// this a `freshStore()` fixture the way `runPreference()`/`runRetry()` already do for
+    /// `ModelsPowerSettingsStore.resolveRoute`. Both call sites below call this with no argument, so
+    /// they keep resolving against the real, live store; only a test supplies anything else.
+    static func retrievalModelID(store: ModelsPowerSettingsStore = Settings.modelsPower) -> String {
         Settings.searchModel
     }
 
