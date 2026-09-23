@@ -105,6 +105,15 @@ struct LLMLocalCapacityFacts {
     }()
 }
 
+/// A typed per-run Local failure. `failedProviders` is keyed by PROVIDER, so on its own it cannot say
+/// "this model could not be made resident for capacity" without also taking the whole Local arm off.
+/// A size refusal is answerable - it means try another installed model that fits - so it carries the
+/// failed model id and is kept distinct from an ordinary connectivity/load failure, which stays terminal.
+enum LLMLocalRouteFailure: Equatable {
+    /// The named model's estimated incoming allocation exceeded the live wire budget.
+    case overBudget(modelID: String)
+}
+
 /// Availability-resolved routing (Public V1 locked decision 4): the explicit user pin if it is set and
 /// available, else the highest-preference available provider, else the route reports itself off with a
 /// specific reason.
@@ -129,6 +138,7 @@ enum LLMAvailabilityRouting {
                         availability: (LLMProvider) -> LLMProviderAvailabilityState,
                         localModels: [LMStudioModelOption]? = nil,
                         localCapacity: LLMLocalCapacityFacts? = .conservativeDefault,
+                        localFailure: LLMLocalRouteFailure? = nil,
                         failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
         let pinState = availability(pin.provider)
 
@@ -136,18 +146,25 @@ enum LLMAvailabilityRouting {
         /// configured model only when this machine can actually hold it. When it cannot, the largest
         /// installed model that DOES fit runs instead; the substitution still carries the upgrade offer.
         /// `localCapacity` is injected (never read here) so this stays a pure policy function.
-        func localCandidate() -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?)? {
+        /// `excludingModelIDs` is the single-retry seam: a model that just refused for capacity is not
+        /// offered again, so the substitute is a genuinely different installed model. An empty exclusion
+        /// set keeps the ordinary first-attempt behavior byte-for-byte.
+        func localCandidate(
+            excludingModelIDs: Set<String> = []
+        ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?)? {
             guard let configured = bundle(.local) else { return nil }
             guard let localModels else { return (configured, nil) }
             guard !localModels.isEmpty else { return nil }
 
             func fits(_ modelID: String) -> Bool { localCapacity?.fits(modelID) ?? true }
 
-            if localModels.contains(where: { $0.modelID == configured.modelID }), fits(configured.modelID) {
+            if !excludingModelIDs.contains(configured.modelID),
+               localModels.contains(where: { $0.modelID == configured.modelID }),
+               fits(configured.modelID) {
                 return (configured, nil)
             }
             guard let replacement = localModels
-                .filter({ fits($0.modelID) })
+                .filter({ !excludingModelIDs.contains($0.modelID) && fits($0.modelID) })
                 .max(by: {
                     (localCapacity?.sizeBytes($0.modelID) ?? 0) < (localCapacity?.sizeBytes($1.modelID) ?? 0)
                 })
@@ -161,6 +178,16 @@ enum LLMAvailabilityRouting {
         // B16: Local is an explicit privacy boundary. When it is the user's pin, an unavailable or
         // empty Local arm reports off; the general cloud fallback ladder is not consulted.
         if pin.provider == .local {
+            // A capacity refusal is not terminal. The model that just ran does not fit RIGHT NOW, so step
+            // down ONCE to the largest OTHER installed model that fits, still inside Local (B16: this can
+            // never climb into cloud). Every other Local failure, and a retry that finds nothing, keeps
+            // the existing off behavior so the raw transcript still lands.
+            if pinState.canRun, case .overBudget(let failedModelID)? = localFailure,
+               let refusal = failedProviders[.local],
+               let retry = localCandidate(excludingModelIDs: [failedModelID]) {
+                return .degraded(
+                    retry.bundle, from: .local, reason: refusal, upgradeOffer: retry.offer)
+            }
             guard failedProviders[.local] == nil, pinState.canRun else {
                 return .off(reason: "local pin is unavailable; automatic cloud fallback is disabled - "
                     + detail(for: .local, state: pinState, localModels: localModels,

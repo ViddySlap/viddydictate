@@ -335,8 +335,9 @@ final class ModelsPowerSettingsStore {
     func resolveRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
                       failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
+        let pin = selectedBundle(for: route, fallback: fallback)
         return LLMAvailabilityRouting.resolve(
-            pin: selectedBundle(for: route, fallback: fallback),
+            pin: pin,
             bundle: { provider in
                 rememberedBundle(for: provider, route: route)
                     ?? LLMProviderDefaults.testedBundle(for: provider, route: route)
@@ -344,7 +345,21 @@ final class ModelsPowerSettingsStore {
             availability: { availabilityState(for: $0) },
             localModels: localModels,
             localCapacity: Self.liveLocalCapacity(models: localModels),
+            localFailure: Self.localCapacityRefusal(
+                in: failedProviders, failedModelID: pin.modelID),
             failedProviders: failedProviders)
+    }
+
+    /// Classify a per-run Local failure into the typed reason routing needs in order to step down to a
+    /// smaller installed model. Only the app-authored over-budget sentence is a model-size refusal;
+    /// every other Local failure (bad output, a timeout, an unreachable server) stays a provider-level
+    /// failure and keeps the route off. The failed model is the one this route pinned, which is what the
+    /// first attempt ran; the caller can only ever ask for one step-down, so no shrinking loop exists.
+    private static func localCapacityRefusal(
+        in failedProviders: [LLMProvider: String], failedModelID: String
+    ) -> LLMLocalRouteFailure? {
+        guard failedProviders[.local] == CleanupClient.overBudgetMessage else { return nil }
+        return .overBudget(modelID: failedModelID)
     }
 
     /// Real local-model capacity facts for route resolution: sizes from the already-cached installed
