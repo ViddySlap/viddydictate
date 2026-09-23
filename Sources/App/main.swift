@@ -90,6 +90,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // RTY1: the same defect graded through the seam production dispatches on, rather than through the
     // pure policy function. Its own flag because ModelFitSelfTest is protected by chain vdfit.
     case modelFitRetryWiringSelftest = "--modelfit-wiring-selftest"
+    // DMGD1: the daemon staged into the app bundle and installed by the app. Excluded tier on purpose -
+    // it is a build-artifact gate; promoting it would need a verify.sh gate, which the task forbids.
+    case daemonInstallSelftest = "--daemon-install-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

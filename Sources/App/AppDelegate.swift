@@ -577,6 +577,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         requestPermissions()
         startBatteryAdvisoryMonitoring()
+        // An app update carries its daemon update: the script and LaunchAgent template ship inside the
+        // bundle, and this idempotent pass rewrites them in the user's home only when the app's copy
+        // changed. Off the main thread; a failure is logged and also surfaces in Preflight's
+        // speech-to-text row. The first-run bootstrap installs the daemon as part of its STT row.
+        DispatchQueue.global(qos: .utility).async {
+            _ = DaemonInstaller.installForCurrentUser()
+        }
         presentFirstRunOnboardingIfNeeded()
     }
 

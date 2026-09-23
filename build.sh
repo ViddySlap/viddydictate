@@ -317,6 +317,12 @@ mkdir -p "$RES/StickyNotes"
 cp "$WEB_DIST/index.html" "$WEB_DIST/app.js" "$WEB_DIST/app.css" "$RES/StickyNotes/"
 "$MACOS/$APP_NAME" --emit-theme-css > "$RES/StickyNotes/theme.css"
 
+# The transcription daemon ships INSIDE the app: a DMG-only Mac has no repository to run
+# install-daemon.sh from, so the app itself stages this script and its LaunchAgent template and
+# installs them into the user's home on first run / update. Plain cp, byte-identical to the repo copy.
+mkdir -p "$RES/daemon"
+cp "$ROOT/viddydictate_whisperd.py" "$ROOT/com.viddydictate.whisperd.plist" "$RES/daemon/"
+
 echo "[build] writing Info.plist"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
@@ -515,6 +521,11 @@ echo "[build][tests] copying sticky-notes web bundle"
 mkdir -p "$TEST_RES/StickyNotes"
 cp "$WEB_DIST/index.html" "$WEB_DIST/app.js" "$WEB_DIST/app.css" "$TEST_RES/StickyNotes/"
 cp "$RES/StickyNotes/theme.css" "$TEST_RES/StickyNotes/theme.css"
+
+# Same staged daemon as the shipping bundle: the selftests below assert the installed bytes match the
+# bundled bytes, so the verification bundle must carry an identical copy.
+mkdir -p "$TEST_RES/daemon"
+cp "$ROOT/viddydictate_whisperd.py" "$ROOT/com.viddydictate.whisperd.plist" "$TEST_RES/daemon/"
 
 echo "[build][tests] writing Info.plist"
 cp "$ROOT/Info-Tests.plist" "$TEST_APP/Contents/Info.plist"

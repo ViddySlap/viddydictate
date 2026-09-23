@@ -301,7 +301,10 @@ final class BootstrapInstallCoordinator {
     private var setupPresented = false
     private let onChange: SnapshotHandler?
 
-    init(engine: InstallerEngine = InstallerEngine(),
+    // Production supplies the daemon installer so the STT row also stages the bundled daemon into the
+    // user's home. Tests pass their own engine (or none) and never reach the real home via this path.
+    init(engine: InstallerEngine = InstallerEngine(
+             daemonInstaller: { DaemonInstaller.installForCurrentUser() }),
          store: BootstrapStateStore = BootstrapStateStore(),
          onChange: SnapshotHandler? = nil) {
         self.engine = engine

@@ -442,6 +442,10 @@ struct InstallerPaths: Equatable {
 /// converted to a result, never thrown out of the queue, so one failed row cannot stop its siblings.
 final class InstallerEngine {
     typealias Sleep = (TimeInterval) -> Void
+    /// One install pass of the bundled transcription daemon. Injected so the deterministic rail never
+    /// reaches the real home or the real launchd domain: production supplies `DaemonInstaller`,
+    /// tests leave it nil.
+    typealias DaemonInstallPerforming = () -> DaemonInstallResult
 
     private struct CommandOutcome {
         let result: InstallerCommandResult
@@ -458,13 +462,15 @@ final class InstallerEngine {
     private let lmStudio: InstallerLMStudioPerforming
     private let sleep: Sleep
     private let fileManager: FileManager
+    private let daemonInstaller: DaemonInstallPerforming?
     private let environment: [String: String]
 
     init(paths: InstallerPaths = .live,
          runner: InstallerProcessRunning = FoundationInstallerProcessRunner(),
          lmStudio: InstallerLMStudioPerforming? = nil,
          sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
-         fileManager: FileManager = .default) {
+         fileManager: FileManager = .default,
+         daemonInstaller: DaemonInstallPerforming? = nil) {
         self.paths = paths
         self.runner = runner
         self.lmStudio = lmStudio ?? LiveInstallerLMStudioPerformer(
@@ -473,6 +479,7 @@ final class InstallerEngine {
             fileManager: fileManager)
         self.sleep = sleep
         self.fileManager = fileManager
+        self.daemonInstaller = daemonInstaller
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HOME"] = paths.modelCache.path
         environment["HUGGINGFACE_HUB_CACHE"] = paths.modelCache.appendingPathComponent("hub").path
@@ -553,6 +560,19 @@ final class InstallerEngine {
                     try verifyExpectedFiles(artifact.expectedFiles,
                                             snapshotRoot: Self.snapshotPath(from: outcome.result.stdout,
                                                                             inside: paths.modelCache))
+                }
+            }
+
+            // The daemon ships inside the app, so the STT row must also stage it into the user's home
+            // and its LaunchAgent directory. Only the STT row does this, and only when production (or a
+            // test that explicitly opts in) injected an installer: an engine built by a test has none,
+            // so no existing selftest can write into a real home or poke a real launchd domain.
+            if descriptor.id == BootstrapInstallPlan.sttDaemon.id, let daemonInstaller {
+                switch daemonInstaller() {
+                case .installed, .upgraded, .unchanged:
+                    break
+                case .failed(let daemonFailure):
+                    throw InstallerFailure(category: .process, message: daemonFailure.message)
                 }
             }
 

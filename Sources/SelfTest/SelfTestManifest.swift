@@ -373,6 +373,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelFitRetryWiringSelftest: .init(tier: .deterministic) { _ in
         ModelFitRetryWiringSelfTest.run()
     },
+    // DMGD1: four arms over the injected DaemonInstaller (bundled/installs/upgrade/absent). Excluded
+    // tier: it is a build-artifact gate and the task forbids adding anything to scripts/verify.sh.
+    .daemonInstallSelftest: .init(tier: .excluded) { arguments in
+        DaemonInstallSelfTest.run(arguments: arguments)
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in
