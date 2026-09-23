@@ -166,6 +166,14 @@ enum SearchClient {
 
     // MARK: - Agentic retrieval loop (Shape C, ported from _agentic_loop)
 
+    /// The Local model id the retrieval leg hands LM Studio — the single measuring point both call
+    /// sites below (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read instead of
+    /// `Settings.searchModel` directly, so "what will retrieval actually ask for" is one testable
+    /// question. Returns the raw configured scalar verbatim today; this seam changes no behavior.
+    static func retrievalModelID() -> String {
+        Settings.searchModel
+    }
+
     /// Run the qwen tool-calling loop and return the union of retrieved results (or a failure). Mirrors
     /// the bench: rewrite -> web_search -> judge -> optional ONE re-search, capped at `maxSearches`,
     /// then a forced final (no-tools) turn. `collected` may be empty even on success (search throttled).
@@ -182,7 +190,7 @@ enum SearchClient {
 
         for _ in 0..<maxTurns {
             let forceFinal = shouldForceFinalize(nSearches: nSearches, maxSearches: maxSearches)
-            let outcome = lmChat(model: Settings.searchModel, messages: messages,
+            let outcome = lmChat(model: retrievalModelID(), messages: messages,
                                  tools: forceFinal ? nil : [webSearchTool],
                                  toolChoice: forceFinal ? "none" : "auto",
                                  maxTokens: Settings.searchRetrievalMaxTokens,
@@ -390,7 +398,7 @@ enum SearchClient {
         // proceeding into the pipeline against an unloaded model just hangs/times out with a murkier
         // error (model-lifecycle finding: ensureReady's contract must not silently fork between clients).
         let retrievalReadiness: ModelManager.ReadinessResult =
-            ModelManager.shared.ensureReady(Settings.searchModel)
+            ModelManager.shared.ensureReady(retrievalModelID())
         if let failure = CleanupClient.failureResult(
             for: retrievalReadiness, loadFailureMessage: "retrieval model not loaded"
         ) {                                                                      // retrieval / agentic (qwen)

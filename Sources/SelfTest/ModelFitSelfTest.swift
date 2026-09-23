@@ -117,11 +117,15 @@ enum ModelFitSelfTest {
 
     // MARK: - search-retrieval
 
-    /// SearchClient's retrieval leg (`agenticLoop`'s `lmChat(model: Settings.searchModel, ...)` and
-    /// `localAnswerSync`'s `ModelManager.shared.ensureReady(Settings.searchModel)`) hands LM Studio
-    /// exactly `Settings.searchModel`, with no substitution and no consultation of the installed catalog
-    /// at all. Whatever `ensureReady` says about that literal id, under the SAME injected capacity seam
-    /// those two production call sites route through, IS what SearchClient would ask LM Studio to run.
+    /// SearchClient's retrieval leg now goes through one seam, `SearchClient.retrievalModelID()`, that
+    /// both production call sites (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read
+    /// instead of `Settings.searchModel` directly — the question "what will retrieval actually ask LM
+    /// Studio for" has one testable answer. (A) pins qwen as the intended preference (fixture sanity,
+    /// not the defect — qwen stays correct to prefer). (B), modeled on `runFit`, asserts against what
+    /// the seam RESOLVES to, not the raw scalar: today the seam is a pass-through, so it resolves to
+    /// qwen, qwen does not fit this budget, and the arm is red because the RESOLVED model does not fit —
+    /// not because the assertion is unsatisfiable. A route-resolution fix that makes the seam resolve a
+    /// fitting model with (A) still true turns this arm green with no further change here.
     private static func runSearchRetrieval() -> Bool {
         print("=== ViddyDictate modelfit — search-retrieval arm ===")
         let reporter = SelfTestReporter()
@@ -133,12 +137,13 @@ enum ModelFitSelfTest {
         let dependencies = capacityDependencies(
             installedSizes: [qwenID: qwenSizeBytes, gemmaID: gemmaSizeBytes],
             budget: fixtureBudgetBytes)
+        let resolvedModelID = SearchClient.retrievalModelID()
         let readiness = ModelManager().ensureReady(
-            Settings.searchModel, ttlOverrideSeconds: 60, dependencies: dependencies)
+            resolvedModelID, ttlOverrideSeconds: 60, dependencies: dependencies)
         reporter.record(
-            "the retrieval leg's fixed model id is loadable on this machine, even though a smaller "
-                + "installed model would fit",
-            readiness == .ready, "readiness=\(readiness)")
+            "the model the retrieval leg resolves to is loadable on this machine, even though a "
+                + "smaller installed model would fit",
+            readiness == .ready, "resolved=\(resolvedModelID) readiness=\(readiness)")
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "search-retrieval"))
