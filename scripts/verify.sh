@@ -525,6 +525,24 @@ tier_deterministic() {
             "$TEST_APP" --hang-watchdog-selftest || true
         run_notes_http_gate || true
         run_codex_isolation_selftest_gate || true
+        run_gate deterministic "model-fit search-retrieval arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only search-retrieval || true
+        run_gate deterministic "model-fit fit arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only fit || true
+        run_gate deterministic "model-fit retry arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only retry || true
+        run_gate deterministic "model-fit catalog arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only catalog || true
+        run_gate deterministic "model-fit seed arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only seed || true
+        run_gate deterministic "model-fit preference control arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-selftest --only preference || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi
