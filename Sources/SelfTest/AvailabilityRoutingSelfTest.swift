@@ -208,7 +208,8 @@ enum AvailabilityRoutingSelfTest {
 
     private static func checkPerRunFailureExclusions(_ check: (String, Bool) -> Void) {
         print("--- a running request may descend the same ladder after provider failures ---")
-        let store = fixture(present: [.local, .claude, .codex], pin: .codex)
+        let store = fixture(present: [.local, .claude, .codex], pin: .codex,
+                            localModels: [LMStudioModelOption(modelID: "google/gemma-4-e4b", label: "Gemma")])
         defer { discard(store) }
         let route = LLMRouteID.custom("forced-cloud-failure")
         try? store.selectProvider(.codex, for: route)
@@ -290,7 +291,9 @@ enum AvailabilityRoutingSelfTest {
                 && resolution.offReason?.contains("automatic cloud fallback is disabled") == true)
 
         // The pin is honored again the moment its provider comes back: no sticky hop.
-        store.setAvailabilityState(.available, for: .local)
+        store.setLocalAvailabilityState(.available, models: [
+            LMStudioModelOption(modelID: LLMProviderDefaults.localCleanupModelID, label: "qwen"),
+        ])
         check("the route returns to its pin as soon as that provider is available again",
               store.resolveRoute(.cleanupL1) == .pinned(pinBefore))
 

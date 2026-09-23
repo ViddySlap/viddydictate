@@ -153,8 +153,7 @@ enum LLMAvailabilityRouting {
             excludingModelIDs: Set<String> = []
         ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?)? {
             guard let configured = bundle(.local) else { return nil }
-            guard let localModels else { return (configured, nil) }
-            guard !localModels.isEmpty else { return nil }
+            guard let localModels, !localModels.isEmpty else { return nil }
 
             func fits(_ modelID: String) -> Bool { localCapacity?.fits(modelID) ?? true }
 

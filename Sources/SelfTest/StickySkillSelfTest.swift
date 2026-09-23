@@ -878,6 +878,9 @@ enum StickySkillSelfTest {
                             pin: pinnedBundle,
                             bundle: { fallbackBundles[$0] },
                             availability: { _ in .available },
+                            localModels: [LMStudioModelOption(modelID: "qwen3-coder-30b-a3b-instruct-mlx", label: "qwen3-coder-30b-a3b-instruct-mlx")],
+                            localCapacity: LLMLocalCapacityFacts(
+                                sizeBytes: { _ in 1_000_000_000 }, wiredBytes: 0, budgetBytes: 50_000_000_000),
                             failedProviders: failures)
                     },
                     attempt: { resolution, _, finish in
