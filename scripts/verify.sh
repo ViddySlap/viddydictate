@@ -543,6 +543,9 @@ tier_deterministic() {
         run_gate deterministic "model-fit preference control arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --modelfit-selftest --only preference || true
+        run_gate deterministic "model-fit retry wiring arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --modelfit-wiring-selftest || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

@@ -368,6 +368,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelFitSelftest: .init(tier: .deterministic) { arguments in
         ModelFitSelfTest.run(arguments: arguments)
     },
+    // RTY1: proves the capacity step-down fires from the production dispatch seam, not just from the
+    // policy function. Takes no --only; it is one arm.
+    .modelFitRetryWiringSelftest: .init(tier: .deterministic) { _ in
+        ModelFitRetryWiringSelfTest.run()
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

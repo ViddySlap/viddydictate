@@ -252,9 +252,20 @@ enum TextTransformClient {
     typealias RetryRequestBuilder = (LLMProviderBundle) -> TextTransformRequest
     typealias ResultMap = (CleanupClient.Result) -> CleanupClient.Result
 
+    /// Re-resolve a route after the model that just ran refused for RAM capacity, excluding it. Returning
+    /// a resolution naming the SAME model, or nil, declines the step-down. See `transformResolved`.
+    typealias CapacityStepDown = (String) -> LLMRouteResolution?
+
     /// Dispatch exactly once to the selected provider. There is deliberately no fallback loop and no
     /// implicit retry. Existing call sites keep receiving the exact `CleanupClient.Result` type their
     /// landing/fallback closures already consume.
+    ///
+    /// ONE exception exists, and it lives a level up in `transformResolved`, not here: a caller that
+    /// passes `capacityStepDown` gets a single re-dispatch after a RAM-capacity refusal. It is opt-in,
+    /// it is bounded at one, and it can only move between local models, so "dispatch exactly once" is
+    /// still literally true of this function. The exception was added because the alternative on a small
+    /// Mac was a dead hotkey: routing had already substituted a model it believed would fit, and when the
+    /// live load disagreed there was nothing between that and the raw transcript.
     static func transform(_ request: TextTransformRequest,
                           local: @escaping AsyncAdapter,
                           claude: @escaping AsyncAdapter = claudeTransform,
@@ -288,6 +299,14 @@ enum TextTransformClient {
     /// When the route is off, no adapter is invoked and no retry is armed (there is no available provider to
     /// retry with). The off reason is returned through the ordinary `.unavailable` Result, which leaves the
     /// existing raw-fallback landing exactly as it is: the transcript still lands.
+    /// `capacityStepDown` is the opt-in single re-dispatch described on `transform`. Supplied today only
+    /// by the cleanup path. When the first attempt comes back as the app-authored over-budget refusal, the
+    /// closure re-resolves the route excluding the model that ran; if that yields a runnable, genuinely
+    /// DIFFERENT local model, this dispatches once more and the caller sees only that second result. The
+    /// first attempt's armed Retry is superseded by the second dispatch's own epoch, so the user is never
+    /// offered a Retry against the model that just refused. A step-down that finds nothing falls through
+    /// to the first result untouched, so the refusal sentence and the raw-transcript landing are exactly
+    /// what they were.
     static func transformResolved(_ resolution: LLMRouteResolution,
                                   route: LLMRouteID,
                                   requestForBundle: @escaping RetryRequestBuilder,
@@ -296,6 +315,7 @@ enum TextTransformClient {
                                   codex: @escaping AsyncAdapter = codexTransform,
                                   resultMap: @escaping ResultMap = { $0 },
                                   arming: TextTransformArming = .armed,
+                                  capacityStepDown: CapacityStepDown? = nil,
                                   retryCompletion: Completion? = nil,
                                   completion: @escaping Completion) {
         switch resolution {
@@ -304,10 +324,46 @@ enum TextTransformClient {
                                              arming: arming)))
         case .pinned(let bundle), .degraded(let bundle, _, _, _):
             logResolution(resolution, route: route)
+            let landing: Completion = { result in
+                guard let stepDown = capacityStepDown,
+                      let stepped = capacityStepDownResolution(
+                        stepDown, after: result, ranModelID: bundle.modelID, route: route)
+                else {
+                    completion(result)
+                    return
+                }
+                // The one re-dispatch: capacityStepDown is nil on the way in, so this cannot recur.
+                transformResolved(stepped, route: route, requestForBundle: requestForBundle,
+                                  local: local, claude: claude, codex: codex,
+                                  resultMap: resultMap, arming: arming,
+                                  retryCompletion: retryCompletion, completion: completion)
+            }
             transform(requestForBundle(bundle), local: local, claude: claude, codex: codex,
                       resultMap: resultMap, arming: arming, retryRequest: requestForBundle,
-                      retryCompletion: retryCompletion, completion: completion)
+                      retryCompletion: retryCompletion, completion: landing)
         }
+    }
+
+    /// Decide whether a result earns the single capacity re-dispatch, and on what. Three ways to decline,
+    /// all of which leave the first result exactly as it was: the failure was not a RAM-capacity refusal
+    /// (a timeout or a bad output means the model ran, so a smaller one is no answer); the step-down found
+    /// no runnable route; or it came back naming the same model, which would just fail again.
+    private static func capacityStepDownResolution(
+        _ stepDown: CapacityStepDown,
+        after result: CleanupClient.Result,
+        ranModelID: String,
+        route: LLMRouteID
+    ) -> LLMRouteResolution? {
+        guard case .unavailable(let reason) = result,
+              reason == CleanupClient.overBudgetMessage else { return nil }
+        guard let stepped = stepDown(ranModelID), let next = stepped.bundle,
+              next.modelID != ranModelID
+        else {
+            Log.write("route \(route.rawValue) capacity step-down declined after \(ranModelID)")
+            return nil
+        }
+        Log.write("route \(route.rawValue) capacity step-down \(ranModelID) -> \(next.modelID)")
+        return stepped
     }
 
     /// Synchronous twin for the already-backgrounded search path.

@@ -1164,6 +1164,21 @@ final class DictationController {
         // provider does, else the route reports itself off and the raw transcript still lands below.
         let resolution = Settings.modelsPower.resolveRoute(
             route, fallback: .local(Settings.cleanupModel))
+        // RTY1: cleanup is the one path that steps down after a RAM-capacity refusal. Resolution already
+        // avoids a model this machine cannot hold, but that judgement is made from wired bytes read a
+        // moment earlier; when the actual load disagrees, the only thing left was the raw transcript. One
+        // re-resolve, excluding the model that ACTUALLY ran (not the pin - routing may already have
+        // substituted), lands the next largest installed model that fits. `effectiveResolution` tracks
+        // which resolution finally ran so the upgrade offer below describes the model the user got.
+        var effectiveResolution = resolution
+        let capacityStepDown: TextTransformClient.CapacityStepDown = { ranModelID in
+            let stepped = Settings.modelsPower.resolveRoute(
+                route, fallback: .local(Settings.cleanupModel),
+                failedProviders: [.local: CleanupClient.overBudgetMessage],
+                failedLocalModelID: ranModelID)
+            effectiveResolution = stepped
+            return stepped
+        }
         // Every provider returns the shared `CleanupClient.Result`, so landing/raw fallback stays in one
         // closure. Power Mode never participates in the dispatch choice.
         var fallbackReceipt: CleanupFallbackReceipt?
@@ -1189,7 +1204,7 @@ final class DictationController {
                         self.finalize(delivered: cleaned, raw: raw, cleaned: cleaned, mode: .cleanup,
                                       level: effectiveLevel.rawValue, historyID: takeID,
                                       lateRecovery: recovered)
-                        if let offer = resolution.upgradeOffer {
+                        if let offer = effectiveResolution.upgradeOffer {
                             self.hud.toast(offer.message)
                         }
                     }
@@ -1251,7 +1266,8 @@ final class DictationController {
                                       model: req.bundle.modelID,
                                       systemPrompt: req.systemPrompt,
                                       completion: done)
-            }, retryCompletion: onRetryResult, completion: onResult)
+            }, capacityStepDown: capacityStepDown,
+            retryCompletion: onRetryResult, completion: onResult)
     }
 
     /// Replace the first attempt's raw fallback at its captured destination. A retry failure only refreshes

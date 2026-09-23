@@ -332,8 +332,14 @@ final class ModelsPowerSettingsStore {
     /// The three reads below each take the lock separately rather than as one transaction. Availability is
     /// live state that can change between any two instructions anyway, so a resolution is a snapshot of the
     /// moment it was taken, and the durable half it reads cannot be mutated by an availability change.
+    ///
+    /// `failedLocalModelID` names the model the failed attempt ACTUALLY ran, which is not always the pin:
+    /// when this machine cannot hold the configured model, routing already substitutes a smaller installed
+    /// one, so a capacity refusal on the second pass is a refusal of the SUBSTITUTE. Passing nil keeps the
+    /// original behavior (blame the pin) byte-for-byte for every caller that does not step down.
     func resolveRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
-                      failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
+                      failedProviders: [LLMProvider: String] = [:],
+                      failedLocalModelID: String? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
         let pin = selectedBundle(for: route, fallback: fallback)
         return LLMAvailabilityRouting.resolve(
@@ -346,15 +352,17 @@ final class ModelsPowerSettingsStore {
             localModels: localModels,
             localCapacity: Self.liveLocalCapacity(models: localModels),
             localFailure: Self.localCapacityRefusal(
-                in: failedProviders, failedModelID: pin.modelID),
+                in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
             failedProviders: failedProviders)
     }
 
     /// Classify a per-run Local failure into the typed reason routing needs in order to step down to a
     /// smaller installed model. Only the app-authored over-budget sentence is a model-size refusal;
     /// every other Local failure (bad output, a timeout, an unreachable server) stays a provider-level
-    /// failure and keeps the route off. The failed model is the one this route pinned, which is what the
-    /// first attempt ran; the caller can only ever ask for one step-down, so no shrinking loop exists.
+    /// failure and keeps the route off. `failedModelID` is whatever the caller says actually ran - the
+    /// dispatched bundle's model when a caller steps down, the pin otherwise - because a substituted
+    /// route runs a model the pin never names. The caller can only ever ask for one step-down, so no
+    /// shrinking loop exists.
     private static func localCapacityRefusal(
         in failedProviders: [LLMProvider: String], failedModelID: String
     ) -> LLMLocalRouteFailure? {
