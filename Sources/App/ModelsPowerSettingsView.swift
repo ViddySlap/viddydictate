@@ -197,6 +197,7 @@ final class ModelsPowerSettingsView: NSView {
         case .cleanupL3: return "Summarize"
         case .promptPrep: return "Prompt prep (Option+P)"
         case .email: return "Email (Option+M)"
+        case .searchRetrieval: return "Local search retrieval (Option+L)"
         case .searchLocalSynth: return "Local search synthesis (Option+L)"
         case .searchGeminiSynth: return "Gemini search synthesis (Option+G)"
         case .custom: return "Custom hotkey"

@@ -35,13 +35,14 @@ enum LLMRouteID: Hashable, Codable, RawRepresentable {
     case cleanupL3
     case promptPrep
     case email
+    case searchRetrieval
     case searchLocalSynth
     case searchGeminiSynth
     case custom(String)
 
     static let builtIns: [LLMRouteID] = [
         .cleanupL1, .cleanupL2, .cleanupL3, .promptPrep, .email,
-        .searchLocalSynth, .searchGeminiSynth,
+        .searchRetrieval, .searchLocalSynth, .searchGeminiSynth,
     ]
 
     static let cleanupRoutes: [LLMRouteID] = [.cleanupL1, .cleanupL2, .cleanupL3]
@@ -61,6 +62,7 @@ enum LLMRouteID: Hashable, Codable, RawRepresentable {
         case "cleanupL3":         self = .cleanupL3
         case "promptPrep":        self = .promptPrep
         case "email":             self = .email
+        case "searchRetrieval":   self = .searchRetrieval
         case "searchLocalSynth":  self = .searchLocalSynth
         case "searchGeminiSynth": self = .searchGeminiSynth
         default:
@@ -77,6 +79,7 @@ enum LLMRouteID: Hashable, Codable, RawRepresentable {
         case .cleanupL3:         return "cleanupL3"
         case .promptPrep:        return "promptPrep"
         case .email:             return "email"
+        case .searchRetrieval:   return "searchRetrieval"
         case .searchLocalSynth:  return "searchLocalSynth"
         case .searchGeminiSynth: return "searchGeminiSynth"
         case .custom(let id):    return "custom:\(id)"
@@ -398,6 +401,18 @@ enum LLMProviderDefaults {
                 CodexRatifiedPromptDefaults.email.id,
                 CodexRatifiedPromptDefaults.email.contentHash),
             ratifiedCodexPromptVariant: CodexRatifiedPromptDefaults.email),
+        .searchRetrieval: RouteConfig(
+            basePromptVersion: "search-synthesis-v1",
+            basePromptIdentityText: defaultSearchSynthPrompt,
+            testedPromptRecipe: .single(defaultSearchSynthPrompt),
+            localModelID: localCleanupModelID,
+            claudeBundle: ratifiedClaude(claudeHaikuModelID, effort: "high"),
+            codexBundle: ratifiedCodex(
+                CodexShippedDefaults.lunaLow.model,
+                effort: CodexShippedDefaults.lunaLow.effort),
+            envelopeShape: "search-question-results",
+            ratifiedCodexPromptIdentity: (
+                "search-synthesis-v1", "ae106bbe1ac41a6a1d59496f17d1b81e2ea8caa35b66cf738313ad09273a7262")),
         .searchLocalSynth: RouteConfig(
             basePromptVersion: "search-synthesis-v1",
             basePromptIdentityText: defaultSearchSynthPrompt,

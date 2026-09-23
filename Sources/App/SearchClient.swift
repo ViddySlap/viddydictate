@@ -177,7 +177,8 @@ enum SearchClient {
     /// `ModelsPowerSettingsStore.resolveRoute`. Both call sites below call this with no argument, so
     /// they keep resolving against the real, live store; only a test supplies anything else.
     static func retrievalModelID(store: ModelsPowerSettingsStore = Settings.modelsPower) -> String {
-        Settings.searchModel
+        store.resolveRoute(.searchRetrieval, fallback: .local(Settings.searchModel)).bundle?.modelID
+            ?? Settings.searchModel
     }
 
     /// Run the qwen tool-calling loop and return the union of retrieved results (or a failure). Mirrors

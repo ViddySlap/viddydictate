@@ -164,6 +164,7 @@ enum CloudUpdateSurface {
         case .cleanupL3: return "cleanup L3"
         case .promptPrep: return "prompt prep"
         case .email: return "email"
+        case .searchRetrieval: return "local search retrieval"
         case .searchLocalSynth: return "local search synthesis"
         case .searchGeminiSynth: return "Gemini search synthesis"
         case .custom(let id): return "custom \(id)"

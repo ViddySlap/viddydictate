@@ -35,7 +35,7 @@ enum ModelRoutingSelfTest {
         print("--- stable LLM route ids ---")
         let expected = [
             "cleanupL1", "cleanupL2", "cleanupL3", "promptPrep", "email",
-            "searchLocalSynth", "searchGeminiSynth",
+            "searchRetrieval", "searchLocalSynth", "searchGeminiSynth",
         ]
         check("built-in route ids are exact and ordered", LLMRouteID.builtIns.map(\.rawValue) == expected)
         let custom = LLMRouteID.custom("A1-user-choice")
@@ -61,6 +61,7 @@ enum ModelRoutingSelfTest {
         let localExpected: [LLMRouteID: LLMProviderBundle] = [
             .cleanupL1: .local(qwen), .cleanupL2: .local(qwen), .cleanupL3: .local(qwen),
             .promptPrep: .local(qwen), .email: .local(gemma),
+            .searchRetrieval: .local(qwen),
             .searchLocalSynth: .local(gemma), .searchGeminiSynth: .local(gemma),
             custom: .local(qwen),
         ]
@@ -70,6 +71,7 @@ enum ModelRoutingSelfTest {
             .cleanupL3: .claude(sonnet, effort: "medium"),
             .promptPrep: .claude(sonnet, effort: "medium"),
             .email: .claude(sonnet, effort: "medium"),
+            .searchRetrieval: .claude(haiku, effort: "high"),
             .searchLocalSynth: .claude(haiku, effort: "high"),
             .searchGeminiSynth: .claude(haiku, effort: "medium"),
             custom: .claude(sonnet, effort: "high"),
