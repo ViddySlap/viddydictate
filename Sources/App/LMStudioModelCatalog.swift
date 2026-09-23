@@ -5,10 +5,12 @@ import Foundation
 struct LMStudioModelOption: Equatable {
     let modelID: String
     let label: String
+    let sizeBytes: Int64?
 
-    init(modelID: String, label: String) {
+    init(modelID: String, label: String, sizeBytes: Int64? = nil) {
         self.modelID = modelID
         self.label = label
+        self.sizeBytes = sizeBytes
     }
 }
 
@@ -93,7 +95,8 @@ enum LMStudioModelCatalog {
     static func parse(_ data: Data) -> [LMStudioModelOption]? {
         parseInstalled(data)?.compactMap { model in
             guard model.type == "llm" else { return nil }
-            return LMStudioModelOption(modelID: model.modelID, label: model.label)
+            return LMStudioModelOption(
+                modelID: model.modelID, label: model.label, sizeBytes: model.sizeBytes)
         }
     }
 

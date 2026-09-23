@@ -67,6 +67,44 @@ enum LLMRouteResolution: Equatable {
     }
 }
 
+/// Local-model capacity facts needed to judge fit, injected so LLMAvailabilityRouting itself never
+/// spawns a process or reads the kernel. `fits` runs the identical arithmetic
+/// ModelManager.fits/estimatedIncomingBytes already implement rather than a second copy.
+struct LLMLocalCapacityFacts {
+    let sizeBytes: (String) -> Int64?
+    let wiredBytes: UInt64
+    let budgetBytes: UInt64
+
+    func fits(_ modelID: String) -> Bool {
+        guard let size = sizeBytes(modelID), size > 0,
+              let incoming = ModelManager.estimatedIncomingBytes(sizeBytes: size)
+        else { return true } // unmeasured: do not block a model we cannot size
+        return ModelManager.fits(wiredBytes: wiredBytes, incomingBytes: incoming, budgetBytes: budgetBytes)
+    }
+
+    /// A conservative stand-in for a caller that has not wired in live capacity facts.
+    /// ModelsPowerSettingsStore.resolveRoute always injects the real machine's facts instead; this
+    /// default is only reached by a bare policy call (the self-tests call resolve() directly).
+    /// Sized to a 16 GB Mac at the shipped default budget slider position (54) - the same
+    /// conservative machine ComponentPicker's own O2 arithmetic already treats as unable to hold
+    /// qwen - so a caller that supplies nothing still refuses an unmanageable model instead of
+    /// defaulting open. This is a fixed constant, NOT a live kernel read.
+    static let conservativeDefault: LLMLocalCapacityFacts = {
+        let assumedPhysicalBytes: UInt64 = 16 * 1_073_741_824
+        let assumedWireLimit = Double(assumedPhysicalBytes) * 0.82
+        let assumedBudget = UInt64(assumedWireLimit * SystemMemory.realFraction(forSliderPosition: 54.0))
+        return LLMLocalCapacityFacts(
+            sizeBytes: { modelID in
+                ComponentPicker.RowID.allCases
+                    .first { $0.modelID == modelID }
+                    .flatMap { ComponentPicker.bytes(for: $0) }
+                    .map(Int64.init)
+            },
+            wiredBytes: 0,
+            budgetBytes: assumedBudget)
+    }()
+}
+
 /// Availability-resolved routing (Public V1 locked decision 4): the explicit user pin if it is set and
 /// available, else the highest-preference available provider, else the route reports itself off with a
 /// specific reason.
@@ -83,26 +121,37 @@ enum LLMAvailabilityRouting {
 
     /// Pure policy. `bundle` supplies a provider's configured bundle for the route (nil when the route has
     /// no bundle for it), `availability` supplies live provider state, and `localModels` is the measured
-    /// installed-model catalog when Local has been probed. The provider map and catalog are only read for
-    /// a provider the ladder reaches.
+    /// installed-model catalog when Local has been probed. `localCapacity` carries the machine's
+    /// wired/budget facts and per-model sizes so a Local substitution cannot hand LM Studio a model this
+    /// Mac cannot hold. The provider map and catalog are only read for a provider the ladder reaches.
     static func resolve(pin: LLMProviderBundle,
                         bundle: (LLMProvider) -> LLMProviderBundle?,
                         availability: (LLMProvider) -> LLMProviderAvailabilityState,
                         localModels: [LMStudioModelOption]? = nil,
+                        localCapacity: LLMLocalCapacityFacts? = .conservativeDefault,
                         failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
         let pinState = availability(pin.provider)
 
-        /// Resolve the configured Local arm against the measured installed catalog. The provider's
-        /// catalog order is intentionally preserved: LM Studio is the authority for its own model order,
-        /// and a deterministic first entry is safer than inventing a size/quality heuristic here.
+        /// Resolve the configured Local arm against the measured installed catalog, preferring the
+        /// configured model only when this machine can actually hold it. When it cannot, the largest
+        /// installed model that DOES fit runs instead; the substitution still carries the upgrade offer.
+        /// `localCapacity` is injected (never read here) so this stays a pure policy function.
         func localCandidate() -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?)? {
             guard let configured = bundle(.local) else { return nil }
             guard let localModels else { return (configured, nil) }
             guard !localModels.isEmpty else { return nil }
-            if localModels.contains(where: { $0.modelID == configured.modelID }) {
+
+            func fits(_ modelID: String) -> Bool { localCapacity?.fits(modelID) ?? true }
+
+            if localModels.contains(where: { $0.modelID == configured.modelID }), fits(configured.modelID) {
                 return (configured, nil)
             }
-            guard let replacement = localModels.first else { return nil }
+            guard let replacement = localModels
+                .filter({ fits($0.modelID) })
+                .max(by: {
+                    (localCapacity?.sizeBytes($0.modelID) ?? 0) < (localCapacity?.sizeBytes($1.modelID) ?? 0)
+                })
+            else { return nil }
             return (
                 .local(replacement.modelID),
                 LLMRouteUpgradeOffer(

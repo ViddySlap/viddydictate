@@ -334,15 +334,31 @@ final class ModelsPowerSettingsStore {
     /// moment it was taken, and the durable half it reads cannot be mutated by an availability change.
     func resolveRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
                       failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
-        LLMAvailabilityRouting.resolve(
+        let localModels = availableLocalModelOptions()
+        return LLMAvailabilityRouting.resolve(
             pin: selectedBundle(for: route, fallback: fallback),
             bundle: { provider in
                 rememberedBundle(for: provider, route: route)
                     ?? LLMProviderDefaults.testedBundle(for: provider, route: route)
             },
             availability: { availabilityState(for: $0) },
-            localModels: availableLocalModelOptions(),
+            localModels: localModels,
+            localCapacity: Self.liveLocalCapacity(models: localModels),
             failedProviders: failedProviders)
+    }
+
+    /// Real local-model capacity facts for route resolution: sizes from the already-cached installed
+    /// catalog, current wired bytes and the slider's budget from the kernel (cheap sysctl/mach reads,
+    /// no process spawn). Any of the three being unreadable, or no local catalog measured yet, means
+    /// "do not filter" (nil) rather than a facts struct that would refuse everything with fabricated
+    /// zeros.
+    private static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
+        guard let models, !models.isEmpty,
+              let wired = SystemMemory.wiredBytes,
+              let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
+        else { return nil }
+        let sizes = Dictionary(uniqueKeysWithValues: models.compactMap { m in m.sizeBytes.map { (m.modelID, $0) } })
+        return LLMLocalCapacityFacts(sizeBytes: { sizes[$0] }, wiredBytes: wired, budgetBytes: budget)
     }
 
     // MARK: durable mutations

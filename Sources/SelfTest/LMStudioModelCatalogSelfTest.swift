@@ -67,7 +67,8 @@ enum LMStudioModelCatalogSelfTest {
         reporter.record(
             "lms ls parser preserves reported LLM order while filtering embeddings, blanks, and duplicates",
             parsed == [
-                LMStudioModelOption(modelID: "vendor/alpha-model", label: "Alpha Model (4.25 GB)"),
+                LMStudioModelOption(modelID: "vendor/alpha-model", label: "Alpha Model (4.25 GB)",
+                                    sizeBytes: 4_250_000_000),
                 LMStudioModelOption(modelID: "vendor/beta-model", label: "beta-model"),
                 LMStudioModelOption(modelID: "vendor/gamma-model", label: "Gamma Model"),
                 LMStudioModelOption(modelID: "vendor/delta-model", label: "Delta Model"),
