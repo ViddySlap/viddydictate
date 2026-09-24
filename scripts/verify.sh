@@ -546,6 +546,33 @@ tier_deterministic() {
         run_gate deterministic "model-fit retry wiring arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --modelfit-wiring-selftest || true
+        run_gate deterministic "app-update compare arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --app-update-selftest --only compare || true
+        run_gate deterministic "app-update failures arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --app-update-selftest --only failures || true
+        run_gate deterministic "app-update nag arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --app-update-selftest --only nag || true
+        run_gate deterministic "app-update link arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --app-update-selftest --only link || true
+        run_gate deterministic "app-update control arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --app-update-selftest --only control || true
+        run_gate deterministic "daemon-install bundled arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --daemon-install-selftest --only bundled || true
+        run_gate deterministic "daemon-install installs arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --daemon-install-selftest --only installs || true
+        run_gate deterministic "daemon-install upgrade arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --daemon-install-selftest --only upgrade || true
+        run_gate deterministic "daemon-install absent arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --daemon-install-selftest --only absent || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

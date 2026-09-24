@@ -41,6 +41,21 @@ struct HUDThinkingActivity {
 
 // MARK: - HUD panel
 
+/// The panel's content view. Its ONLY job is to turn a click on a toast that carries an action into
+/// that action. With no action (`onClick == nil`) it forwards to `super` exactly as a plain `NSView`
+/// would, so every existing caller keeps its byte-for-byte behavior and no new hit-testing happens.
+private final class HUDToastClickView: NSView {
+    var onClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if let onClick {
+            onClick()
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 final class HUDPanel: NSObject {
     var onLock: (() -> Void)?
     var onStop: (() -> Void)?
@@ -100,6 +115,12 @@ final class HUDPanel: NSObject {
     private var caretOn = true
     private var caretTimer: Timer?
     private var toastTimer: Timer?
+    /// The optional action a clickable toast runs. Set by `toast(_:duration:forceFull:action:)` and
+    /// cleared on every new toast, dismiss, or hide, so a stale action can never fire.
+    private var toastAction: (() -> Void)?
+    /// The panel content view, kept so the click handler can be installed only while a toast carries an
+    /// action (and removed again on dismiss), leaving existing toasts untouched.
+    private var toastClickView: HUDToastClickView?
     private var showRec = true
     /// The single source of truth for the current layout (see `HUDDisplayMode`). Every transition sets it;
     /// `relayout()` switches on it. Replaces the old thinking/toasting/toastForceFull booleans.
@@ -152,8 +173,9 @@ final class HUDPanel: NSObject {
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        let root = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        let root = HUDToastClickView(frame: panel.contentRect(forFrameRect: panel.frame))
         root.wantsLayer = true
+        toastClickView = root
 
         effect.wantsLayer = true
         effect.material = .hudWindow
@@ -244,6 +266,15 @@ final class HUDPanel: NSObject {
     @objc private func lockClicked() { onLock?() }
     @objc private func stopClicked() { onStop?() }
     @objc private func settingsClicked() { onSettings?() }
+
+    /// A click on a toast that carries an action runs it once and dismisses; the stored action is
+    /// cleared before running so a re-entrant click cannot fire it twice.
+    private func toastClicked() {
+        guard let action = toastAction else { return }
+        toastAction = nil
+        action()
+        dismissToast()
+    }
 
     // MARK: layout
 
@@ -429,6 +460,8 @@ final class HUDPanel: NSObject {
 
     func hide() {
         toastTimer?.invalidate(); caretTimer?.invalidate(); caretTimer = nil
+        toastAction = nil
+        toastClickView?.onClick = nil
         thinkingActivity.setProcessing(false)
         mode = .fullRecording            // neutral resting mode; the next show()/toast() re-derives it
         pillToastLabel.isHidden = true
@@ -706,8 +739,11 @@ final class HUDPanel: NSObject {
     /// Show a transient status message. In Final-only a plain toast renders inside the scope pill (a
     /// capsule grown to fit); pass `forceFull: true` (as `answer()` does) to keep the full readable box
     /// even in Final-only. Live mode always uses the full box.
-    func toast(_ message: String, duration: TimeInterval = 3.5, forceFull: Bool = false) {
+    func toast(_ message: String, duration: TimeInterval = 3.5, forceFull: Bool = false,
+               action: (() -> Void)? = nil) {
         toastTimer?.invalidate()
+        toastAction = action
+        toastClickView?.onClick = action == nil ? nil : { [weak self] in self?.toastClicked() }
         caretTimer?.invalidate(); caretTimer = nil
         refreshDisplaySettings()          // re-read Power Mode so the pill/full pick is current
         mode = toastMode(forceFull: forceFull)
@@ -732,6 +768,8 @@ final class HUDPanel: NSObject {
     /// auditing every toast call site) means it holds for every current and future toast.
     private func dismissToast() {
         toastTimer?.invalidate(); toastTimer = nil
+        toastAction = nil
+        toastClickView?.onClick = nil
         if thinkingActivity.isActive {
             presentThinking()
             return

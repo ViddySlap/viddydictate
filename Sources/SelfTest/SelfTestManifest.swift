@@ -373,10 +373,15 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelFitRetryWiringSelftest: .init(tier: .deterministic) { _ in
         ModelFitRetryWiringSelfTest.run()
     },
-    // DMGD1: four arms over the injected DaemonInstaller (bundled/installs/upgrade/absent). Excluded
-    // tier: it is a build-artifact gate and the task forbids adding anything to scripts/verify.sh.
-    .daemonInstallSelftest: .init(tier: .excluded) { arguments in
+    // DMGD1: four arms over the injected DaemonInstaller (bundled/installs/upgrade/absent). Deterministic:
+    // a build-artifact gate whose four arms are each exercised by a scripts/verify.sh gate.
+    .daemonInstallSelftest: .init(tier: .deterministic) { arguments in
         DaemonInstallSelfTest.run(arguments: arguments)
+    },
+    // DMGU1: five arms over the injected-transport app-update policy. Deterministic: no network, no
+    // browser, no real HOME; each arm is exercised by a scripts/verify.sh gate.
+    .appUpdateSelftest: .init(tier: .deterministic) { arguments in
+        AppUpdateSelfTest.run(arguments: arguments)
     },
 ]
 

@@ -177,6 +177,12 @@ final class DictationController {
     /// available, `OneShotRegistry` has a documented read-only HUD fallback.
     var onOpenSearchResultNote: ((String, String) -> Void)?
 
+    /// Fires once per SUCCESSFUL dictation, after `finalize()`'s `finish` tail has torn the take down, so a
+    /// listener can never be reached at launch, mid-take, or on an error / cancel / nothing-heard path. DMGU1's
+    /// post-first-dictation update toast is the only listener and a `Bool` latch on the delegate makes it
+    /// once-per-app-session.
+    var onDictationSucceeded: (() -> Void)?
+
     init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator) {
         self.callbacks = callbacks
         self.notesDelivery = notesDelivery
@@ -1393,6 +1399,7 @@ final class DictationController {
             self.teardownTake(.full)
             self.note(self.readyHint)
             completion?(receipt)
+            self.onDictationSucceeded?()
             return receipt
         }
         TranscriptionHistory.shared.record(delivered: delivered, raw: raw, cleaned: cleaned,

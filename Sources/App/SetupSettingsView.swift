@@ -41,6 +41,11 @@ final class SetupSettingsView: NSView {
     /// One check at a time. The button is disabled while a check runs, so the state the user sees and the
     /// state that guards re-entry are the same fact rather than two that can disagree.
     private var checking = false
+    /// DMGU1 (C): the app-version row's own state. `appUpdateOffer` is the release the last Check Now found.
+    /// Construction only READS the running version and the persisted last-checked time; the network is
+    /// touched only when Check Now runs, and nothing is ever downloaded or replaced.
+    private var appUpdateChecking = false
+    private var appUpdateOffer: AppUpdateCheck.Offer?
 
     init(width: CGFloat,
          observer: @escaping Observer = Preflight.observe,
@@ -190,6 +195,10 @@ final class SetupSettingsView: NSView {
             }
         }
 
+        // DMGU1 (C): the app's own version, last checked time, and a manual check. Last on the tab because
+        // it is app-level bookkeeping rather than a prerequisite for dictating.
+        y = addAppUpdateSection(at: y)
+
         y = add(wrapped(PreflightSurface.footer, x: L, y: y + 4, width: W - 2 * L,
                         size: 10.5, color: .tertiaryLabelColor),
                 id: PreflightSurface.footerIdentifier) + 16
@@ -243,6 +252,101 @@ final class SetupSettingsView: NSView {
     }
 
     @objc private func recheckClicked() { check() }
+
+    // MARK: - DMGU1 (C): app version + manual update check
+
+    /// A small, self-contained row: the running version, when it last checked, a Check Now button, and a
+    /// plain link to the GitHub releases page. Building it touches no network; only Check Now does. Links
+    /// open the release page in the default browser - nothing is downloaded or replaced.
+    private func addAppUpdateSection(at originY: CGFloat) -> CGFloat {
+        addSubview(sectionHeader("VIDDYDICTATE VERSION", y: originY))
+        var y = originY + 18
+        let card = cardView(y: y, id: "setup.appUpdate")
+        let innerW = card.bounds.width
+        var cy: CGFloat = 12
+
+        let version = AppUpdateCheck.runningVersion
+        let versionLabel = text("Version \(version.isEmpty ? "unknown" : version)",
+                                x: 14, y: cy, width: innerW - 28,
+                                size: 11.5, weight: .semibold, color: .labelColor)
+        card.addSubview(versionLabel)
+        cy += 20
+
+        let lastLabel = text(appUpdateLastCheckedText(AppUpdateCheck.nagPolicy.lastChecked),
+                             x: 14, y: cy, width: innerW - 28,
+                             size: 10.5, weight: .regular, color: .secondaryLabelColor)
+        card.addSubview(lastLabel)
+        cy += 22
+
+        let checkNow = NSButton(title: appUpdateChecking ? "Checking..." : "Check Now",
+                                target: self, action: #selector(appUpdateCheckNowClicked))
+        checkNow.bezelStyle = .rounded
+        checkNow.font = .systemFont(ofSize: 11)
+        checkNow.isEnabled = !appUpdateChecking
+        checkNow.frame = NSRect(x: 14, y: cy, width: 100, height: 24)
+        card.addSubview(checkNow)
+
+        let releases = NSButton(title: "View releases on GitHub",
+                                target: self, action: #selector(appUpdateOpenReleasesClicked))
+        releases.bezelStyle = .rounded
+        releases.font = .systemFont(ofSize: 11)
+        releases.frame = NSRect(x: 122, y: cy, width: 170, height: 24)
+        card.addSubview(releases)
+        cy += 32
+
+        if let offer = appUpdateOffer {
+            let available = text("ViddyDictate \(offer.version) is available.",
+                                 x: 14, y: cy, width: innerW - 28,
+                                 size: 10.5, weight: .semibold, color: .systemGreen)
+            card.addSubview(available)
+            let whatsNew = NSButton(title: "See what's new",
+                                    target: self, action: #selector(appUpdateOpenOfferClicked))
+            whatsNew.bezelStyle = .rounded
+            whatsNew.font = .systemFont(ofSize: 11)
+            whatsNew.frame = NSRect(x: 14, y: cy + 18, width: 130, height: 24)
+            card.addSubview(whatsNew)
+            cy += 50
+        }
+
+        card.frame.size.height = cy + 9
+        y = card.frame.maxY + 14
+        return y
+    }
+
+    private func appUpdateLastCheckedText(_ date: Date?) -> String {
+        guard let date else { return "Last checked: Never" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Last checked: \(formatter.string(from: date))"
+    }
+
+    @objc private func appUpdateCheckNowClicked() {
+        guard !appUpdateChecking else { return }
+        appUpdateChecking = true
+        appUpdateOffer = nil
+        rebuild()
+        AppUpdateCheck.check { [weak self] offer in
+            Self.onMain {
+                guard let self else { return }
+                // A completed check is recorded whether or not there is anything to offer.
+                AppUpdateCheck.nagPolicy.recordCheck()
+                self.appUpdateChecking = false
+                self.appUpdateOffer = offer
+                self.rebuild()
+            }
+        }
+    }
+
+    @objc private func appUpdateOpenOfferClicked() {
+        guard let offer = appUpdateOffer else { return }
+        NSWorkspace.shared.open(offer.releasePageURL)
+    }
+
+    @objc private func appUpdateOpenReleasesClicked() {
+        guard let url = URL(string: "https://github.com/ViddySlap/viddydictate/releases") else { return }
+        NSWorkspace.shared.open(url)
+    }
 
     // MARK: - view helpers
 

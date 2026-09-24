@@ -428,6 +428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onOpenSearchResultNote = { [weak self] question, answer in
             self?.notesRegistry.openSearchResult(question: question, answer: answer)
         }
+        // DMGU1 (A): the first successful dictation of the session may announce a newer app release.
+        controller.onDictationSucceeded = { [weak self] in self?.handleFirstSuccessfulDictation() }
         return controller
     }()
     private lazy var settingsWC = SettingsWindowController()
@@ -457,6 +459,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var codexScheduledToastGate = CodexScheduledToastGate()
     private var cloudCheckInFlight = false
     private var pendingCloudCheck: CloudCheckTrigger?
+    /// DMGU1: once-per-app-session latch for the post-first-dictation app-update toast.
+    private var appUpdateFirstDictationHandled = false
     private enum CloudCheckTrigger { case manual, automatic }
     // Multi-window Sticky Notes registry (L6): owns the primary + any secondary notes
     // windows. Retires the old singleton NotesWindowController.
@@ -725,6 +729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(finalOnlyItem)
         menu.addItem(NSMenuItem(title: "Check for cloud updates...",
                                 action: #selector(checkCloudUpdates), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Check for ViddyDictate Updates...",
+                                action: #selector(checkAppUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Sticky Notes", action: #selector(openNotes), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -908,6 +914,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func checkCloudUpdates() {
         requestCloudUpdateCheck(.manual)
+    }
+
+    // MARK: - DMGU1: app-update notification (no auto-update, no auto-download)
+
+    /// DMGU1 (A): the first successful dictation of the app session is the one moment a newer release may be
+    /// announced. It never fires at launch, never mid-take, and never on an error, cancel, or nothing-heard
+    /// path; a nil offer stays invisible. Nothing is ever downloaded or replaced.
+    private func handleFirstSuccessfulDictation() {
+        let work = { [weak self] in
+            guard let self, !self.appUpdateFirstDictationHandled else { return }
+            self.appUpdateFirstDictationHandled = true
+            AppUpdateCheck.check { [weak self] offer in
+                guard let self else { return }
+                AppUpdateCheck.nagPolicy.recordCheck()
+                // A take that is live right now must not be interrupted; skip this launch's toast.
+                guard let offer,
+                      AppUpdateCheck.nagPolicy.shouldNag(offer),
+                      !Settings.isDictationActive else { return }
+                AppUpdateCheck.nagPolicy.markShown()
+                self.controller.hud.toast(
+                    "ViddyDictate \(offer.version) is available. Use Check for ViddyDictate Updates "
+                        + "in the menu bar - click here to see what's new.",
+                    duration: 8,
+                    action: AppUpdateCheck.toastAction(for: offer, nagPolicy: AppUpdateCheck.nagPolicy))
+            }
+        }
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+    }
+
+    /// DMGU1 (B): the menu-bar manual app-update check. A different feature from `checkCloudUpdates`, which
+    /// checks provider CLIs. This one ignores the once-per-launch latch and the dismissed-version silence,
+    /// but still records `lastChecked`; a failure is silent and an active take is never interrupted.
+    @objc private func checkAppUpdates() {
+        guard !Settings.isDictationActive else { return }
+        AppUpdateCheck.check { [weak self] offer in
+            guard let self else { return }
+            AppUpdateCheck.nagPolicy.recordCheck()
+            guard let offer else { return }
+            self.controller.hud.toast(
+                "ViddyDictate \(offer.version) is available - click here to see what's new.",
+                duration: 8,
+                action: AppUpdateCheck.toastAction(for: offer, nagPolicy: AppUpdateCheck.nagPolicy))
+        }
     }
 
     private func requestCloudUpdateCheck(_ trigger: CloudCheckTrigger) {
