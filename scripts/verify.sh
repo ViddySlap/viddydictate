@@ -4,6 +4,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/service-gate-classify.sh
+source "$ROOT/scripts/service-gate-classify.sh"
 
 APP="$ROOT/build/ViddyDictate.app/Contents/MacOS/ViddyDictate"
 TEST_APP="$ROOT/build/ViddyDictateTests.app/Contents/MacOS/ViddyDictateTests"
@@ -24,6 +26,7 @@ trap cleanup_scratch EXIT
 
 FAILURES=0
 UNVERIFIED=0
+SKIPPED=0
 
 usage() {
     cat <<'EOF'
@@ -53,6 +56,12 @@ record_unverified() {
     printf '[verify][%s][UNVERIFIED] %s\n' "$1" "$2"
 }
 
+# A gate that abstained: not a failure, and never a PASS.
+record_skip() {
+    SKIPPED=$((SKIPPED + 1))
+    printf '[verify][%s][SKIP] %s\n' "$1" "$2"
+}
+
 run_gate() {
     local kind="$1"
     local label="$2"
@@ -80,12 +89,32 @@ run_service_gate() {
         record_failure service "$label: dependency or product gate failed (exit $rc)"
         return "$rc"
     fi
-    if [[ "$require_execution" == "required" ]] && grep -Eq '\[skip\].*SKIPPED' "$log"; then
-        record_failure service "$label: required external smoke was skipped"
-        return 1
-    fi
+    case "$(classify_service_gate_log "$log" "$require_execution")" in
+        REQUIRED_SKIPPED)
+            record_failure service "$label: required external smoke was skipped"
+            return 1
+            ;;
+        SKIP)
+            record_skip service "$label: $(service_gate_skip_reason "$log")"
+            return 0
+            ;;
+    esac
     printf '[verify][service][PASS] %s\n' "$label"
     return 0
+}
+
+# Meta-gate after the services tier: no gate may report a missing precondition AND a PASS.
+check_service_gate_contradictions() {
+    local log bad=0
+    for log in "$SCRATCH"/service-*.log; do
+        [[ -f "$log" ]] || continue
+        if service_gate_log_contradicts "$log"; then
+            printf '[verify][service][FAIL] %s prints both a PASS line and %s\n' \
+                "$(basename "$log")" "$PRECONDITION_MISSING_MARKER"
+            bad=1
+        fi
+    done
+    return "$bad"
 }
 
 resolve_claude_binary() {
@@ -324,13 +353,19 @@ finish_tier() {
     local tier="$1"
     local failures_before="$2"
     local unverified_before="$3"
+    local skipped_before="${4:-$SKIPPED}"
     local failed=$((FAILURES - failures_before))
     local unverified=$((UNVERIFIED - unverified_before))
+    local skipped=$((SKIPPED - skipped_before))
     if [[ $failed -ne 0 ]]; then
-        printf '\n[verify][%s] FAIL: %d required gate(s) red; %d unverified\n' "$tier" "$failed" "$unverified"
+        printf '\n[verify][%s] FAIL: %d required gate(s) red; %d unverified; %d skipped\n' \
+            "$tier" "$failed" "$unverified" "$skipped"
         return 1
     fi
-    if [[ $unverified -ne 0 ]]; then
+    if [[ $skipped -ne 0 ]]; then
+        printf '\n[verify][%s] PASS WITH %d SKIPPED GATE(S) (NOT PASSED) AND %d EXPLICIT UNVERIFIED SANDBOX GATE(S)\n' \
+            "$tier" "$skipped" "$unverified"
+    elif [[ $unverified -ne 0 ]]; then
         printf '\n[verify][%s] PASS WITH %d EXPLICIT UNVERIFIED SANDBOX GATE(S)\n' "$tier" "$unverified"
     else
         printf '\n[verify][%s] PASS\n' "$tier"
@@ -582,6 +617,9 @@ tier_deterministic() {
         run_gate deterministic "Codex not-found vs could-not-be-sandboxed sentences on every surface" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --codex-boundary-sentence-selftest || true
+        run_gate deterministic "service-gate classifier: an abstaining gate is never PASS" \
+            service_gate_classifier_selftest "$SCRATCH/service-gate-classifier" \
+            "$ROOT/Sources/SelfTest/SelfTestAbstain.swift" || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi
@@ -654,6 +692,7 @@ stage_service_bundle() {
 tier_services() {
     local failures_before=$FAILURES
     local unverified_before=$UNVERIFIED
+    local skipped_before=$SKIPPED
     if require_built_app service; then
         stage_service_home_dependencies
         local service_app="$SCRATCH/ViddyDictateVerify.app/Contents/MacOS/ViddyDictateTests"
@@ -714,7 +753,8 @@ tier_services() {
             # run_service_gate records a failure on ANY non-zero exit regardless of this argument;
             # `required` only ADDS a failure when the log carries a SKIPPED marker. So a gate that
             # needs absent apparatus must abstain with an exit-0 `[skip] ... SKIPPED` line, which is
-            # what this gate now does when the dedicated Codex home is not connected. It stays fully
+            # what this gate now does when the dedicated Codex home is not connected. That abstain is
+            # reported as [verify][service][SKIP] and counted, never as PASS. It stays fully
             # blocking on any real handshake that violates expectations.
             run_service_gate "Codex live catalog handshake (real app-server)" normal \
                 /usr/bin/env -i HOME="$ORIGINAL_HOME" PATH="/usr/bin:/bin" \
@@ -745,9 +785,11 @@ tier_services() {
                 --claude-catalog-live || true
             run_service_gate "web-search pipeline" normal "${service_env[@]}" "$service_app" --websearch-selftest || true
             run_service_gate "LM Studio residency gate" normal "${service_env[@]}" "$service_app" --residency-selftest || true
+            run_gate service "no service gate both passes and reports a missing precondition" \
+                check_service_gate_contradictions || true
         fi
     fi
-    finish_tier services "$failures_before" "$unverified_before"
+    finish_tier services "$failures_before" "$unverified_before" "$skipped_before"
 }
 
 tier_gui() {
@@ -809,14 +851,18 @@ case "$1" in
         tier_gui || true
         full_clean_gate
         if [[ $FAILURES -eq 0 ]]; then
-            if [[ $UNVERIFIED -eq 0 ]]; then
+            if [[ $SKIPPED -ne 0 ]]; then
+                printf '\n[verify][full] PASS WITH %d SKIPPED GATE(S) (NOT PASSED) AND %d EXPLICIT UNVERIFIED SANDBOX GATE(S)\n' \
+                    "$SKIPPED" "$UNVERIFIED"
+            elif [[ $UNVERIFIED -eq 0 ]]; then
                 printf '\n[verify][full] PASS\n'
             else
                 printf '\n[verify][full] PASS WITH %d EXPLICIT UNVERIFIED SANDBOX GATE(S)\n' "$UNVERIFIED"
             fi
             exit 0
         fi
-        printf '\n[verify][full] FAIL: %d required gate(s) red; %d unverified\n' "$FAILURES" "$UNVERIFIED"
+        printf '\n[verify][full] FAIL: %d required gate(s) red; %d unverified; %d skipped\n' \
+            "$FAILURES" "$UNVERIFIED" "$SKIPPED"
         exit 1
         ;;
     *)
