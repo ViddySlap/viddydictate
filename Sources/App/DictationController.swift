@@ -1267,12 +1267,7 @@ final class DictationController {
         }
         TextTransformClient.transformResolved(
             resolution, route: route, requestForBundle: requestForBundle,
-            local: { req, done in
-                CleanupClient.cleanup(req.sourceText, timeout: req.timeout,
-                                      model: req.bundle.modelID,
-                                      systemPrompt: req.systemPrompt,
-                                      completion: done)
-            }, capacityStepDown: capacityStepDown,
+            local: CleanupClient.localAdapter(surface: .cleanup), capacityStepDown: capacityStepDown,
             retryCompletion: onRetryResult, completion: onResult)
     }
 

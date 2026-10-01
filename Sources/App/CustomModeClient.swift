@@ -111,8 +111,9 @@ enum StickySkillDegradationLadder {
     }
 }
 
-/// Resolves a custom route through the provider-neutral transform seam. The Local adapter still owns the
-/// LM Studio request, while Claude/Codex use their strict provider adapters. Every provider receives the
+/// Resolves a custom route through the provider-neutral transform seam. The Local adapter owns the local
+/// request on the app the route resolved to (LM Studio or Ollama), while Claude/Codex use their strict
+/// provider adapters. Every provider receives the
 /// same augmented custom task and transcript wrapper and returns the shared `CleanupClient.Result`, so
 /// landing/raw-fallback behavior stays identical and a failure never pastes empty.
 enum CustomModeClient {
@@ -224,11 +225,7 @@ enum CustomModeClient {
         }
         TextTransformClient.transformResolved(
             resolution, route: mode.routeID, requestForBundle: requestForBundle,
-            local: { req, done in
-                CleanupClient.cleanup(req.sourceText, timeout: req.timeout,
-                                      model: req.bundle.modelID,
-                                      systemPrompt: req.systemPrompt,
-                                      completion: done)
-            }, arming: arming) { result in completion(ran, result) }
+            local: CleanupClient.localAdapter(surface: .customMode),
+            arming: arming) { result in completion(ran, result) }
     }
 }

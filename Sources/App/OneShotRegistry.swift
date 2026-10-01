@@ -501,12 +501,7 @@ final class OneShotRegistry {
                     }
                     TextTransformClient.transformResolved(
                         resolution, route: .promptPrep, requestForBundle: requestForBundle,
-                        local: { req, finish in
-                            CleanupClient.cleanup(req.sourceText, timeout: req.timeout,
-                                                  model: req.bundle.modelID,
-                                                  systemPrompt: req.systemPrompt,
-                                                  completion: finish)
-                        }, completion: done)
+                        local: CleanupClient.localAdapter(surface: .promptPrep), completion: done)
                 },
                 runLog: { input, _, level in "\(m.id) run level=\(level!.label) (\(input.count) chars)" },
                 landNonDestructive: nil)
@@ -538,12 +533,7 @@ final class OneShotRegistry {
                     }
                     TextTransformClient.transformResolved(
                         resolution, route: .email, requestForBundle: requestForBundle,
-                        local: { req, finish in
-                            EmailClient.email(req.sourceText, timeout: req.timeout,
-                                              model: req.bundle.modelID,
-                                              systemPrompt: req.systemPrompt,
-                                              completion: finish)
-                        }, completion: done)
+                        local: EmailClient.localAdapter(), completion: done)
                 },
                 runLog: { input, wc, _ in
                     wc.map { "\(m.id)-from-dictation run (\($0) words, \(input.count) chars)" }

@@ -147,6 +147,13 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // OllamaBackend. Tags + KV(num_ctx) estimate (never ps), (app, id) ownership, LRU by ViddyDictate's own
     // stamps, D5's resident-context reuse, and LM-Studio-only decisions unchanged. Built-in mutants.
     case localCapacityBackendsSelftest = "--local-capacity-backends-selftest"
+    // Ollama lane S5: every Local transform (cleanup, prompt-prep, email, custom modes, search retrieval and
+    // synthesis, the vision helper) runs on the app its route resolved to, with its D5 num_ctx, think and
+    // keep_alive, over a scripted LM Studio and a scripted Ollama. Built-in mutants.
+    case ollamaClientWiringSelftest = "--ollama-client-wiring-selftest"
+    // Ollama lane S5 (services): a real cleanup and email through gemma4:e4b on the live Ollama, then the
+    // model unloading on its own after a 20 s window. Named so neither it nor --ollama-live contains the other.
+    case ollamaTransformsLive = "--ollama-transforms-live"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

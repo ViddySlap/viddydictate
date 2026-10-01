@@ -421,6 +421,9 @@ tier_deterministic() {
         run_gate deterministic "local capacity across both apps: tags+KV estimate, (app, id) eviction, D5 reuse (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --local-capacity-backends-selftest || true
+        run_gate deterministic "each local transform on the app its route resolved to: num_ctx, think, keep_alive (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --ollama-client-wiring-selftest || true
         run_gate deterministic "prompt overlay store selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --prompt-overlay-selftest || true
@@ -732,6 +735,10 @@ tier_services() {
             # ~/Applications/Ollama.app; /Applications and the Homebrew CLI are still detected.
             run_service_gate "Ollama live backend (catalog, keep_alive load, unload, foreign models kept)" normal \
                 "${service_env[@]}" "$service_app" --ollama-live || true
+            # One real cleanup and one real email on gemma4:e4b (20 s keep_alive), then the model must leave
+            # /api/ps on its own. Abstains when Ollama or gemma4:e4b is absent, or gemma4:e4b is already resident.
+            run_service_gate "Ollama live transforms (cleanup + email on gemma4:e4b, keep_alive unload)" normal \
+                "${service_env[@]}" "$service_app" --ollama-transforms-live || true
             # Read-only: it never passes --unload-all, so it cannot change what the machine is holding.
             run_service_gate "Setup tab resident-models readout (real lms ps)" normal \
                 "${service_env[@]}" "$service_app" --local-models-readout-live || true

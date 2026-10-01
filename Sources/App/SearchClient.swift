@@ -114,7 +114,7 @@ enum SearchClient {
         return reason
     }
 
-    // MARK: - LM Studio chat (tool-capable, synchronous)
+    // MARK: - Local chat (tool-capable, synchronous)
 
     private struct ChatOutcome {
         let content: String
@@ -123,19 +123,36 @@ enum SearchClient {
         let failure: CleanupClient.Result?
     }
 
-    /// One non-streaming LM Studio chat-completions call. Synchronous (semaphore) — call OFF the main
-    /// thread. With `tools` set, parses `tool_calls` off the response message.
-    private static func lmChat(model: String, messages: [[String: Any]],
-                              tools: [[String: Any]]? = nil, toolChoice: String? = nil,
-                              maxTokens: Int, temperature: Double = 0.0,
-                              timeout: TimeInterval) -> ChatOutcome {
+    /// One non-streaming chat-completions call on the app `ref` names. Synchronous (semaphore) — call OFF
+    /// the main thread. With `tools` set, parses `tool_calls` off the response message.
+    ///
+    /// LM Studio is today's request to `Settings.searchEndpoint`, byte for byte, sent through the injected
+    /// transport. Ollama sends the same body through `transport.ollamaChat` with `profile`'s context and
+    /// think setting; its readiness check there is a cheap reuse of the instance `localAnswerSync` loaded.
+    /// Native tool calls come back translated (object arguments as a JSON string, a stable id), so the
+    /// loop below parses one shape.
+    private static func lmChat(_ ref: LocalModelRef, messages: [[String: Any]],
+                               tools: [[String: Any]]? = nil, toolChoice: String? = nil,
+                               maxTokens: Int, temperature: Double = 0.0,
+                               profile: OllamaSurfaceProfile,
+                               timeout: TimeInterval,
+                               transport: LocalChatTransport) -> ChatOutcome {
         var body: [String: Any] = [
-            "model": model, "messages": messages,
+            "model": ref.modelID, "messages": messages,
             "temperature": temperature, "max_tokens": maxTokens, "stream": false,
         ]
         if let tools = tools {
             body["tools"] = tools
             body["tool_choice"] = toolChoice ?? "auto"
+        }
+        if ref.backend == .ollama {
+            switch transport.ollamaChat(ref, body: body, profile: profile, timeout: timeout) {
+            case .notReady(let readiness):
+                let failure = CleanupClient.failureResult(for: readiness, loadFailureMessage: "model not loaded")
+                return ChatOutcome(content: "", toolCalls: [], failure: failure ?? .unavailable("model not loaded"))
+            case .response(let data, let response, let error):
+                return chatOutcome(data: data, response: response, error: error)
+            }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             return ChatOutcome(content: "", toolCalls: [], failure: .unavailable("encode failed"))
@@ -148,34 +165,36 @@ enum SearchClient {
 
         let sem = DispatchSemaphore(value: 0)
         var outcome = ChatOutcome(content: "", toolCalls: [], failure: .unavailable("no result"))
-        URLSession.shared.dataTask(with: req) { data, response, error in
+        transport.sendLMStudio(req) { data, response, error in
             defer { sem.signal() }
-            switch CleanupClient.classifyToolCapableChatResponse(
-                data: data, response: response, error: error
-            ) {
-            case .message(let content, let toolCalls):
-                outcome = ChatOutcome(content: content, toolCalls: toolCalls, failure: nil)
-            case .failure(let result):
-                outcome = ChatOutcome(content: "", toolCalls: [], failure: result)
-            }
-        }.resume()
+            outcome = chatOutcome(data: data, response: response, error: error)
+        }
         // Wait a touch past the request timeout so a genuine timeout returns through the normal path.
         _ = sem.wait(timeout: .now() + timeout + 10)
         return outcome
     }
 
+    private static func chatOutcome(data: Data?, response: URLResponse?, error: Error?) -> ChatOutcome {
+        switch CleanupClient.classifyToolCapableChatResponse(data: data, response: response, error: error) {
+        case .message(let content, let toolCalls):
+            return ChatOutcome(content: content, toolCalls: toolCalls, failure: nil)
+        case .failure(let result):
+            return ChatOutcome(content: "", toolCalls: [], failure: result)
+        }
+    }
+
     // MARK: - Agentic retrieval loop (Shape C, ported from _agentic_loop)
 
-    /// The Local model id the retrieval leg hands LM Studio — the single measuring point both call
-    /// sites below (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read instead of
-    /// `Settings.searchModel` directly, so "what will retrieval actually ask for" is one testable
+    /// The Local model id the retrieval leg hands its local app — the single measuring point the pipeline
+    /// (`localAnswerSync`'s residency prep and every `agenticLoop` turn, through `retrievalModelRef`) reads
+    /// instead of `Settings.searchModel` directly, so "what will retrieval actually ask for" is one testable
     /// question. It resolves the `.searchRetrieval` route rather than reading the scalar (7b704b0).
     ///
     /// `store` is an injectable measuring point, not a fix: a future route-resolution change can read
     /// it instead of reaching for the global `Settings.modelsPower` directly, so a self-test can hand
     /// this a `freshStore()` fixture the way `runPreference()`/`runRetry()` already do for
-    /// `ModelsPowerSettingsStore.resolveRoute`. Both call sites below call this with no argument, so
-    /// they keep resolving against the real, live store; only a test supplies anything else.
+    /// `ModelsPowerSettingsStore.resolveRoute`. The pipeline calls it with no argument, so it keeps
+    /// resolving against the real, live store; only a test supplies anything else.
     ///
     /// Only a LOCAL model is ever handed onward. Retrieval is an LM Studio tool loop with no card of its
     /// own, but `.searchRetrieval` carries Claude and Codex bundles like every route, and the header's
@@ -186,7 +205,7 @@ enum SearchClient {
     /// Local route at all (off), as before. Gated by `--search-retrieval-local-only-selftest`.
     ///
     /// The id half of `retrievalModelRef(store:)`. Kept as the String seam because `ModelFitSelfTest` (protected
-    /// by chain `vdfit`) and both call sites below read an id; the app half is resolved but not yet used.
+    /// by chain `vdfit`) reads an id; the pipeline itself reads `retrievalModelRef()`.
     static func retrievalModelID(store: ModelsPowerSettingsStore = Settings.modelsPower) -> String {
         retrievalModelRef(store: store).modelID
     }
@@ -195,8 +214,8 @@ enum SearchClient {
     /// now, and the same id can name different models in LM Studio and Ollama. Settings.searchModel, the
     /// off-route answer, is an LM Studio key, so it keeps LM Studio.
     ///
-    /// TODO(S5): `lmChat` and the residency prep still take the bare id and always talk to LM Studio's
-    /// endpoint; they switch to this ref when the clients go through the backend seam.
+    /// `localAnswerSync` resolves it once and hands the same ref to the residency prep and to every turn of
+    /// `agenticLoop`, so the model made resident is the model the loop asks, on the app that holds it.
     static func retrievalModelRef(store: ModelsPowerSettingsStore = Settings.modelsPower) -> LocalModelRef {
         let fallback = LLMProviderBundle.local(Settings.searchModel)
         let resolution = store.resolveRoute(.searchRetrieval, fallback: fallback)
@@ -208,7 +227,15 @@ enum SearchClient {
     /// Run the qwen tool-calling loop and return the union of retrieved results (or a failure). Mirrors
     /// the bench: rewrite -> web_search -> judge -> optional ONE re-search, capped at `maxSearches`,
     /// then a forced final (no-tools) turn. `collected` may be empty even on success (search throttled).
-    private static func agenticLoop(question: String) -> (results: [WebSearchBackend.Result], failure: CleanupClient.Result?) {
+    ///
+    /// `retrieval` is the route's model on its app; on Ollama every turn carries the retrieval profile's
+    /// 16k context (D5: tool results need the room). `transport` and `webSearch` are injected so the
+    /// deterministic gate can run one full tool round-trip with no app and no network.
+    static func agenticLoop(question: String, retrieval: LocalModelRef,
+                            profile: OllamaSurfaceProfile = .searchRetrieval,
+                            transport: LocalChatTransport = .live,
+                            webSearch: (String) -> [WebSearchBackend.Result] = { WebSearchBackend.search($0) })
+        -> (results: [WebSearchBackend.Result], failure: CleanupClient.Result?) {
         let maxSearches = Settings.searchMaxSearches
         let maxTurns = maxSearches + 1
         let system = Settings.searchAgenticPrompt + searchAgenticFinalize
@@ -221,11 +248,12 @@ enum SearchClient {
 
         for _ in 0..<maxTurns {
             let forceFinal = shouldForceFinalize(nSearches: nSearches, maxSearches: maxSearches)
-            let outcome = lmChat(model: retrievalModelID(), messages: messages,
+            let outcome = lmChat(retrieval, messages: messages,
                                  tools: forceFinal ? nil : [webSearchTool],
                                  toolChoice: forceFinal ? "none" : "auto",
                                  maxTokens: Settings.searchRetrievalMaxTokens,
-                                 timeout: Settings.searchTimeout)
+                                 profile: profile,
+                                 timeout: Settings.searchTimeout, transport: transport)
             if let failure = outcome.failure {
                 // A retrieval failure with nothing collected is fatal; if we already have results,
                 // fall through and let synthesis use them.
@@ -246,7 +274,7 @@ enum SearchClient {
                        !q.isEmpty {
                         query = q
                     }
-                    let res = WebSearchBackend.search(query)
+                    let res = webSearch(query)
                     collected.append(contentsOf: res)
                     nSearches += 1
                     let id = (tc["id"] as? String) ?? "call_\(nSearches)"
@@ -307,14 +335,21 @@ enum SearchClient {
         }
         return TextTransformClient.transformSyncResolved(
             resolution, route: route, requestForBundle: requestForBundle,
-            local: { req in
-                let outcome = lmChat(model: req.bundle.modelID, messages: [
-                    ["role": "system", "content": req.systemPrompt],
-                    ["role": "user", "content": req.userMessage],
-                ], maxTokens: Settings.searchSynthMaxTokens, timeout: req.timeout)
-                if let failure = outcome.failure { return failure }
-                return .ok(outcome.content)
-            }, resultMap: normalize, retryCompletion: retryCompletion)
+            local: { localSynthesis($0) }, resultMap: normalize, retryCompletion: retryCompletion)
+    }
+
+    /// The synthesis Local adapter: the request's model on the app its bundle resolved to, with the
+    /// synthesis profile on Ollama (8k, and `think: true` like LM Studio's gemma, its reasoning landing in
+    /// `reasoning_content`, never in the answer).
+    static func localSynthesis(_ req: TextTransformRequest,
+                               transport: LocalChatTransport = .live) -> CleanupClient.Result {
+        let outcome = lmChat(req.bundle.localRef, messages: [
+            ["role": "system", "content": req.systemPrompt],
+            ["role": "user", "content": req.userMessage],
+        ], maxTokens: Settings.searchSynthMaxTokens, profile: .searchSynthesis, timeout: req.timeout,
+           transport: transport)
+        if let failure = outcome.failure { return failure }
+        return .ok(outcome.content)
     }
 
     /// The synthesis route's execution decision, taken once per pipeline so residency prep and the synth
@@ -328,8 +363,10 @@ enum SearchClient {
     /// provider, so a route that degraded onto Local still gets its cold load out of the call timeout.
     private static func prepareSynthesis(_ resolution: LLMRouteResolution) -> CleanupClient.Result? {
         guard let bundle = resolution.bundle, bundle.provider == .local else { return nil }
-        let readiness: ModelManager.ReadinessResult =
-            ModelManager.shared.ensureReady(bundle.modelID)
+        let readiness: ModelManager.ReadinessResult = bundle.resolvedLocalBackend == .ollama
+            ? ModelManager.shared.ensureReady(
+                bundle.localRef, contextTokens: OllamaSurfaceProfile.searchSynthesis.contextTokens)
+            : ModelManager.shared.ensureReady(bundle.modelID)
         return CleanupClient.failureResult(
             for: readiness, loadFailureMessage: "synthesis model not loaded")
     }
@@ -339,7 +376,10 @@ enum SearchClient {
     /// `prepareSynthesis` call remains after grounding because memory can change during that request.
     private static func precheckSynthesis(_ resolution: LLMRouteResolution) -> CleanupClient.Result? {
         guard let bundle = resolution.bundle, bundle.provider == .local else { return nil }
-        let readiness = ModelManager.shared.capacityPrecheck(bundle.modelID)
+        let readiness = bundle.resolvedLocalBackend == .ollama
+            ? ModelManager.shared.capacityPrecheck(
+                bundle.localRef, contextTokens: OllamaSurfaceProfile.searchSynthesis.contextTokens)
+            : ModelManager.shared.capacityPrecheck(bundle.modelID)
         return CleanupClient.failureResult(
             for: readiness, loadFailureMessage: "synthesis model not loaded")
     }
@@ -428,8 +468,11 @@ enum SearchClient {
         // Fail-fast on a load failure with a clear diagnostic, matching CleanupClient/EmailClient —
         // proceeding into the pipeline against an unloaded model just hangs/times out with a murkier
         // error (model-lifecycle finding: ensureReady's contract must not silently fork between clients).
-        let retrievalReadiness: ModelManager.ReadinessResult =
-            ModelManager.shared.ensureReady(retrievalModelID())
+        let retrieval = retrievalModelRef()
+        let retrievalReadiness: ModelManager.ReadinessResult = retrieval.backend == .ollama
+            ? ModelManager.shared.ensureReady(
+                retrieval, contextTokens: OllamaSurfaceProfile.searchRetrieval.contextTokens)
+            : ModelManager.shared.ensureReady(retrieval.modelID)
         if let failure = CleanupClient.failureResult(
             for: retrievalReadiness, loadFailureMessage: "retrieval model not loaded"
         ) {                                                                      // retrieval / agentic (qwen)
@@ -440,7 +483,7 @@ enum SearchClient {
         let resolution = synthesisResolution(route: .searchLocalSynth)
         if let off = TextTransformClient.offResult(resolution, route: .searchLocalSynth) { return off }
         if let failure = prepareSynthesis(resolution) { return failure }
-        let (results, failure) = agenticLoop(question: question)
+        let (results, failure) = agenticLoop(question: question, retrieval: retrieval)
         if let failure = failure { return failure }
         if results.isEmpty {
             // Retrieval ran but found nothing (DDG throttled / no hits). Let gemma answer honestly

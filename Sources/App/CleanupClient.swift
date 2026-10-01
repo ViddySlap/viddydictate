@@ -219,17 +219,24 @@ enum CleanupClient {
 
     /// Run the cleanup transform on `raw`. Calls back on an arbitrary URLSession queue — the caller
     /// hops to main. `timeout` is the hard safety ceiling (spec: ~5s starting point, tunable).
+    ///
+    /// `backend` is the app the caller's route resolved to (`req.bundle.resolvedLocalBackend`). LM Studio is
+    /// today's path, byte for byte: `readiness`, then `endpoint`. Ollama runs the same request body through
+    /// `transport.ollamaChat` with `surface`'s context and think setting (`OllamaSurfaceProfile`, spec D5);
+    /// `readiness` and `endpoint` are LM Studio's and are not used for it.
     static func cleanup(_ raw: String,
                         timeout: TimeInterval = Settings.cleanupTimeout,
                         model: String = Settings.cleanupModel,
+                        backend: LocalBackendID = .lmStudio,
                         endpoint: URL = Settings.cleanupEndpoint,
                         systemPrompt: String = Settings.cleanupPrompt(.cleanup),
-                        readiness: @escaping (String) -> ModelManager.ReadinessResult = { model in
-                            let result: ModelManager.ReadinessResult =
-                                ModelManager.shared.ensureReady(model)
-                            return result
-                        },
+                        surface: OllamaSurfaceProfile = .cleanup,
+                        transport: LocalChatTransport = .live,
+                        readiness: ((String) -> ModelManager.ReadinessResult)? = nil,
                         completion: @escaping (Result) -> Void) {
+        // LM Studio readiness: the caller's own check, else the transport's (`ModelManager.shared
+        // .ensureReady(model)` in production, exactly the call this default always made).
+        let readiness = readiness ?? { transport.prepareLMStudio($0, nil) }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(.badOutput("empty input")); return }
         // Make the model resident BEFORE the timed request: a cold load happens here, on a background
@@ -237,6 +244,21 @@ enum CleanupClient {
         // a raw fallback. ensureReady loads the model with its per-model TTL; LM Studio owns eviction
         // now (interop ADR 0004), and the request below resets LM Studio's idle clock.
         DispatchQueue.global(qos: .userInitiated).async {
+            if backend == .ollama {
+                let body = requestBody(raw, model: model, systemPrompt: systemPrompt)
+                let t0 = Date()
+                switch transport.ollamaChat(LocalModelRef(backend: .ollama, modelID: model), body: body,
+                                            profile: surface, timeout: timeout) {
+                case .notReady(let readinessResult):
+                    Log.write("cleanup: \(model) could not be made resident in Ollama")
+                    completion(failureResult(for: readinessResult, loadFailureMessage: "model not loaded")
+                               ?? .unavailable("model not loaded"))
+                case .response(let data, let response, let error):
+                    finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
+                                  completion: completion)
+                }
+                return
+            }
             let readinessResult = readiness(model)
             if let failure = failureResult(
                 for: readinessResult, loadFailureMessage: "model not loaded"
@@ -245,26 +267,25 @@ enum CleanupClient {
                 completion(failure); return
             }
             sendRequest(raw, timeout: timeout, model: model, endpoint: endpoint,
-                        systemPrompt: systemPrompt, completion: completion)
+                        systemPrompt: systemPrompt, transport: transport, completion: completion)
         }
     }
 
-    /// One chat-completions attempt against the cleanup endpoint. `cleanup(_:)` owns making the model
-    /// resident first; this just issues the timed request and reports the `Result`.
-    private static func sendRequest(_ raw: String,
-                                    timeout: TimeInterval,
-                                    model: String,
-                                    endpoint: URL,
-                                    systemPrompt: String,
-                                    completion: @escaping (Result) -> Void) {
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "POST"
-        req.timeoutInterval = timeout
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    /// The Local adapter every cleanup-shaped route hands `TextTransformClient`: the request's own model on
+    /// the app its bundle resolved to, with that route's Ollama profile.
+    static func localAdapter(surface: OllamaSurfaceProfile,
+                             transport: LocalChatTransport = .live) -> TextTransformClient.AsyncAdapter {
+        { req, done in
+            cleanup(req.sourceText, timeout: req.timeout, model: req.bundle.modelID,
+                    backend: req.bundle.resolvedLocalBackend, systemPrompt: req.systemPrompt,
+                    surface: surface, transport: transport, completion: done)
+        }
+    }
 
-        // Generous output ceiling: cleanup never lengthens much, but a long ramble (golden sample 1)
-        // needs room. The model stops on its own well before this.
-        let body: [String: Any] = [
+    /// The chat-completions body, shared by both apps. Generous output ceiling: cleanup never lengthens much,
+    /// but a long ramble (golden sample 1) needs room. The model stops on its own well before this.
+    private static func requestBody(_ raw: String, model: String, systemPrompt: String) -> [String: Any] {
+        [
             "model": model,
             "temperature": Settings.cleanupTemperature,
             "max_tokens": 4096,
@@ -274,31 +295,55 @@ enum CleanupClient {
                 ["role": "user", "content": wrap(raw)],
             ],
         ]
+    }
+
+    /// One chat-completions attempt against the cleanup endpoint. `cleanup(_:)` owns making the model
+    /// resident first; this just issues the timed request and reports the `Result`.
+    private static func sendRequest(_ raw: String,
+                                    timeout: TimeInterval,
+                                    model: String,
+                                    endpoint: URL,
+                                    systemPrompt: String,
+                                    transport: LocalChatTransport,
+                                    completion: @escaping (Result) -> Void) {
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = requestBody(raw, model: model, systemPrompt: systemPrompt)
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             completion(.unavailable("encode failed")); return
         }
         req.httpBody = data
 
         let t0 = Date()
-        URLSession.shared.dataTask(with: req) { data, response, error in
-            let dt = Date().timeIntervalSince(t0)
-            let classification = classifyChatResponse(
-                data: data, response: response, error: error, logPrefix: "cleanup", elapsed: dt)
-            let content: String
-            switch classification {
-            case .content(let value):
-                content = value
-            case .failure(let result):
-                completion(result); return
-            }
-            let cleaned = asciiPunctuationNormalized(content).trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleaned.isEmpty {
-                Log.write("cleanup produced empty output (\(String(format: "%.2f", dt))s)")
-                completion(.badOutput("empty output")); return
-            }
-            Log.write("cleanup OK \(raw.count)->\(cleaned.count) chars in \(String(format: "%.2f", dt))s")
-            completion(.ok(cleaned))
-        }.resume()
+        transport.sendLMStudio(req) { data, response, error in
+            finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
+                          completion: completion)
+        }
+    }
+
+    /// Classify one answer, from either app, into the cleanup `Result`.
+    private static func finishRequest(_ raw: String, data: Data?, response: URLResponse?, error: Error?,
+                                      startedAt t0: Date, completion: @escaping (Result) -> Void) {
+        let dt = Date().timeIntervalSince(t0)
+        let classification = classifyChatResponse(
+            data: data, response: response, error: error, logPrefix: "cleanup", elapsed: dt)
+        let content: String
+        switch classification {
+        case .content(let value):
+            content = value
+        case .failure(let result):
+            completion(result); return
+        }
+        let cleaned = asciiPunctuationNormalized(content).trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty {
+            Log.write("cleanup produced empty output (\(String(format: "%.2f", dt))s)")
+            completion(.badOutput("empty output")); return
+        }
+        Log.write("cleanup OK \(raw.count)->\(cleaned.count) chars in \(String(format: "%.2f", dt))s")
+        completion(.ok(cleaned))
     }
 
     /// Synchronous variant for the headless `--selftest` seam: exercises the exact same request path

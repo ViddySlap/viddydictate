@@ -460,6 +460,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localCapacityBackendsSelftest: .init(tier: .deterministic) { _ in
         LocalCapacityBackendsFixtureSelfTest.run() ? 0 : 1
     },
+    // Scripted: LM Studio is a request recorder and Ollama is the real OllamaBackend + ModelManager over an
+    // in-memory server; web search is scripted. No socket, no app, no network. Reads Sources/ for call sites.
+    .ollamaClientWiringSelftest: .init(tier: .deterministic) { _ in
+        OllamaClientWiringFixtureSelfTest.run() ? 0 : 1
+    },
+    // Runs two real transforms on gemma4:e4b in the real Ollama and watches it unload, so it belongs in
+    // services. Abstains when Ollama or the model is absent, or the model is already resident.
+    .ollamaTransformsLive: .init(tier: .services) { _ in
+        OllamaLiveTransformsGate.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

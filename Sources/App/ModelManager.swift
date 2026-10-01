@@ -138,7 +138,7 @@ final class ModelManager {
     static let ollamaFallbackKVFractionPer8K = 0.25
 
     /// The context an Ollama readiness check assumes when its caller names none (D5's smallest constant).
-    static let ollamaDefaultContextTokens = 8192
+    static let ollamaDefaultContextTokens = OllamaSurfaceProfile.cleanup.contextTokens
 
     private let policyLock = NSLock()
     /// Models whose cold load this process actually initiated, keyed by `(app, id)`. A model merely found

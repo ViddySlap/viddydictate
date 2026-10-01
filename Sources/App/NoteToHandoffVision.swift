@@ -142,14 +142,56 @@ enum NoteToHandoffLocalVisionClient {
     typealias Descriptions = [Int: String]
     typealias Readiness = (String, Int) -> ModelManager.ReadinessResult
 
+    /// The helper on whichever app holds it. LM Studio is `describe(model:)` below, unchanged. Ollama gets the
+    /// same request body through `transport.ollamaChat` with the vision profile (8k, `think: false`, the
+    /// images as bare base64 via the translator), then unloads straight after, as the LM Studio helper does.
+    /// Its `keep_alive` is the helper's own five minutes (ADR 0006), the same window LM Studio loads it with:
+    /// a crash/failure backstop, not normal residency.
+    static func describe(
+        ref: LocalModelRef,
+        frames: [NoteToHandoffFrame],
+        transport: LocalChatTransport = .live,
+        completion: @escaping (Descriptions?) -> Void
+    ) {
+        guard ref.backend == .ollama else {
+            describe(model: ref.modelID, frames: frames, transport: transport, completion: completion)
+            return
+        }
+        guard !frames.isEmpty else { completion([:]); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let data = requestBody(model: ref.modelID, frames: frames),
+                  let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                completion(nil)
+                return
+            }
+            switch transport.ollamaChat(ref, body: body, profile: .vision, timeout: timeout,
+                                        keepAliveSeconds: idleTTLSeconds) {
+            case .notReady(let readiness):
+                Log.write("handoff vision: \(ref.modelID) in Ollama not ready (\(readiness)); "
+                          + "using filename-only fallback")
+                completion(nil)
+            case .response(let data, let response, let error):
+                var descriptions: Descriptions?
+                if case .content(let content) = CleanupClient.classifyChatResponse(
+                    data: data, response: response, error: error, logPrefix: "handoff vision", elapsed: 0) {
+                    descriptions = parseDescriptions(content)
+                }
+                transport.unloadOllama(ref)
+                completion(descriptions)
+            }
+        }
+    }
+
     static func describe(
         model: String,
         frames: [NoteToHandoffFrame],
-        readiness: @escaping Readiness = { model, ttlSeconds in
-            ModelManager.shared.ensureReady(model, ttlOverrideSeconds: ttlSeconds)
-        },
+        transport: LocalChatTransport = .live,
+        readiness: Readiness? = nil,
         completion: @escaping (Descriptions?) -> Void
     ) {
+        // The caller's own check, else the transport's (`ModelManager.shared.ensureReady(model,
+        // ttlOverrideSeconds:)` in production, exactly the call this default always made).
+        let readiness = readiness ?? { transport.prepareLMStudio($0, $1) }
         guard !frames.isEmpty else { completion([:]); return }
         DispatchQueue.global(qos: .userInitiated).async {
             switch readiness(model, idleTTLSeconds) {
@@ -175,7 +217,7 @@ enum NoteToHandoffLocalVisionClient {
             func finish(_ descriptions: Descriptions?) {
                 // This helper is a third model beside the route's real model. Unload immediately after its
                 // one description call; the 5-minute TTL is a crash/failure backstop, not normal residency.
-                ModelResidency.unload(model)
+                transport.unloadLMStudio(model)
                 completion(descriptions)
             }
 
@@ -188,7 +230,7 @@ enum NoteToHandoffLocalVisionClient {
             request.timeoutInterval = timeout
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
-            URLSession.shared.dataTask(with: request) { data, response, error in
+            transport.sendLMStudio(request) { data, response, error in
                 switch CleanupClient.classifyChatResponse(
                     data: data, response: response, error: error,
                     logPrefix: "handoff vision", elapsed: 0
@@ -196,7 +238,7 @@ enum NoteToHandoffLocalVisionClient {
                 case .content(let content): finish(parseDescriptions(content))
                 case .failure: finish(nil)
                 }
-            }.resume()
+            }
         }
     }
 
@@ -265,17 +307,24 @@ struct NoteToHandoffVisionPreparation: Equatable {
 
 /// Routes the sanity pass without changing the custom mode's real transform route. Cloud frames ride
 /// that transform call directly. Local frames make one smallest-VLM description call, the helper unloads,
-/// and only its text descriptions reach the route's real local model.
+/// and only its text descriptions reach the route's real local model. The helper comes from the app the
+/// route resolved to: LM Studio's catalog as before, or Ollama's (`capabilities` says `vision`).
 final class NoteToHandoffVisionProcessor {
     typealias ProviderLookup = (CustomMode) -> LLMProvider?
     typealias FrameExtractor = ([NoteToHandoffMediaAttachment]) -> NoteToHandoffFrameExtraction
     typealias CatalogLookup = () -> [LMStudioInstalledModel]?
     typealias LocalDescriber = (String, [NoteToHandoffFrame], @escaping ([Int: String]?) -> Void) -> Void
+    typealias LocalBackendLookup = (CustomMode) -> LocalBackendID
+    typealias OllamaCatalogLookup = () -> [LocalInstalledModel]?
+    typealias OllamaDescriber = (LocalModelRef, [NoteToHandoffFrame], @escaping ([Int: String]?) -> Void) -> Void
 
     private let providerLookup: ProviderLookup
     private let frameExtractor: FrameExtractor
     private let catalogLookup: CatalogLookup
     private let localDescriber: LocalDescriber
+    private let localBackendLookup: LocalBackendLookup
+    private let ollamaCatalogLookup: OllamaCatalogLookup
+    private let ollamaDescriber: OllamaDescriber
 
     init(
         providerLookup: @escaping ProviderLookup = { mode in
@@ -288,12 +337,23 @@ final class NoteToHandoffVisionProcessor {
         catalogLookup: @escaping CatalogLookup = { ModelResidency.availableInstalledModels() },
         localDescriber: @escaping LocalDescriber = { model, frames, done in
             NoteToHandoffLocalVisionClient.describe(model: model, frames: frames, completion: done)
+        },
+        localBackendLookup: @escaping LocalBackendLookup = { mode in
+            Settings.modelsPower.resolveRoute(mode.routeID, fallback: mode.model).bundle?.resolvedLocalBackend
+                ?? .lmStudio
+        },
+        ollamaCatalogLookup: @escaping OllamaCatalogLookup = { OllamaBackend.shared.installedModels() },
+        ollamaDescriber: @escaping OllamaDescriber = { ref, frames, done in
+            NoteToHandoffLocalVisionClient.describe(ref: ref, frames: frames, completion: done)
         }
     ) {
         self.providerLookup = providerLookup
         self.frameExtractor = frameExtractor
         self.catalogLookup = catalogLookup
         self.localDescriber = localDescriber
+        self.localBackendLookup = localBackendLookup
+        self.ollamaCatalogLookup = ollamaCatalogLookup
+        self.ollamaDescriber = ollamaDescriber
     }
 
     func prepare(
@@ -325,7 +385,11 @@ final class NoteToHandoffVisionProcessor {
                         evidence: request.attachments, fallbackNotice: extractionNotice),
                     images: extraction.frames.map(\.transformImage)))
             case .local:
-                guard let vision = LMStudioModelCatalog.smallestVisionModel(in: catalogLookup()) else {
+                let onOllama = localBackendLookup(mode) == .ollama
+                let helper: String? = onOllama
+                    ? LocalInstalledModel.smallestVision(in: ollamaCatalogLookup())?.ref.modelID
+                    : LMStudioModelCatalog.smallestVisionModel(in: catalogLookup())?.modelID
+                guard let helper else {
                     completion(NoteToHandoffVisionPreparation(
                         request: request.withVision(
                             evidence: request.attachments,
@@ -335,7 +399,12 @@ final class NoteToHandoffVisionProcessor {
                         images: []))
                     return
                 }
-                localDescriber(vision.modelID, extraction.frames) { descriptions in
+                let describe: LocalDescriber = onOllama
+                    ? { model, frames, done in
+                        self.ollamaDescriber(LocalModelRef(backend: .ollama, modelID: model), frames, done)
+                    }
+                    : localDescriber
+                describe(helper, extraction.frames) { descriptions in
                     guard let descriptions else {
                         completion(NoteToHandoffVisionPreparation(
                             request: request.withVision(

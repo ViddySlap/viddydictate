@@ -79,8 +79,9 @@ struct LocalResidentModel: Equatable {
 /// Every method is synchronous and may block on a subprocess or a socket, so callers run them OFF the main
 /// thread. Failures are nil/false, never a throw: the caller surfaces its own original error.
 ///
-/// Chat is deliberately not here yet. It joins in the slice that routes the clients through this seam (S5),
-/// so this protocol cannot be half-adopted by a client before that transport exists.
+/// Chat is deliberately not here: the clients reach a backend's chat through `LocalChatTransport`, where LM
+/// Studio is the client's own unchanged `URLRequest` and Ollama is `OllamaBackend.chat` behind
+/// `ModelManager` readiness, so the LM Studio path cannot drift by being re-expressed through a protocol.
 protocol LocalModelBackend {
     var id: LocalBackendID { get }
 
