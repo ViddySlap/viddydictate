@@ -12,6 +12,12 @@ import Foundation
 /// - **The point-of-use choice (D3).** On a Mac with neither app: LM Studio first, the only recommended
 ///   option; Ollama second, the advanced option, carrying the macOS-prompt warning. Every button still only
 ///   installs or skips.
+/// - **The feature's own model, per app (D1/D4).** The Ollama choice queues Ollama, then the feature's Ollama
+///   staff pick (`gemma4:e4b` for email, `qwen3-coder:30b` for cleanup and prompt prep). A Mac whose local app
+///   is Ollama (the only one installed, or the effective Preferred app of two) is offered a pull of that pick
+///   alone, with no LM Studio row anywhere. A Mac with LM Studio and not Ollama is offered exactly what 29e3f47
+///   offered, compared to literals taken from that commit's output. No Ollama pull is offered that this Mac
+///   cannot fit (the first-run window's own fit check): a 16 GB Mac is never offered `qwen3-coder:30b`.
 /// - **Persisted identifiers.** Every id and raw value already on users' disks is compared to a literal taken
 ///   from 12c0db4's source, and a 1.1.0-shaped `bootstrap.json` round-trips with its LM Studio rows intact.
 ///
@@ -20,7 +26,10 @@ import Foundation
 ///
 /// Negative controls, each of which the gate must catch:
 /// (d) the plan with no lms-ready step;
-/// (e) the local-app choice with Ollama listed first, or offered as LM Studio's equal.
+/// (e) the local-app choice with Ollama listed first, or offered as LM Studio's equal;
+/// (f) an Ollama choice that queues the app and no model;
+/// (g) an Ollama-only Mac offered LM Studio;
+/// (h) an Ollama pull offered with no fit check.
 enum InstallerLocalStepsFixtureSelfTest {
     private static let ollamaFixtureModel = "installer-steps-fixture:4b"
     private static let adminWarning =
@@ -31,6 +40,11 @@ enum InstallerLocalStepsFixtureSelfTest {
     private static let queuedModelCheck =
         "a model row queued straight after the LM Studio app row installs (lms appears once LM Studio opens)"
     private static let firstChoiceCheck = "LM Studio is listed first and is the only recommended option"
+    private static let ollamaChoiceModelCheck =
+        "neither app: the Ollama choice plans app(ollama) -> ready(ollama) -> the feature's own Ollama pull"
+    private static let ollamaOnlyCheck =
+        "Ollama-only Mac missing the pick: a pull of the feature's Ollama staff pick, and no LM Studio row anywhere"
+    private static let fitCheck = "a 16 GB Mac is never offered a qwen3-coder:30b install, on any page"
 
     static func run() -> Bool {
         print("=== Installer local steps fixture selftest (LM Studio CLI order, Ollama order, D3 choice) ===")
@@ -49,6 +63,11 @@ enum InstallerLocalStepsFixtureSelfTest {
         print("--- the point-of-use choice on a Mac with neither app (real choice) ---")
         checkChoiceOrder(realChoice, reporter)
         checkChoiceDetails(reporter)
+        print("--- the feature's own model, per app (real policy) ---")
+        checkOllamaChoiceModel(realPolicy, scratch: scratch, reporter)
+        checkOllamaOnly(realPolicy, reporter)
+        checkLMStudioUnchanged(reporter)
+        checkFit(realPolicy, reporter)
         print("--- persisted identifiers are unchanged ---")
         checkPersistedIdentifiers(scratch: scratch, reporter)
         checkNegativeControls(scratch: scratch, reporter)
@@ -241,7 +260,7 @@ enum InstallerLocalStepsFixtureSelfTest {
     private static func checkOllamaPlan(scratch: URL, _ reporter: SelfTestReporter) {
         let ref = LocalModelRef(backend: .ollama, modelID: ollamaFixtureModel)
         let model = BootstrapInstallPlan.localModel(ref, detail: "fixture model row", downloadBytes: nil)
-        let plan = PointOfUseFeature.email.ollamaComponents + [model]
+        let plan = [BootstrapInstallPlan.ollama, model]
         let steps = plan.flatMap(\.localSteps)
         reporter.record("the engine plan orders Ollama app -> server-ready -> Ollama pull",
                         steps.first == .app(.ollama) && readyPrecedesEveryModel(plan, backend: .ollama)
@@ -348,8 +367,9 @@ enum InstallerLocalStepsFixtureSelfTest {
         reporter.record("the LM Studio option installs exactly what Set up local models always installed",
                         choice.option(.lmStudio)?.components == chooser.localComponents
                             && chooser.localComponents == [BootstrapInstallPlan.lmStudio, BootstrapInstallPlan.gemma])
-        reporter.record("the Ollama option installs the Ollama app row (no model until D4)",
-                        choice.option(.ollama)?.components == [BootstrapInstallPlan.ollama])
+        reporter.record("the Ollama option installs the Ollama app row, then the feature's own Ollama model",
+                        choice.option(.ollama)?.components
+                            == [BootstrapInstallPlan.ollama, BootstrapInstallPlan.ollamaGemma])
         reporter.record("LM Studio's option raises no macOS-prompt warning", choice.option(.lmStudio)?.warning == nil)
         let routes = Set(choice.buttons.map(\.route.kind))
         reporter.record("every button on the choice only installs or skips (the route invariant holds)",
@@ -401,6 +421,374 @@ enum InstallerLocalStepsFixtureSelfTest {
                             return next == expected
                                 && LocalBackendPreference.effective(explicit: next, installed: [installed]) == installed
                         })
+    }
+
+    // MARK: - The feature's own model, per app
+
+    /// The policy under test, as a value, so a negative control can stand in for it.
+    private typealias Policy = (PointOfUseFeature, [LLMProvider: LLMProviderDetection.Presence], LocalBackendID?,
+                                ComponentPicker.MachineFacts?) -> PointOfUseOffer?
+
+    private static let realPolicy: Policy = { feature, presences, preferred, facts in
+        PointOfUsePolicy.offer(for: feature, presences: presences, bootstrap: coreInstalled,
+                               preferredLocalApp: preferred, facts: facts)
+    }
+
+    /// The three features a local text model serves, with D4's Ollama staff pick for each.
+    private static let textFeatures: [(PointOfUseFeature, String)] = [
+        (.email, "gemma4:e4b"), (.cleanup, "qwen3-coder:30b"), (.promptPrep, "qwen3-coder:30b"),
+    ]
+
+    /// Synthetic Macs, fixed numbers rather than this machine's sysctls. 16 GB: qwen3-coder:30b (18.56 GB x 1.15)
+    /// cannot fit even at the 12.6 GB ceiling, gemma4:e4b fits there but not at today's budget (a tight fit).
+    private static let mac16 = ComponentPicker.MachineFacts(
+        physicalBytes: 17_179_869_184, budgetBytes: 8_000_000_000, maxBudgetBytes: 12_600_000_000,
+        wiredBytes: 3_000_000_000)
+    private static let mac64 = ComponentPicker.MachineFacts(
+        physicalBytes: 68_719_476_736, budgetBytes: 32_000_000_000, maxBudgetBytes: 50_000_000_000,
+        wiredBytes: 5_000_000_000)
+
+    /// One app's reading: nil models with `installed` true is a stopped app (its catalog unread).
+    private static func machine(lmStudio: [String]?, ollama: [String]?, lmStudioInstalled: Bool? = nil,
+                                ollamaInstalled: Bool? = nil,
+                                claude: Bool = false) -> [LLMProvider: LLMProviderDetection.Presence] {
+        func reading(_ backend: LocalBackendID, _ models: [String]?,
+                     _ installed: Bool) -> LLMProviderDetection.LocalBackendReading {
+            LLMProviderDetection.LocalBackendReading(
+                backend: backend, installed: installed, responding: models != nil,
+                models: models.map { $0.map { LMStudioModelOption(modelID: $0, label: $0, backend: backend) } },
+                startable: backend == .ollama && installed)
+        }
+        let local = LLMProviderDetection.mergedLocalPresence([
+            reading(.lmStudio, lmStudio, lmStudioInstalled ?? (lmStudio != nil)),
+            reading(.ollama, ollama, ollamaInstalled ?? (ollama != nil)),
+        ])
+        return [.local: local,
+                .claude: LLMProviderDetection.Presence(installed: claude,
+                                                      state: claude ? .available : .unavailable("CLI unavailable")),
+                .codex: LLMProviderDetection.Presence(installed: false,
+                                                     state: .unavailable("the codex CLI is not installed"))]
+    }
+
+    /// Every component a page could hand the queue: the offer's own, the chooser's, and each app option's.
+    private static func everyComponent(_ offer: PointOfUseOffer?) -> [InstallerComponentDescriptor] {
+        guard let offer else { return [] }
+        var all: [InstallerComponentDescriptor]
+        switch offer {
+        case .install(let install): all = install.components
+        case .chooser(let chooser): all = chooser.localComponents
+        }
+        all += offer.localAppChoice?.options.flatMap(\.components) ?? []
+        return all
+    }
+
+    private static func offerComponents(_ offer: PointOfUseOffer?) -> [InstallerComponentDescriptor]? {
+        switch offer {
+        case .install(let install)?: return install.components
+        case .chooser(let chooser)?: return chooser.localComponents
+        case nil: return nil
+        }
+    }
+
+    /// Whether LM Studio appears anywhere on the offer: a queue row that touches it, an app option, or a word.
+    private static func mentionsLMStudio(_ offer: PointOfUseOffer?) -> Bool {
+        guard let offer else { return false }
+        let steps = everyComponent(offer).flatMap(\.localSteps)
+        let words = [offer.header] + offer.lines + offer.buttons.flatMap { [$0.title, $0.detail] }
+        return steps.contains { $0.backend == .lmStudio } || offer.localAppChoice != nil
+            || words.contains { $0.contains("LM Studio") }
+    }
+
+    private static func steps(_ components: [InstallerComponentDescriptor]?) -> [String] {
+        (components ?? []).flatMap(\.localSteps).map(describe)
+    }
+
+    /// The same offer with its app choice transformed. Negative controls only.
+    private static func mapChoice(
+        _ offer: PointOfUseOffer?,
+        _ transform: (PointOfUseLocalAppChoice) -> PointOfUseLocalAppChoice) -> PointOfUseOffer? {
+        switch offer {
+        case .install(var install)?:
+            install.localAppChoice = install.localAppChoice.map(transform)
+            return .install(install)
+        case .chooser(var chooser)?:
+            chooser.localAppChoice = chooser.localAppChoice.map(transform)
+            return .chooser(chooser)
+        case nil:
+            return nil
+        }
+    }
+
+    private static func checkOllamaChoiceModel(_ policy: Policy, scratch: URL, _ reporter: SelfTestReporter) {
+        var mismatches: [String] = []
+        for (feature, tag) in textFeatures {
+            for claude in [false, true] {
+                let offer = policy(feature, machine(lmStudio: nil, ollama: nil, claude: claude), nil, mac64)
+                let planned = steps(offer?.localAppChoice?.option(.ollama)?.components)
+                let expected = ["app(ollama)", "ready(ollama)", "ready(ollama)", "model(ollama:\(tag))"]
+                if planned != expected {
+                    mismatches.append("\(feature.id)\(claude ? "+claude" : ""): \(planned.joined(separator: " -> "))")
+                }
+            }
+        }
+        reporter.record(ollamaChoiceModelCheck, mismatches.isEmpty, mismatches.joined(separator: " | "))
+
+        let email = policy(.email, machine(lmStudio: nil, ollama: nil), nil, mac64)?.localAppChoice
+        let cleanup = policy(.cleanup, machine(lmStudio: nil, ollama: nil), nil, mac64)?.localAppChoice
+        reporter.record("the Ollama option's button quotes the pull's measured size, plus Ollama",
+                        email?.option(.ollama)?.button.detail == "Downloads 6.58 GB plus Ollama."
+                            && cleanup?.option(.ollama)?.button.detail == "Downloads 18.56 GB plus Ollama.",
+                        [email, cleanup].map { $0?.option(.ollama)?.button.detail ?? "nil" }.joined(separator: " | "))
+        reporter.record("the Ollama option says it pulls the feature's model after the app",
+                        email?.option(.ollama)?.detail == "The advanced option, for people who already use Ollama. "
+                            + "ViddyDictate installs it from Ollama's own download, then pulls the model email mode uses.",
+                        email?.option(.ollama)?.detail ?? "nil")
+        // LM Studio's option, word for word as 29e3f47 printed it.
+        let lmStudio = email?.option(.lmStudio)
+        reporter.record("the LM Studio option is 29e3f47's, row for row and word for word",
+                        lmStudio?.components.map(\.id) == ["lm-studio", "model:google/gemma-4-e4b"]
+                            && lmStudio?.detail == "The simple install. ViddyDictate installs LM Studio from its own "
+                                + "installer, then the model email mode uses."
+                            && lmStudio?.button.title == "Install LM Studio"
+                            && lmStudio?.button.detail == "Downloads 6.86 GB plus LM Studio."
+                            && lmStudio?.warning == nil && lmStudio?.recommended == true,
+                        lmStudio.map { "\($0.components.map(\.id)) \($0.button.detail)" } ?? "nil")
+
+        // The queue the Ollama choice hands the installer, run: the app, its server, then the pull.
+        guard let components = email?.option(.ollama)?.components else { return }
+        let performer = RecordingPerformer()
+        let engine = InstallerEngine(paths: scratchPaths(scratch), local: performer, sleep: { _ in })
+        let results = components.map { engine.install($0, activity: { _ in }) }
+        reporter.record("the Ollama choice's queue runs app, ready, ready, pull of gemma4:e4b",
+                        results.allSatisfy(\.succeeded)
+                            && performer.calls
+                                == ["app:ollama", "ready:ollama", "ready:ollama", "model:ollama:gemma4:e4b"],
+                        performer.calls.joined(separator: ", "))
+    }
+
+    private static func checkOllamaOnly(_ policy: Policy, _ reporter: SelfTestReporter) {
+        // Each case: a Mac whose local app is Ollama, missing the feature's pick.
+        let cases: [(String, [LLMProvider: LLMProviderDetection.Presence], LocalBackendID?)] = [
+            ("Ollama only, Claude signed in", machine(lmStudio: nil, ollama: ["llama3.2:1b"], claude: true), nil),
+            ("Ollama only, nothing else", machine(lmStudio: nil, ollama: []), nil),
+            ("Ollama only, Preferred set to LM Studio", machine(lmStudio: nil, ollama: [], claude: true), .lmStudio),
+            ("both apps, Preferred Ollama", machine(lmStudio: ["llama-3.2-1b-instruct"], ollama: ["llama3.2:1b"]),
+             .ollama),
+        ]
+        var mismatches: [String] = []
+        for (feature, tag) in textFeatures {
+            for (label, presences, preferred) in cases {
+                let offer = policy(feature, presences, preferred, mac64)
+                let components = offerComponents(offer)
+                let ok = components?.map(\.id) == ["ollama-model:\(tag)"]
+                    && steps(components) == ["ready(ollama)", "model(ollama:\(tag))"]
+                    && !mentionsLMStudio(offer)
+                if !ok {
+                    let planned = steps(everyComponent(offer)).joined(separator: " -> ")
+                    mismatches.append("\(feature.id) on \(label): \(planned)"
+                        + (mentionsLMStudio(offer) ? " (mentions LM Studio)" : ""))
+                }
+            }
+        }
+        reporter.record(ollamaOnlyCheck, mismatches.isEmpty, mismatches.joined(separator: " | "))
+
+        let ollamaOnly = machine(lmStudio: nil, ollama: [], claude: true)
+        guard case .install(let email)? = policy(.email, ollamaOnly, nil, mac64),
+              case .install(let cleanup)? = policy(.cleanup, ollamaOnly, nil, mac64) else {
+            reporter.record("an Ollama-only Mac with Claude signed in gets an install offer", false)
+            return
+        }
+        reporter.record("the pull offer names the model, its app and its measured size",
+                        email.header == "EMAIL MODE - NOT INSTALLED YET"
+                            && email.lines == ["Email mode uses gemma4:e4b in Ollama, 6.58 GB.",
+                                               "It installs here. Email mode runs as soon as it lands, and you can close this."]
+                            && cleanup.lines.first == "Cleanup uses qwen3-coder:30b in Ollama, 18.56 GB.",
+                        (email.lines + cleanup.lines.prefix(1)).joined(separator: " | "))
+        reporter.record("its button installs the model in Ollama and says what it downloads; Not now skips",
+                        email.buttons.map(\.title) == ["Install gemma4:e4b in Ollama", "Not now"]
+                            && email.buttons.map(\.detail) == ["Downloads 6.58 GB.",
+                                                               "Nothing is installed and your text is untouched."]
+                            && email.buttons.map(\.route) == [.install, .skip]
+                            && cleanup.buttons.first?.title == "Install qwen3-coder:30b in Ollama",
+                        email.buttons.map { "\($0.title): \($0.detail)" }.joined(separator: " | "))
+        reporter.record("pressing it installs the page's own row, with no app choice in between",
+                        email.buttons.first.map { PointOfUsePolicy.installStep(pressed: $0, offer: .install(email),
+                                                                              choice: nil, running: false) }
+                            == .installComponents && email.localAppChoice == nil)
+
+        let both = machine(lmStudio: ["llama-3.2-1b-instruct"], ollama: ["llama3.2:1b"])
+        reporter.record("both apps on Automatic: the effective Preferred app is LM Studio, so its offer is LM Studio's",
+                        offerComponents(policy(.email, both, nil, mac64))?.map(\.id) == ["model:google/gemma-4-e4b"]
+                            && offerComponents(policy(.email, both, .lmStudio, mac64))?.map(\.id)
+                                == ["model:google/gemma-4-e4b"])
+        reporter.record("an Ollama Mac that already holds the pick is offered nothing",
+                        policy(.email, machine(lmStudio: nil, ollama: ["gemma4:e4b"], claude: true), nil, mac64) == nil
+                            && policy(.cleanup, machine(lmStudio: nil, ollama: ["qwen3-coder:30b"], claude: true), nil,
+                                      mac64) == nil)
+        reporter.record("a stopped Ollama (its catalog unread) is offered nothing rather than a guess",
+                        policy(.email, machine(lmStudio: nil, ollama: nil, ollamaInstalled: true, claude: true), nil,
+                               mac64) == nil)
+        guard case .chooser(let chooser)? = policy(.email, machine(lmStudio: nil, ollama: []), nil, mac64) else {
+            reporter.record("an Ollama-only Mac with nothing else still gets B14's chooser", false)
+            return
+        }
+        reporter.record("an Ollama-only Mac with nothing else gets B14's chooser, whose local route is the pull",
+                        chooser.buttons.map(\.id) == [PointOfUsePolicy.skipButtonID, PointOfUsePolicy.claudeButtonID,
+                                                      PointOfUsePolicy.codexButtonID, PointOfUsePolicy.localButtonID]
+                            && chooser.localComponents == [BootstrapInstallPlan.ollamaGemma]
+                            && chooser.buttons.last?.detail == "6.58 GB. Nothing you dictate leaves this Mac.",
+                        chooser.buttons.last?.detail ?? "nil")
+        let routes = Set([PointOfUseOffer.install(email), .install(cleanup), .chooser(chooser)]
+            .flatMap { $0.buttons.map(\.route.kind) })
+        reporter.record("every button on an Ollama page still only installs, skips or opens a sign-in",
+                        routes.isSubset(of: [.install, .skip, .guidedProvider]))
+    }
+
+    /// A page as text, one line per field, in the form the literals below were captured in from 29e3f47.
+    private static func transcript(_ offer: PointOfUseOffer?) -> [String] {
+        guard let offer else { return ["nil"] }
+        var out: [String]
+        switch offer {
+        case .install(let install): out = ["install comps=\(install.components.map(\.id).joined(separator: ","))"]
+        case .chooser(let chooser): out = ["chooser local=\(chooser.localComponents.map(\.id).joined(separator: ","))"]
+        }
+        out.append("header=\(offer.header)")
+        out += offer.lines.map { "line=\($0)" }
+        out += offer.buttons.map { button -> String in
+            let route: String
+            switch button.route {
+            case .skip: route = "skip"
+            case .install: route = "install"
+            case .guidedProvider(let provider): route = "guidedProvider(\(provider.rawValue))"
+            }
+            return "button=\(button.id)|\(button.title)|\(button.detail)|\(route)"
+        }
+        out.append("choice=\(offer.localAppChoice == nil ? "none" : "yes")")
+        out.append("log=\(offer.logToken)")
+        return out
+    }
+
+    /// 29e3f47's install offer for a feature on an LM Studio Mac missing its model, captured from that commit.
+    private static func lmStudioInstall29e3f47(id: String, title: String, model: String, size: String) -> [String] {
+        ["install comps=model:\(model)",
+         "header=\(title.uppercased()) - NOT INSTALLED YET",
+         "line=\(title) uses \(model), \(size).",
+         "line=It installs here. \(title) runs as soon as it lands, and you can close this.",
+         "button=install-now|Install now|Downloads \(size).|install",
+         "button=skip|Not now|Nothing is installed and your text is untouched.|skip",
+         "choice=none",
+         "log=point-of-use offer=install feature=\(id) buttons=install-now,skip"]
+    }
+
+    private static func checkLMStudioUnchanged(_ reporter: SelfTestReporter) {
+        let email = lmStudioInstall29e3f47(id: "email", title: "Email mode", model: "google/gemma-4-e4b",
+                                           size: "6.86 GB")
+        let cleanup = lmStudioInstall29e3f47(id: "cleanup", title: "Cleanup",
+                                             model: "qwen3-coder-30b-a3b-instruct-mlx", size: "17.19 GB")
+        let promptPrep = lmStudioInstall29e3f47(id: "prompt-prep", title: "Prompt prep",
+                                                model: "qwen3-coder-30b-a3b-instruct-mlx", size: "17.19 GB")
+        let chooser = [
+            "chooser local=model:google/gemma-4-e4b",
+            "header=EMAIL MODE NEEDS A MODEL - PICK A ROUTE",
+            "line=This Mac has no local model installed, and neither the Claude nor the Codex CLI is here.",
+            "line=ViddyDictate has sent nothing anywhere. A cloud provider only ever runs if you pick one here.",
+            "button=skip|Skip this time|Leave it. Your text is untouched.|skip",
+            "button=set-up-claude|Set up Claude|Sign in to Claude Code. Your text would then leave this Mac.|guidedProvider(claude)",
+            "button=set-up-codex|Set up Codex|Sign in to Codex. Your text would then leave this Mac.|guidedProvider(codex)",
+            "button=set-up-local-models|Set up local models|6.86 GB. Nothing you dictate leaves this Mac.|install",
+            "choice=none",
+            "log=point-of-use offer=chooser feature=email buttons=skip,set-up-claude,set-up-codex,set-up-local-models",
+        ]
+        let lmOnly = machine(lmStudio: [], ollama: nil, claude: true)
+        let lmOther = machine(lmStudio: ["llama-3.2-1b-instruct"], ollama: nil)
+        let lmBare = machine(lmStudio: [], ollama: nil)
+        let expectations: [(String, PointOfUseFeature, [LLMProvider: LLMProviderDetection.Presence], [String])] = [
+            ("email, Claude signed in", .email, lmOnly, email),
+            ("cleanup, Claude signed in", .cleanup, lmOnly, cleanup),
+            ("prompt prep, Claude signed in", .promptPrep, lmOnly, promptPrep),
+            ("email, another model installed", .email, lmOther, email),
+            ("cleanup, another model installed", .cleanup, lmOther, cleanup),
+            ("email, nothing else installed", .email, lmBare, chooser),
+        ]
+        var mismatches: [String] = []
+        for (label, feature, presences, expected) in expectations {
+            // Whatever the Preferred app says and however small the Mac: neither is read without Ollama.
+            for preferred in [nil, LocalBackendID.lmStudio, .ollama] {
+                for facts in [nil, mac16, mac64] {
+                    let got = transcript(realPolicy(feature, presences, preferred, facts))
+                    if got != expected {
+                        mismatches.append("\(label), preferred \(preferred?.rawValue ?? "automatic"): "
+                            + got.joined(separator: " / "))
+                    }
+                }
+            }
+        }
+        reporter.record("an LM-Studio-only Mac's offer is 29e3f47's, byte for byte, on every preference and Mac",
+                        mismatches.isEmpty, mismatches.prefix(2).joined(separator: " | "))
+        // A presence built by hand (no per-app readings) keeps the 1.1.0 reading: LM Studio's offer.
+        let handBuilt: [LLMProvider: LLMProviderDetection.Presence] = [
+            .local: LLMProviderDetection.Presence(
+                installed: true, state: .available,
+                availableLocalModels: [LMStudioModelOption(modelID: "llama", label: "llama")]),
+            .claude: LLMProviderDetection.Presence(installed: false, state: .unavailable("CLI unavailable")),
+            .codex: LLMProviderDetection.Presence(installed: false,
+                                                  state: .unavailable("the codex CLI is not installed")),
+        ]
+        reporter.record("a presence with no per-app breakdown is offered LM Studio's model, as in 1.1.0",
+                        transcript(realPolicy(.email, handBuilt, .ollama, mac16)) == email)
+    }
+
+    private static func checkFit(_ policy: Policy, _ reporter: SelfTestReporter) {
+        let machines: [(String, [LLMProvider: LLMProviderDetection.Presence], LocalBackendID?)] = [
+            ("neither app", machine(lmStudio: nil, ollama: nil), nil),
+            ("neither app, Claude", machine(lmStudio: nil, ollama: nil, claude: true), nil),
+            ("Ollama only", machine(lmStudio: nil, ollama: []), nil),
+            ("Ollama only, Claude", machine(lmStudio: nil, ollama: [], claude: true), nil),
+            ("both, Preferred Ollama", machine(lmStudio: ["llama-3.2-1b-instruct"], ollama: ["llama3.2:1b"]), .ollama),
+        ]
+        let qwen = LocalModelRef(backend: .ollama, modelID: "qwen3-coder:30b")
+        var offered: [String] = []
+        for (feature, _) in textFeatures {
+            for (label, presences, preferred) in machines {
+                let offer = policy(feature, presences, preferred, mac16)
+                let queued = everyComponent(offer).flatMap(\.localSteps).contains(.model(qwen))
+                let pages = (offer?.buttons ?? []) + (offer?.localAppChoice?.buttons ?? [])
+                let named = pages.contains { $0.route == .install && $0.title.contains("qwen3-coder:30b") }
+                if queued || named { offered.append("\(feature.id) on \(label)") }
+            }
+        }
+        reporter.record(fitCheck, offered.isEmpty, offered.joined(separator: ", "))
+
+        reporter.record("the fit verdict is the first-run window's own (ComponentPicker.availability)",
+                        !PointOfUsePolicy.ollamaModelFits(BootstrapInstallPlan.ollamaQwen, facts: mac16)
+                            && ComponentPicker.availability(.ollamaQwen, facts: mac16) == .tooLarge
+                            && PointOfUsePolicy.ollamaModelFits(BootstrapInstallPlan.ollamaQwen, facts: mac64)
+                            && ComponentPicker.availability(.ollamaGemma, facts: mac16) == .tightFit
+                            && PointOfUsePolicy.ollamaModelFits(BootstrapInstallPlan.ollamaGemma, facts: mac16))
+        if case .install(let tooBig)? = policy(.cleanup, machine(lmStudio: nil, ollama: [], claude: true), nil, mac16) {
+            reporter.record("on a 16 GB Ollama Mac, cleanup says its model is too big and only closes",
+                            tooBig.components.isEmpty && tooBig.buttons.map(\.route) == [.skip]
+                                && tooBig.buttons.map(\.title) == ["Close"]
+                                && tooBig.header == "CLEANUP - TOO BIG FOR THIS MAC"
+                                && tooBig.lines == ["Cleanup uses qwen3-coder:30b in Ollama, 18.56 GB. "
+                                                    + "Your Mac has 16 GB - this model needs more."],
+                            (tooBig.lines + tooBig.buttons.map(\.title)).joined(separator: " | "))
+        } else {
+            reporter.record("on a 16 GB Ollama Mac, cleanup says its model is too big and only closes", false)
+        }
+        reporter.record("a tight fit is still offered: email on a 16 GB Ollama Mac pulls gemma4:e4b",
+                        offerComponents(policy(.email, machine(lmStudio: nil, ollama: [], claude: true), nil, mac16))
+                            == [BootstrapInstallPlan.ollamaGemma])
+        let smallChoice = policy(.cleanup, machine(lmStudio: nil, ollama: nil), nil, mac16)?.localAppChoice
+        reporter.record("on a 16 GB Mac with neither app, cleanup's Ollama option is the app alone and says why",
+                        smallChoice?.option(.ollama)?.components == [BootstrapInstallPlan.ollama]
+                            && smallChoice?.option(.ollama)?.detail.hasSuffix(
+                                "qwen3-coder:30b needs more memory than this Mac can give it, so no model is pulled.")
+                                == true,
+                        smallChoice?.option(.ollama)?.detail ?? "nil")
+        reporter.record("a 64 GB Ollama Mac is offered qwen3-coder:30b for cleanup",
+                        offerComponents(policy(.cleanup, machine(lmStudio: nil, ollama: [], claude: true), nil, mac64))
+                            == [BootstrapInstallPlan.ollamaQwen])
     }
 
     // MARK: - Persisted identifiers (literals from 12c0db4's source)
@@ -508,6 +896,36 @@ enum InstallerLocalStepsFixtureSelfTest {
         })
         requireCaught(reporter, mutant: "choice with Ollama offered as an equal", by: firstChoiceCheck) {
             checkChoiceOrder(equals, $0)
+        }
+
+        // (f) The Ollama choice queues the app and no model: 29e3f47's option.
+        let appAlone: Policy = { feature, presences, preferred, facts in
+            mapChoice(realPolicy(feature, presences, preferred, facts)) { choice in
+                PointOfUseLocalAppChoice(header: choice.header, lines: choice.lines, options: choice.options.map {
+                    PointOfUseLocalAppOption(backend: $0.backend, title: $0.title, label: $0.label,
+                                             recommended: $0.recommended, detail: $0.detail, warning: $0.warning,
+                                             components: $0.backend == .ollama ? [BootstrapInstallPlan.ollama]
+                                                 : $0.components,
+                                             button: $0.button)
+                })
+            }
+        }
+        requireCaught(reporter, mutant: "Ollama choice that queues no model", by: ollamaChoiceModelCheck) {
+            checkOllamaChoiceModel(appAlone, scratch: scratch, $0)
+        }
+        // (g) An Ollama-only Mac offered LM Studio and its model: what 29e3f47 offered it.
+        let lmStudioAlways: Policy = { feature, _, _, _ in
+            .install(PointOfUsePolicy.installOffer(for: feature, outstanding: feature.components))
+        }
+        requireCaught(reporter, mutant: "Ollama-only Mac offered LM Studio", by: ollamaOnlyCheck) {
+            checkOllamaOnly(lmStudioAlways, $0)
+        }
+        // (h) The Ollama pull offered with no fit check: the policy never told this Mac's memory.
+        let noFitCheck: Policy = { feature, presences, preferred, _ in
+            realPolicy(feature, presences, preferred, nil)
+        }
+        requireCaught(reporter, mutant: "Ollama pull with no fit check", by: fitCheck) {
+            checkFit(noFitCheck, $0)
         }
     }
 

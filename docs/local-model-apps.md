@@ -65,6 +65,13 @@ memory to run it. Later, use **Settings > Setup > Local model apps**: each app h
 state and an Install, Open, or Start button. **Run first-run setup again…** on the same tab brings
 the window back, models included.
 
+When you press a feature's hotkey and its model is missing, the offer follows the app you have. With
+only Ollama installed (or both, with Ollama as the Preferred local app) it offers to pull that
+feature's Ollama staff pick, with its download size, and never suggests LM Studio. With neither app,
+it asks which one to install, LM Studio first; picking Ollama installs Ollama and then pulls the
+feature's model. A model your Mac does not have the memory for is never offered: the offer says so
+instead.
+
 ViddyDictate downloads both apps from their official sites and checks them before anything is
 moved into place. For Ollama:
 

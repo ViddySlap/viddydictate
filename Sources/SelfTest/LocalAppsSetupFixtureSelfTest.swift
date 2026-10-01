@@ -359,7 +359,10 @@ enum LocalAppsSetupFixtureSelfTest {
     private static func checkUnchangedCopy(_ reporter: SelfTestReporter) {
         reporter.record("the 1.1.0 headline constant is unchanged", LocalModelSetup.headline == headline110)
         reporter.record("the purpose line is unchanged", LocalModelSetup.purpose == purpose110)
-        // TODO(S4) keeps these exactly as they are until ViddyDictate tracks the models it loaded.
+        // ViddyDictate now tracks the models it loads (S4, dc3b0fd: ModelManager's ownedModels), but that set is
+        // process-local, so the lane kept LM Studio's Unload all (`lms unload --all`) rather than an "Unload
+        // ViddyDictate's models" that would do nothing after a restart. These 1.1.0 strings stay exactly as they
+        // are; with Ollama installed, each app gets its own Unload all, named only when both are listed.
         reporter.record("Loaded now and Unload all are unchanged, still LM Studio's",
                         LocalModelSetup.residencyTitle == "Loaded now" && LocalModelSetup.unloadAllTitle == "Unload all"
                             && LocalModelSetup.unloadingTitle == "Unloading...")
@@ -375,7 +378,7 @@ enum LocalAppsSetupFixtureSelfTest {
     private static func checkPointOfUse(_ reporter: SelfTestReporter) {
         let choice = PointOfUsePolicy.localAppChoice(
             for: .email, lmStudioComponents: [BootstrapInstallPlan.lmStudio, BootstrapInstallPlan.gemma],
-            ollamaComponents: [BootstrapInstallPlan.ollama])
+            ollamaComponents: [BootstrapInstallPlan.ollama, BootstrapInstallPlan.ollamaGemma])
         let cells = choice.cells
         reporter.record("the choice page lists LM Studio, then Ollama, then Not now",
                         cells.map(\.button.id) == [PointOfUsePolicy.lmStudioAppButtonID,

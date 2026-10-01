@@ -21,6 +21,10 @@ import Cocoa
 ///   - `offer-local-app-choice-ollama.png` - the same page with the selection moved onto Ollama.
 ///   - `offer-running-ollama-approval.png` - Ollama's install waiting on its macOS prompt: the row says so,
 ///                                and the warning stays under it.
+///   - `offer-install-ollama-model.png` - a Mac with Ollama and not LM Studio, missing email's model: a pull of
+///                                gemma4:e4b into Ollama with its measured size, and no LM Studio anywhere (S6b).
+///   - `offer-ollama-too-big.png` - the same Mac at 16 GB, reaching for cleanup: qwen3-coder:30b cannot fit, so
+///                                the page says so and only closes; nothing is offered for install (S6b).
 ///
 /// What a screenshot cannot assert, and this gate does: that every line the policy produced actually
 /// reached a control rather than being dropped by the layout, that no line is clipped by the box it was
@@ -60,6 +64,29 @@ enum PointOfUseOfferRender {
                                                                   label: "llama")])
         return providers
     }
+
+    /// Ollama installed and running with one unrelated model; LM Studio not installed; Claude signed in, so the
+    /// honest offer is the feature's own model rather than B14's chooser.
+    private static var ollamaWithoutTheModel: [LLMProvider: LLMProviderDetection.Presence] {
+        var providers = claudeOnly
+        providers[.local] = LLMProviderDetection.mergedLocalPresence([
+            LLMProviderDetection.LocalBackendReading(backend: .lmStudio, installed: false, responding: false,
+                                                     models: nil),
+            LLMProviderDetection.LocalBackendReading(
+                backend: .ollama, installed: true, responding: true,
+                models: [LMStudioModelOption(modelID: "llama3.2:1b", label: "llama3.2:1b", backend: .ollama)],
+                startable: true),
+        ])
+        return providers
+    }
+
+    /// Synthetic Macs: 64 GB fits both Ollama picks; at 16 GB qwen3-coder:30b cannot fit even at the ceiling.
+    private static let mac64 = ComponentPicker.MachineFacts(
+        physicalBytes: 68_719_476_736, budgetBytes: 32_000_000_000, maxBudgetBytes: 50_000_000_000,
+        wiredBytes: 5_000_000_000)
+    private static let mac16 = ComponentPicker.MachineFacts(
+        physicalBytes: 17_179_869_184, budgetBytes: 8_000_000_000, maxBudgetBytes: 12_600_000_000,
+        wiredBytes: 3_000_000_000)
 
     private static var coreInstalled: BootstrapSnapshot {
         var snapshot = BootstrapSnapshot.fresh(descriptors: BootstrapInstallPlan.allComponents)
@@ -106,6 +133,9 @@ enum PointOfUseOfferRender {
         print("--- D3: which local app, on a Mac with neither ---")
         renderLocalAppChoice(chooser, outDir: outDir)
         renderOllamaApproval(chained, outDir: outDir)
+        print("--- S6b: the feature's own model on a Mac whose local app is Ollama ---")
+        renderOllamaModel(outDir: outDir)
+        renderOllamaTooBig(outDir: outDir)
 
         print("[point-of-use-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
@@ -325,6 +355,68 @@ enum PointOfUseOfferRender {
               second == OllamaInstaller.adminPromptWarning, second ?? "missing")
         check("a waiting row offers nothing to press", panel.buttons.isEmpty)
         assertNotClipped(in: view, label: "Ollama approval wait")
+    }
+
+    /// Ollama is here and LM Studio is not: email's offer is a pull of its Ollama staff pick, named with its
+    /// app and its measured size, and nothing on the page mentions LM Studio.
+    private static func renderOllamaModel(outDir: String) {
+        guard let offer = PointOfUsePolicy.offer(for: .email, presences: ollamaWithoutTheModel,
+                                                 bootstrap: coreInstalled, facts: mac64),
+              case .install(let install) = offer else {
+            check("an Ollama-only Mac missing email's model gets an install offer", false)
+            return
+        }
+        let panel = InstallOfferPanel()
+        let view = panel.renderForSeam(.offer(offer))
+        SelfTestRenderCapture.capture(view, to: outDir + "/offer-install-ollama-model.png",
+                                      name: "Ollama model pull", report: check)
+        assertLinesReached(offer, in: view, label: "Ollama model pull")
+        assertButtonsReached(offer, in: view, label: "Ollama model pull")
+        check("the Ollama pull queues the model row alone",
+              install.components == [BootstrapInstallPlan.ollamaGemma] && offer.localAppChoice == nil,
+              install.components.map(\.id).joined(separator: ","))
+        let first = SelfTestRenderCapture.label(PointOfUsePolicy.lineIdentifier(0), in: view)?.stringValue ?? ""
+        check("the first line names the model, Ollama and the measured size",
+              first == "Email mode uses gemma4:e4b in Ollama, 6.58 GB.", first)
+        let cellTexts = SelfTestRenderCapture.find(PointOfUsePolicy.buttonIdentifier(PointOfUsePolicy.installButtonID),
+                                                   in: view).map {
+            SelfTestRenderCapture.allViews(in: $0).compactMap { ($0 as? NSTextField)?.stringValue }
+        } ?? []
+        check("the install cell reads Install gemma4:e4b in Ollama, and what it downloads",
+              cellTexts.contains("Install gemma4:e4b in Ollama") && cellTexts.contains("Downloads 6.58 GB."),
+              cellTexts.joined(separator: " / "))
+        let onScreen = SelfTestRenderCapture.allViews(in: view).compactMap { ($0 as? NSTextField)?.stringValue }
+        check("nothing on the page mentions LM Studio", !onScreen.contains { $0.contains("LM Studio") },
+              onScreen.filter { $0.contains("LM Studio") }.joined(separator: " / "))
+        check("the page opens on the install button", panel.selectedButton?.id == PointOfUsePolicy.installButtonID,
+              panel.selectedButton?.id ?? "nil")
+        check("pressing it installs the page's own row",
+              panel.selectedButton.map {
+                  PointOfUsePolicy.installStep(pressed: $0, offer: offer, choice: nil, running: false)
+              } == .installComponents)
+    }
+
+    /// The same Mac at 16 GB, reaching for cleanup: its Ollama pick cannot fit, so nothing is offered for install.
+    private static func renderOllamaTooBig(outDir: String) {
+        guard let offer = PointOfUsePolicy.offer(for: .cleanup, presences: ollamaWithoutTheModel,
+                                                 bootstrap: coreInstalled, facts: mac16) else {
+            check("a 16 GB Ollama Mac reaching for cleanup is told why", false)
+            return
+        }
+        let panel = InstallOfferPanel()
+        let view = panel.renderForSeam(.offer(offer))
+        SelfTestRenderCapture.capture(view, to: outDir + "/offer-ollama-too-big.png",
+                                      name: "Ollama model too big", report: check)
+        assertLinesReached(offer, in: view, label: "Ollama model too big")
+        assertButtonsReached(offer, in: view, label: "Ollama model too big")
+        check("the too-big page offers only Close, and nothing to install",
+              offer.buttons.map(\.title) == ["Close"] && offer.buttons.allSatisfy { $0.route == .skip },
+              offer.buttons.map(\.title).joined(separator: ","))
+        let first = SelfTestRenderCapture.label(PointOfUsePolicy.lineIdentifier(0), in: view)?.stringValue ?? ""
+        check("it says the model is too big for this Mac, in the first-run window's words",
+              first == "Cleanup uses qwen3-coder:30b in Ollama, 18.56 GB. Your Mac has 16 GB - this model needs more.",
+              first)
+        check("the header says so too", offer.header == "CLEANUP - TOO BIG FOR THIS MAC", offer.header)
     }
 
     /// The whole answer a user used to get when a mode had no model: one toast, and then nothing.

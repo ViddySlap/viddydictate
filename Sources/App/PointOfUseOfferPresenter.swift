@@ -24,6 +24,8 @@ final class PointOfUseOfferPresenter {
     private let panel: InstallOfferPanel
     private let coordinator: BootstrapInstallCoordinator
     private let measure: () -> [LLMProvider: LLMProviderDetection.Presence]
+    /// This Mac's memory, which an Ollama pull is fit-checked against before it is offered.
+    private let machineFacts: () -> ComponentPicker.MachineFacts
     private var changeToken: NSObjectProtocol?
     private var activityToken: NSObjectProtocol?
     private var pendingFeature: PointOfUseFeature?
@@ -35,10 +37,12 @@ final class PointOfUseOfferPresenter {
     init(panel: InstallOfferPanel = InstallOfferPanel(),
          coordinator: BootstrapInstallCoordinator = .shared,
          measure: @escaping () -> [LLMProvider: LLMProviderDetection.Presence]
-            = { LLMProviderDetection.observeAll() }) {
+            = { LLMProviderDetection.observeAll() },
+         machineFacts: @escaping () -> ComponentPicker.MachineFacts = { .live }) {
         self.panel = panel
         self.coordinator = coordinator
         self.measure = measure
+        self.machineFacts = machineFacts
         // The running page reads what each row last reported from the same queue it installs through.
         panel.activity = { [weak coordinator] id in coordinator?.activity(for: id) }
     }
@@ -62,12 +66,15 @@ final class PointOfUseOfferPresenter {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let presences = self.measure()
+            let facts = self.machineFacts()
             let bootstrap = self.coordinator.snapshot
             DispatchQueue.main.async {
                 self.measuring = false
                 guard !self.isPresenting else { return }
+                // The Preferred local app decides which app's model is offered when both are installed (D1).
                 guard let offer = PointOfUsePolicy.offer(
-                    for: feature, presences: presences, bootstrap: bootstrap) else {
+                    for: feature, presences: presences, bootstrap: bootstrap,
+                    preferredLocalApp: Settings.preferredLocalBackend, facts: facts) else {
                     Log.write("point-of-use: nothing to offer for \(feature.id)")
                     return
                 }

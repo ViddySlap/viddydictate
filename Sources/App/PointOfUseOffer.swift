@@ -88,12 +88,27 @@ struct PointOfUseFeature: Equatable {
 
     /// The same feature on Ollama, the advanced option (spec D3): its app, then the model it holds. Only a
     /// feature a local text model serves has one.
-    ///
-    /// The Ollama choice here still installs the app alone. D4's model families now exist as queue rows
-    /// (`BootstrapInstallPlan.ollamaGemma` / `ollamaQwen`, which the first-run window pulls), but how a feature's
-    /// offer names its Ollama model is not settled. TODO(D4): append the feature's Ollama model row here.
     var ollamaComponents: [InstallerComponentDescriptor] {
-        satisfaction == .textProvider ? [BootstrapInstallPlan.ollama] : []
+        guard satisfaction == .textProvider else { return [] }
+        return [BootstrapInstallPlan.ollama] + (ollamaModel.map { [$0] } ?? [])
+    }
+
+    /// The feature's own model in Ollama (spec D4): Ollama's staff pick for the family LM Studio's model row
+    /// holds (`StaffPicks.localModelID`, the mapping `testedLocalBundle(for:on:)` uses), as the same queue row
+    /// the first-run window pulls. So email is `gemma4:e4b`, and cleanup and prompt prep are `qwen3-coder:30b`.
+    /// A pull only: the row makes Ollama ready, then pulls. nil for a feature with no local text model.
+    var ollamaModel: InstallerComponentDescriptor? {
+        guard satisfaction == .textProvider else { return nil }
+        for component in components {
+            for case .model(let ref) in component.localSteps where ref.backend == .lmStudio {
+                guard let tag = StaffPicks.localModelID(forLMStudioDefault: ref.modelID, on: .ollama) else {
+                    continue
+                }
+                let id = BootstrapInstallPlan.componentID(for: LocalModelRef(backend: .ollama, modelID: tag))
+                return BootstrapInstallPlan.optionalLocalModels.first { $0.id == id }
+            }
+        }
+        return nil
     }
 
     /// The feature behind a route, so a landing that already knows which route it ran can ask for the
@@ -369,11 +384,51 @@ enum PointOfUsePolicy {
         return noLocalModel && !claude.installed && !codex.installed
     }
 
+    /// Which app a feature's model is offered in on a Mac that has at least one local app (spec D1/D3: the
+    /// Preferred local app follows what is installed). Ollama when it is the only app installed, or when both
+    /// are and the effective Preferred local app is Ollama; LM Studio otherwise, which is every offer this
+    /// policy made before Ollama existed. A presence with no per-app breakdown (one built by hand) is LM Studio's.
+    static func offeredLocalApp(presences: [LLMProvider: LLMProviderDetection.Presence],
+                                preferredLocalApp: LocalBackendID?) -> LocalBackendID {
+        guard let installed = presences[.local]?.installedLocalBackends, installed.contains(.ollama) else {
+            return .lmStudio
+        }
+        guard installed.contains(.lmStudio) else { return .ollama }
+        return LocalBackendPreference.effective(explicit: preferredLocalApp, installed: installed)
+    }
+
+    /// The fit check for an Ollama pull (`ComponentPicker.availability`, the loader's own 1.15 arithmetic, the
+    /// same verdict the first-run window gives the row). Only a model that cannot fit at the budget ceiling is
+    /// refused; unmeasured facts (`nil`, or a kernel fact macOS did not report) are not a verdict.
+    static func ollamaModelFits(_ model: InstallerComponentDescriptor,
+                                facts: ComponentPicker.MachineFacts?) -> Bool {
+        guard let facts, let row = pickerRow(for: model) else { return true }
+        return ComponentPicker.availability(row, facts: facts) != .tooLarge
+    }
+
+    private static func pickerRow(for model: InstallerComponentDescriptor) -> ComponentPicker.RowID? {
+        ComponentPicker.RowID.allCases.first { row in
+            row.localModel.map { BootstrapInstallPlan.componentID(for: $0) } == model.id
+        }
+    }
+
     /// The whole decision. `nil` means say nothing: either the feature is already installed, or something
     /// could not be measured and a panel would be guessing at the user's expense.
+    ///
+    /// `preferredLocalApp` is the EXPLICIT Preferred local app (nil for Automatic) and `facts` this Mac's
+    /// memory, which the Ollama pull is fit-checked against. A Mac with LM Studio and not Ollama never reads
+    /// either: its offer is the one this policy has always made.
     static func offer(for feature: PointOfUseFeature,
                       presences: [LLMProvider: LLMProviderDetection.Presence],
-                      bootstrap: BootstrapSnapshot) -> PointOfUseOffer? {
+                      bootstrap: BootstrapSnapshot,
+                      preferredLocalApp: LocalBackendID? = nil,
+                      facts: ComponentPicker.MachineFacts? = nil) -> PointOfUseOffer? {
+        if feature.satisfaction == .textProvider, let model = feature.ollamaModel,
+           offeredLocalApp(presences: presences, preferredLocalApp: preferredLocalApp) == .ollama {
+            return ollamaOffer(for: feature, model: model, presences: presences, bootstrap: bootstrap,
+                               facts: facts)
+        }
+
         var outstanding: [InstallerComponentDescriptor] = []
         for component in feature.components {
             guard let satisfied = isSatisfied(component, presences: presences, bootstrap: bootstrap) else {
@@ -384,15 +439,18 @@ enum PointOfUsePolicy {
         guard !outstanding.isEmpty else { return nil }
 
         // D3: on a Mac with neither app, the offer also carries which app to install. The LM Studio option
-        // is exactly the outstanding list above, so "Install now" is unchanged by the choice existing.
+        // is exactly the outstanding list above, so "Install now" is unchanged by the choice existing. The
+        // Ollama option is its app and then the feature's own model, unless that model cannot fit this Mac,
+        // in which case it is the app alone and says why.
         var appChoice: PointOfUseLocalAppChoice?
         if feature.satisfaction == .textProvider, hasNoLocalApp(presences: presences),
            outstanding.contains(where: { $0.id == BootstrapInstallPlan.lmStudio.id }) {
+            let tooLarge = feature.ollamaModel.flatMap { ollamaModelFits($0, facts: facts) ? nil : $0 }
             let ollama = feature.ollamaComponents.filter {
-                isSatisfied($0, presences: presences, bootstrap: bootstrap) != true
+                $0.id != tooLarge?.id && isSatisfied($0, presences: presences, bootstrap: bootstrap) != true
             }
             appChoice = localAppChoice(for: feature, lmStudioComponents: outstanding,
-                                       ollamaComponents: ollama)
+                                       ollamaComponents: ollama, ollamaModelTooLarge: tooLarge)
         }
 
         if feature.satisfaction == .textProvider, hasNothingInstalled(presences: presences) {
@@ -409,8 +467,23 @@ enum PointOfUsePolicy {
     /// advanced option, which carries the warning about its macOS prompt.
     static func localAppChoice(for feature: PointOfUseFeature,
                                lmStudioComponents: [InstallerComponentDescriptor],
-                               ollamaComponents: [InstallerComponentDescriptor]) -> PointOfUseLocalAppChoice {
-        PointOfUseLocalAppChoice(
+                               ollamaComponents: [InstallerComponentDescriptor],
+                               ollamaModelTooLarge: InstallerComponentDescriptor? = nil) -> PointOfUseLocalAppChoice {
+        // What the Ollama option fetches after the app, said the way LM Studio's option says it.
+        let pullsModel = ollamaComponents.flatMap(\.localSteps).contains {
+            if case .model = $0 { return true }
+            return false
+        }
+        let ollamaModelClause: String
+        if let tooLarge = ollamaModelTooLarge {
+            ollamaModelClause = ". \(tooLarge.title) needs more memory than this Mac can give it, so no model is "
+                + "pulled."
+        } else if pullsModel {
+            ollamaModelClause = ", then pulls the model \(feature.title.lowercased()) uses."
+        } else {
+            ollamaModelClause = "."
+        }
+        return PointOfUseLocalAppChoice(
             header: "SET UP LOCAL MODELS - PICK ONE APP",
             lines: [
                 "\(feature.title) runs on a local model app on this Mac. Most people only need one.",
@@ -431,7 +504,7 @@ enum PointOfUsePolicy {
                     backend: .ollama, title: LocalBackendID.ollama.displayName,
                     label: "Advanced", recommended: false,
                     detail: "The advanced option, for people who already use Ollama. ViddyDictate installs "
-                        + "it from Ollama's own download.",
+                        + "it from Ollama's own download" + ollamaModelClause,
                     warning: OllamaInstaller.adminPromptWarning,
                     components: ollamaComponents,
                     button: PointOfUseButton(
@@ -484,6 +557,74 @@ enum PointOfUsePolicy {
                     route: .install),
                 PointOfUseButton(
                     id: skipButtonID, title: "Not now",
+                    detail: "Nothing is installed and your text is untouched.",
+                    route: .skip),
+            ])
+    }
+
+    /// The offer on a Mac whose local app is Ollama (`offeredLocalApp`): the feature's own model, pulled into
+    /// the Ollama already here. Never LM Studio, and never a model this Mac cannot fit, which is said instead.
+    private static func ollamaOffer(for feature: PointOfUseFeature, model: InstallerComponentDescriptor,
+                                    presences: [LLMProvider: LLMProviderDetection.Presence],
+                                    bootstrap: BootstrapSnapshot,
+                                    facts: ComponentPicker.MachineFacts?) -> PointOfUseOffer? {
+        // Unmeasured (Ollama stopped, its catalog unread) is not missing, exactly as for LM Studio.
+        guard let satisfied = isSatisfied(model, presences: presences, bootstrap: bootstrap), !satisfied else {
+            return nil
+        }
+        guard ollamaModelFits(model, facts: facts) else {
+            return .install(ollamaModelTooLargeOffer(for: feature, model: model, facts: facts))
+        }
+        if hasNothingInstalled(presences: presences) {
+            return .chooser(chooser(for: feature, localComponents: [model]))
+        }
+        return .install(ollamaModelOffer(for: feature, model: model))
+    }
+
+    /// B13 on an Ollama Mac: the pull, named with its app and its measured size.
+    static func ollamaModelOffer(for feature: PointOfUseFeature,
+                                 model: InstallerComponentDescriptor) -> PointOfUseInstallOffer {
+        let size = size(of: [model]).map { ", \($0)" } ?? ""
+        return PointOfUseInstallOffer(
+            featureID: feature.id,
+            featureTitle: feature.title,
+            header: "\(feature.title.uppercased()) - NOT INSTALLED YET",
+            lines: [
+                "\(feature.title) uses \(model.title) in Ollama\(size).",
+                "It installs here. \(feature.title) runs as soon as it lands, and you can close this.",
+            ],
+            components: [model],
+            buttons: [
+                PointOfUseButton(
+                    id: installButtonID, title: "Install \(model.title) in Ollama",
+                    detail: sizeDetail(for: [model]),
+                    route: .install),
+                PointOfUseButton(
+                    id: skipButtonID, title: "Not now",
+                    detail: "Nothing is installed and your text is untouched.",
+                    route: .skip),
+            ])
+    }
+
+    /// The feature's Ollama model cannot fit this Mac even at the memory budget's ceiling. There is nothing to
+    /// install, so the page says why in the first-run window's words and only closes.
+    static func ollamaModelTooLargeOffer(for feature: PointOfUseFeature, model: InstallerComponentDescriptor,
+                                         facts: ComponentPicker.MachineFacts?) -> PointOfUseInstallOffer {
+        let size = size(of: [model]).map { ", \($0)" } ?? ""
+        let verdict = facts.flatMap { facts in
+            pickerRow(for: model).flatMap {
+                ComponentPicker.machineNote($0, facts: facts, environment: ComponentPicker.Environment())
+            }
+        } ?? "This model needs more memory than this Mac can give it."
+        return PointOfUseInstallOffer(
+            featureID: feature.id,
+            featureTitle: feature.title,
+            header: "\(feature.title.uppercased()) - TOO BIG FOR THIS MAC",
+            lines: ["\(feature.title) uses \(model.title) in Ollama\(size). \(verdict)"],
+            components: [],
+            buttons: [
+                PointOfUseButton(
+                    id: skipButtonID, title: "Close",
                     detail: "Nothing is installed and your text is untouched.",
                     route: .skip),
             ])
