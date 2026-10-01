@@ -477,18 +477,34 @@ final class ModelsPowerSettingsStore {
     /// Sizes are keyed by `(app, id)`: with both apps running the same id can appear twice, which would trap
     /// `Dictionary(uniqueKeysWithValues:)` if keyed by id, and must never lend one app's size to the other.
     /// The id-keyed closure keeps its old meaning, LM Studio's model, for any caller that reads it directly.
+    ///
+    /// The resident set comes from `LocalResidentSetCache`, for the apps the catalog lists, read against the
+    /// same wired reading: a model already resident costs nothing new, exactly as `ModelManager` decides. It
+    /// is read only after the kernel facts, so a Mac whose capacity is unreadable never asks a local app, and
+    /// it never blocks resolution: a slow or failed read is an empty set, the old arithmetic.
     static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
+        liveLocalCapacity(models: models, residents: .shared)
+    }
+
+    /// `liveLocalCapacity` over an explicit resident-set cache, so a gate can drive the whole live path with
+    /// an injected reader.
+    static func liveLocalCapacity(models: [LMStudioModelOption]?,
+                                  residents: LocalResidentSetCache) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
         else { return nil }
-        return capacityFacts(models: models, wiredBytes: wired, budgetBytes: budget)
+        return capacityFacts(
+            models: models, wiredBytes: wired, budgetBytes: budget,
+            residentRefs: residents.residentRefs(backends: Set(models.map(\.backend)), wiredBytes: wired))
     }
 
     /// The pure half of `liveLocalCapacity`, so a gate can check the size keying without the kernel.
     /// First row wins for a duplicate ref, as `LMStudioModelCatalog.parseInstalled` already dedupes ids.
+    /// `residentRefs` defaults to empty: no resident model is exempted, the arithmetic before residency.
     static func capacityFacts(models: [LMStudioModelOption], wiredBytes: UInt64,
-                              budgetBytes: UInt64) -> LLMLocalCapacityFacts {
+                              budgetBytes: UInt64,
+                              residentRefs: Set<LocalModelRef> = []) -> LLMLocalCapacityFacts {
         var byRef: [LocalModelRef: Int64] = [:]
         for model in models {
             guard let size = model.sizeBytes, byRef[model.ref] == nil else { continue }
@@ -497,7 +513,8 @@ final class ModelsPowerSettingsStore {
         return LLMLocalCapacityFacts(
             sizeBytes: { byRef[LocalModelRef(backend: .lmStudio, modelID: $0)] },
             wiredBytes: wiredBytes, budgetBytes: budgetBytes,
-            sizeBytesByRef: { byRef[$0] })
+            sizeBytesByRef: { byRef[$0] },
+            residentRefs: residentRefs)
     }
 
     // MARK: durable mutations

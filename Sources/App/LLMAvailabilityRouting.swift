@@ -125,22 +125,39 @@ enum LLMRouteResolution: Equatable {
 /// model. `sizeBytesByRef`, when present, is keyed by `(backend, id)` and is the ONLY answer for every ref:
 /// the same id on two apps is two files, so neither may borrow the other's size. Without it, an LM Studio
 /// ref reads `sizeBytes` and any other app's ref is unmeasured. Full per-backend capacity is the next slice.
+///
+/// `residentRefs` is what the local apps hold RIGHT NOW, by `(app, id)`. Live wired memory already contains
+/// every resident model, so charging a resident model's size again on top of it counts it twice: with
+/// qwen3-coder-30b and gemma resident on a 64 GB Mac, neither "fit" the default budget and routing stepped
+/// a working route down or off. `ModelManager.prepareCapacity` never charges a resident model (it returns
+/// `.alreadyResident`), and this agrees with it: a resident model's incoming cost is 0, so it fits whenever
+/// the machine already holds it. The set defaults to empty, which is the old arithmetic exactly, and an
+/// unreadable resident set is empty too, so a failed read can only ever refuse more, never less.
 struct LLMLocalCapacityFacts {
     let sizeBytes: (String) -> Int64?
     let wiredBytes: UInt64
     let budgetBytes: UInt64
     let sizeBytesByRef: ((LocalModelRef) -> Int64?)?
+    /// Canonical refs (`ModelManager.canonical`), so Ollama's implicit `:latest` matches either spelling.
+    let residentRefs: Set<LocalModelRef>
 
     init(sizeBytes: @escaping (String) -> Int64?, wiredBytes: UInt64, budgetBytes: UInt64,
-         sizeBytesByRef: ((LocalModelRef) -> Int64?)? = nil) {
+         sizeBytesByRef: ((LocalModelRef) -> Int64?)? = nil,
+         residentRefs: Set<LocalModelRef> = []) {
         self.sizeBytes = sizeBytes
         self.wiredBytes = wiredBytes
         self.budgetBytes = budgetBytes
         self.sizeBytesByRef = sizeBytesByRef
+        self.residentRefs = Set(residentRefs.map(ModelManager.canonical))
+    }
+
+    /// Is `ref` loaded in ITS app right now? The same id resident in the other app is a different model.
+    func isResident(_ ref: LocalModelRef) -> Bool {
+        !residentRefs.isEmpty && residentRefs.contains(ModelManager.canonical(ref))
     }
 
     func fits(_ modelID: String) -> Bool {
-        fits(size: sizeBytes(modelID))
+        isResident(LocalModelRef(backend: .lmStudio, modelID: modelID)) || fits(size: sizeBytes(modelID))
     }
 
     /// The on-disk size of `ref`, never another app's model that happens to share its id.
@@ -150,7 +167,7 @@ struct LLMLocalCapacityFacts {
     }
 
     func fits(_ ref: LocalModelRef) -> Bool {
-        fits(size: sizeBytes(of: ref))
+        isResident(ref) || fits(size: sizeBytes(of: ref))
     }
 
     private func fits(size: Int64?) -> Bool {
@@ -215,6 +232,11 @@ enum LLMAvailabilityRouting {
     /// same policy tell "LM Studio is running" from "the preferred model is not installed" and select the
     /// best installed catalog entry without confusing the two states.
     static let fallbackOrder: [LLMProvider] = [.claude, .codex, .local]
+
+    /// A Local pin's off reason when local models ARE installed but none of them fits the memory budget right
+    /// now. Distinct from "local pin has no installed model", which stays the reason for an empty catalog.
+    static let nothingFitsReason =
+        "no installed local model fits the memory budget; free memory or adjust it on the Setup tab"
 
     /// Pure policy. `bundle` supplies a provider's configured bundle for the route (nil when the route has
     /// no bundle for it), `availability` supplies live provider state, and `localModels` is the measured
@@ -337,7 +359,11 @@ enum LLMAvailabilityRouting {
                              bundle: bundle, failedProviders: failedProviders))
             }
             guard let candidate = localCandidate() else {
-                return .off(reason: "local pin has no installed model; automatic cloud fallback is disabled - "
+                // A configured Local arm over a non-empty catalog only comes back empty-handed when nothing
+                // in it fits, so say that rather than claiming nothing is installed.
+                let opening = bundle(.local) != nil && !(localModels ?? []).isEmpty
+                    ? nothingFitsReason : "local pin has no installed model"
+                return .off(reason: opening + "; automatic cloud fallback is disabled - "
                     + detail(for: .local, state: pinState, localModels: localModels,
                              bundle: bundle, failedProviders: failedProviders))
             }

@@ -504,6 +504,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .daemonWarmingHUDSelftest: .init(tier: .deterministic) { _ in
         DaemonWarmingHUDFixtureSelfTest.run()
     },
+    // Scratch-only: real ModelsPowerSettingsStores with fixed wired/budget facts and an injected resident read
+    // through the real LocalResidentSetCache. No kernel, no lms, no Ollama.
+    .residentFitSelftest: .init(tier: .deterministic) { _ in
+        ResidentFitFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

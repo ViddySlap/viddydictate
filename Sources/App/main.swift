@@ -175,6 +175,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // A slow speech-engine warm must be visible: what the HUD and Preflight say from the daemon's
     // /health phase fields, with an ignore-phase mutant that must be caught. Deterministic and pure.
     case daemonWarmingHUDSelftest = "--daemon-warming-hud-selftest"
+    // Route resolution never charges an already-resident local model twice (live wired memory already holds
+    // it), agreeing with ModelManager. Scratch stores, fixed facts, an injected resident read; built-in
+    // mutants (the 1.1.0 double count, a backend-blind resident set). Named so no other flag contains it.
+    case residentFitSelftest = "--resident-fit-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
