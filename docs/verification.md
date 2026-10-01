@@ -22,6 +22,12 @@ Run the rail from the repository root:
 target and owns the Codex runner/smoke helpers used by the rail; the sibling test bundle is never
 installed by `install-app-agent.sh`.
 
+One deterministic gate is a host gate. `--codex-bundle-snapshot-host-selftest` installs an ad hoc signed
+fixture bundle through the real Codex bundle-snapshot path into a scratch store under the rail's TMPDIR,
+using the host `codesign`. On the Mac that is APFS, the filesystem production installs into. Without
+`codesign` (Linux, the Boxx) the gate abstains with `[precondition-missing]` and is counted as SKIP, never
+PASS. On macOS an abstain from this gate is a failure, so the Mac's deterministic tier cannot skip it.
+
 `--list-selftest-flags` prints the ordered pre-AppKit test/probe manifest with tier tags; the
 deterministic rail first requires at least one deterministic entry, then fails its drift check if any
 deterministic flag lacks a `verify.sh` gate.

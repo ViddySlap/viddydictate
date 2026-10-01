@@ -398,6 +398,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .codexBoundarySentenceSelftest: .init(tier: .deterministic) { _ in
         CodexBoundarySentenceSelfTest.run() ? 0 : 1
     },
+    // Host gate, deterministic tier: the real bundle-snapshot install into a scratch store under TMPDIR
+    // with the host codesign (APFS on the Mac). Reads no HOME, no /Applications, no live store; runs no
+    // Codex. Abstains without codesign; verify.sh turns an abstain on macOS into a failure.
+    .codexBundleSnapshotHostSelftest: .init(tier: .deterministic) { _ in
+        CodexBundleSnapshotHostSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

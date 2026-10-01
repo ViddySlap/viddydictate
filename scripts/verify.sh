@@ -185,6 +185,33 @@ run_codex_isolation_selftest_gate() {
     return 0
 }
 
+# Host gate: the real Codex bundle-snapshot install on this machine's filesystem with its own codesign.
+# Without codesign it abstains with [precondition-missing], which is counted as SKIP, never PASS. On macOS
+# an abstain is a failure: the Mac's deterministic tier must not skip the one gate that runs on APFS,
+# where rename(2) of a 0500 directory fails and Linux never shows it.
+run_codex_bundle_snapshot_host_gate() {
+    local label="Codex bundle snapshot install on the host filesystem (real codesign; APFS on macOS)"
+    local log="$SCRATCH/codex-bundle-snapshot-host.log"
+    banner deterministic "$label"
+    env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+        "$TEST_APP" --codex-bundle-snapshot-host-selftest 2>&1 | tee "$log"
+    local rc=${PIPESTATUS[0]}
+    if [[ $rc -ne 0 ]]; then
+        record_failure deterministic "$label (exit $rc)"
+        return "$rc"
+    fi
+    if service_gate_log_abstained "$log"; then
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            record_failure deterministic "$label: abstained on macOS, where codesign and APFS are required"
+            return 1
+        fi
+        record_skip deterministic "$label: $(service_gate_skip_reason "$log")"
+        return 0
+    fi
+    printf '[verify][deterministic][PASS] %s\n' "$label"
+    return 0
+}
+
 # Mirrors run_codex_isolation_selftest_gate. A seatbelted worker gets EPERM for the two
 # `vm.global_*` sysctls (measured 2026-08-24) while `hw.memsize` and HOST_VM_INFO64 succeed, so an
 # environment that cannot read the kernel's wire ceiling reports UNVERIFIED rather than FAIL. The
@@ -376,6 +403,7 @@ finish_tier() {
 tier_deterministic() {
     local failures_before=$FAILURES
     local unverified_before=$UNVERIFIED
+    local skipped_before=$SKIPPED
     local build_ok=1
 
     run_gate deterministic "Whisper tail corpus harness structural selftest" \
@@ -617,6 +645,7 @@ tier_deterministic() {
         run_gate deterministic "Codex not-found vs could-not-be-sandboxed sentences on every surface" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --codex-boundary-sentence-selftest || true
+        run_codex_bundle_snapshot_host_gate || true
         run_gate deterministic "service-gate classifier: an abstaining gate is never PASS" \
             service_gate_classifier_selftest "$SCRATCH/service-gate-classifier" \
             "$ROOT/Sources/SelfTest/SelfTestAbstain.swift" || true
@@ -630,7 +659,7 @@ tier_deterministic() {
         run_gate deterministic "shipped app rejects moved selftest flags" \
             assert_shipped_rejects_moved_flags || true
     fi
-    finish_tier deterministic "$failures_before" "$unverified_before"
+    finish_tier deterministic "$failures_before" "$unverified_before" "$skipped_before"
 }
 
 require_built_app() {
