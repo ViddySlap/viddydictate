@@ -429,6 +429,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localPickerMergeSelftest: .init(tier: .deterministic) { _ in
         LocalPickerMergeFixtureSelfTest.run() ? 0 : 1
     },
+    // Scripted: the redirect chain is an in-memory web, hdiutil/codesign/open are a recorder, the server and
+    // the pull stream are scripted, and the clock is a number. Only a TMPDIR scratch tree is written.
+    .ollamaInstallerSelftest: .init(tier: .deterministic) { _ in
+        OllamaInstallerScriptedSelfTest.run() ? 0 : 1
+    },
+    // Scratch only: the real LM Studio CLI-ready and model mechanisms over a scratch "Mac" whose lms appears
+    // after LM Studio is opened (recorded, never launched), plus pure plan, offer and codec checks.
+    .installerLocalStepsSelftest: .init(tier: .deterministic) { _ in
+        InstallerLocalStepsFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

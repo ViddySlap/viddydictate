@@ -105,9 +105,29 @@ final class PointOfUseOfferPresenter {
 
     // MARK: - install
 
+    /// Install the app the user picked from the offer's local-app choice (spec D3), on a Mac with neither.
+    /// The option's components go through the same queue as every other row.
+    ///
+    /// TODO(S3c/S8): `InstallOfferPanel` draws `PointOfUseOffer.localAppChoice` as its own page and calls this
+    /// with the picked app. Until it does, "Install now" and "Set up local models" install LM Studio, the
+    /// recommended option, exactly as before.
+    func installLocalApp(_ backend: LocalBackendID) {
+        guard let feature = pendingFeature, case .offer(let offer) = panel.state,
+              let option = offer.localAppChoice?.option(backend) else { return }
+        beginInstall(feature: feature, components: option.components, fromLocalAppChoice: true)
+    }
+
     private func beginInstall() {
         guard let feature = pendingFeature else { return }
-        let components = installComponents()
+        var fromChoice = false
+        if case .offer(let offer) = panel.state { fromChoice = offer.localAppChoice != nil }
+        beginInstall(feature: feature, components: installComponents(), fromLocalAppChoice: fromChoice)
+    }
+
+    /// `fromLocalAppChoice` is true when the machine had neither local app when the offer was made, so the
+    /// app this installs is the one the Preferred local app must now follow.
+    private func beginInstall(feature: PointOfUseFeature, components: [InstallerComponentDescriptor],
+                              fromLocalAppChoice: Bool) {
         guard !components.isEmpty else { return }
         let offer = PointOfUsePolicy.installOffer(for: feature, outstanding: components)
         startWatching()
@@ -115,7 +135,12 @@ final class PointOfUseOfferPresenter {
         // The SAME queue the setup surface drives, given the same descriptors. A second entry point,
         // not a second installer.
         let started = coordinator.start(descriptors: components) { [weak self] results in
-            DispatchQueue.main.async { self?.finishInstall(feature: feature, results: results) }
+            DispatchQueue.main.async {
+                if fromLocalAppChoice {
+                    PointOfUseOfferPresenter.followInstalledApp(components: components, results: results)
+                }
+                self?.finishInstall(feature: feature, results: results)
+            }
         }
         if !started {
             // The queue is already busy with someone else's rows. Saying so is better than a second queue.
@@ -161,6 +186,26 @@ final class PointOfUseOfferPresenter {
         onNotice?("\(feature.title) is ready. Press \(feature.hotkey) again.")
     }
 
+    /// D3: once the chosen app's own row has landed, the Preferred local app follows it (see
+    /// `PointOfUsePolicy.preferenceAfterInstalling`). Written only when it changes.
+    private static func followInstalledApp(components: [InstallerComponentDescriptor],
+                                           results: [InstallerComponentResult]) {
+        let landed = Set(results.filter(\.succeeded).map(\.componentID))
+        for component in components where landed.contains(component.id) {
+            for case .app(let backend) in component.localSteps {
+                let explicit = Settings.preferredLocalBackend
+                let next = PointOfUsePolicy.preferenceAfterInstalling(backend, explicit: explicit)
+                if next != explicit {
+                    Settings.preferredLocalBackend = next
+                    Log.write("point-of-use: preferred local app follows the \(backend.rawValue) install")
+                }
+            }
+        }
+    }
+
+    // TODO(S3c/S8): also observe `BootstrapInstallCoordinator.didReportActivity` and redraw the running rows
+    // through `PointOfUsePolicy.progressLine(_:activity:)`, so an Ollama pull shows its bytes and the
+    // approval wait shows its own words. The panel does not draw activity yet.
     private func startWatching() {
         guard changeToken == nil else { return }
         changeToken = NotificationCenter.default.addObserver(

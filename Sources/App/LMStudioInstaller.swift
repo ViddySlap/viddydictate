@@ -289,7 +289,8 @@ enum LMStudioInstaller {
         guard imageInfo.succeeded else { throw InstallerError.command("hdiutil imageinfo", imageInfo) }
     }
 
-    private static func mountPoint(from plist: String) -> URL? {
+    /// Shared with `OllamaInstaller`, which attaches its disk image the same way.
+    static func mountPoint(from plist: String) -> URL? {
         guard let data = plist.data(using: .utf8),
               let root = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
               let dictionary = root as? [String: Any],
@@ -302,8 +303,8 @@ enum LMStudioInstaller {
         return nil
     }
 
-    private static func findApplication(named name: String, under root: URL,
-                                        fileManager: FileManager) -> URL? {
+    static func findApplication(named name: String, under root: URL,
+                                fileManager: FileManager) -> URL? {
         let direct = root.appendingPathComponent(name, isDirectory: true)
         if fileManager.fileExists(atPath: direct.path) { return direct }
         guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else {
@@ -335,6 +336,64 @@ enum LMStudioInstaller {
         }
         let codesign = try commandRunner("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
         guard codesign.succeeded else { throw InstallerError.command("codesign --verify", codesign) }
+    }
+
+    // MARK: LM Studio's CLI after a fresh install
+
+    /// Where LM Studio puts its CLI. The same path `ModelResidency` runs, and `installModel`'s default.
+    static var cliURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".lmstudio/bin/lms")
+    }
+
+    /// Where the app may be: where this installer puts it first, then a per-user copy.
+    static var applicationCandidates: [URL] {
+        [URL(fileURLWithPath: "/Applications", isDirectory: true).appendingPathComponent(appName, isDirectory: true),
+         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications/\(appName)", isDirectory: true)]
+    }
+
+    /// Long enough for a first launch on a slow Mac to unpack its CLI; short enough that a row cannot hang.
+    static let cliWaitBound: TimeInterval = 120
+    static let cliPollInterval: TimeInterval = 1
+
+    enum CLIReadyOutcome: Equatable {
+        case alreadyPresent
+        case appeared
+    }
+
+    /// Makes sure `~/.lmstudio/bin/lms` exists before a model row needs it.
+    ///
+    /// LM Studio does not ship the CLI at that path: the app writes it there on its first launch. A fresh DMG
+    /// install has therefore never made one, and a model row queued straight after the app row used to fail
+    /// with "LM Studio CLI is not executable". `lms bootstrap` is not the fix: it only puts `~/.lmstudio/bin`
+    /// on the user's shell PATH (a write to their shell profile, which ViddyDictate never makes), it needs the
+    /// very binary that is missing, and ViddyDictate always runs `lms` by its absolute path anyway. So the app
+    /// is opened once, by PATH in the background (a copy LaunchServices has not registered yet cannot be
+    /// opened by name), and the CLI is waited for within a bound.
+    static func ensureCLIReady(lmsURL: URL = cliURL,
+                               applications: [URL] = applicationCandidates,
+                               fileManager: FileManager = .default,
+                               commandRunner: @escaping CommandRunner = runCommand,
+                               clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                               sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                               bound: TimeInterval = cliWaitBound,
+                               pollInterval: TimeInterval = cliPollInterval) throws -> CLIReadyOutcome {
+        if fileManager.isExecutableFile(atPath: lmsURL.path) { return .alreadyPresent }
+        guard let application = applications.first(where: { fileManager.fileExists(atPath: $0.path) }) else {
+            throw InstallerError.operation(
+                "LM Studio is not installed, so its CLI cannot appear at \(lmsURL.path)")
+        }
+        let opened = try commandRunner("/usr/bin/open", ["-g", application.path])
+        guard opened.succeeded else { throw InstallerError.command("open -g \(application.path)", opened) }
+        let started = clock()
+        while !fileManager.isExecutableFile(atPath: lmsURL.path) {
+            if clock() - started >= bound {
+                throw InstallerError.operation(
+                    "LM Studio's CLI did not appear at \(lmsURL.path) after opening LM Studio. "
+                        + "Open LM Studio once, then choose Try again.")
+            }
+            sleep(pollInterval)
+        }
+        return .appeared
     }
 
     // MARK: LM Studio's model CLI
@@ -380,7 +439,8 @@ enum LMStudioInstaller {
 
     /// Captures stdout and stderr concurrently so a verbose CLI cannot deadlock on a full pipe. This
     /// intentionally has no retry policy or download-specific timeout; the setup engine owns those.
-    private static func runCommand(_ executable: String, _ arguments: [String]) throws -> CommandResult {
+    /// Shared with `OllamaInstaller`, so both installers launch their tools the same way.
+    static func runCommand(_ executable: String, _ arguments: [String]) throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments

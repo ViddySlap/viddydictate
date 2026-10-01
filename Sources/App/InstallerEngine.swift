@@ -66,36 +66,47 @@ struct InstallerModelArtifact: Equatable {
     }
 }
 
-/// One bounded LM Studio operation a descriptor performs, expressed as DATA for the same reason the
+/// One bounded local-app operation a descriptor performs, expressed as DATA for the same reason the
 /// package list is: adding a model row is one entry in a list, not a second installer.
 ///
-/// The mechanism itself stays in `LMStudioInstaller`, which owns the DMG verification and the `lms`
-/// delegation and deliberately owns no queue, retry policy, or progress. This enum is the only thing
-/// that binds the two together, so there is one engine driving every row rather than a python queue
-/// beside an LM Studio queue.
-enum InstallerLMStudioStep: Equatable {
-    /// Acquire, verify, and install LM Studio itself. Never overwrites an existing install.
-    case application
-    /// Delegate acquisition of one exact model id to LM Studio's own catalog-aware CLI.
-    case model(String)
+/// The mechanisms stay in `LMStudioInstaller` and `OllamaInstaller`, which own the DMG verification, the
+/// `lms` delegation and the `/api/pull` stream, and deliberately own no queue, retry policy, or persistence.
+/// This enum is the only thing that binds them to the engine, so there is one engine driving every row
+/// rather than a python queue beside a queue per local app.
+enum InstallerLocalStep: Equatable {
+    /// Acquire, verify, and install the app itself. Never overwrites an existing install.
+    case app(LocalBackendID)
+    /// Make the app usable by the steps after it. LM Studio: its `lms` CLI exists, which only happens once
+    /// the app has been opened (a fresh install has none, and a model row used to fail on it). Ollama: its
+    /// server answers, which on a fresh install waits for the user to approve a macOS prompt.
+    case ready(LocalBackendID)
+    /// Acquire one exact model through its app: `lms get` for LM Studio, a streamed `/api/pull` for Ollama.
+    case model(LocalModelRef)
+
+    var backend: LocalBackendID {
+        switch self {
+        case .app(let backend), .ready(let backend): return backend
+        case .model(let ref): return ref.backend
+        }
+    }
 }
 
 /// One independent row in the first-run bootstrap queue.
 ///
 /// The engine has one execution shape for every descriptor: create/reuse the venv, install the
-/// descriptor's package list, download and verify its model artifacts, then run its LM Studio steps.
+/// descriptor's package list, download and verify its model artifacts, then run its local-app steps.
 /// An empty list (or a nil venv path) means the step is not part of that row; it does not create a
 /// hidden hardcoded special case.
 struct InstallerComponentDescriptor: Equatable {
     let id: String
     let title: String
     let detail: String
-    /// nil for a row that owns no python environment at all - an LM Studio row. Required whenever the
+    /// nil for a row that owns no python environment at all - a local-app row. Required whenever the
     /// row installs packages or downloads model artifacts, because both run through the venv.
     let virtualEnvironmentRelativePath: String?
     let packages: [InstallerPackage]
     let modelArtifacts: [InstallerModelArtifact]
-    let lmStudioSteps: [InstallerLMStudioStep]
+    let localSteps: [InstallerLocalStep]
     /// What this row costs to download, MEASURED, or nil when nobody has measured it. Never a guess:
     /// O1 is explicit that an estimate must not ship as a user-facing byte count, so a nil here makes
     /// every surface omit the number rather than invent one.
@@ -104,7 +115,7 @@ struct InstallerComponentDescriptor: Equatable {
     init(id: String, title: String, detail: String = "",
          virtualEnvironmentRelativePath: String? = nil,
          packages: [InstallerPackage] = [], modelArtifacts: [InstallerModelArtifact] = [],
-         lmStudioSteps: [InstallerLMStudioStep] = [],
+         localSteps: [InstallerLocalStep] = [],
          downloadBytes: Int64? = nil) {
         self.id = id
         self.title = title
@@ -112,7 +123,7 @@ struct InstallerComponentDescriptor: Equatable {
         self.virtualEnvironmentRelativePath = virtualEnvironmentRelativePath
         self.packages = packages
         self.modelArtifacts = modelArtifacts
-        self.lmStudioSteps = lmStudioSteps
+        self.localSteps = localSteps
         self.downloadBytes = downloadBytes
     }
 }
@@ -174,13 +185,50 @@ enum BootstrapInstallPlan {
     static let mandatoryCore = [sttDaemon, webSearch]
 
     /// LM Studio itself. It has no venv and no pip line: its whole execution is the DMG mechanism L3
-    /// exposed. Its download size is deliberately nil - the DMG's byte count is not known until its URL
-    /// is resolved at run time (O4), and quoting a guess is exactly what O1 forbids.
+    /// exposed, then one open so its CLI exists (see `InstallerLocalStep.ready`). Its download size is
+    /// deliberately nil - the DMG's byte count is not known until its URL is resolved at run time (O4), and
+    /// quoting a guess is exactly what O1 forbids.
     static let lmStudio = InstallerComponentDescriptor(
         id: "lm-studio",
         title: "LM Studio",
         detail: "The local model runner the optional modes use",
-        lmStudioSteps: [.application])
+        localSteps: [.app(.lmStudio), .ready(.lmStudio)])
+
+    /// Ollama itself, the advanced option (spec D3). The same trust-checked DMG flow as LM Studio, then a wait
+    /// for its server, which on a fresh install waits for the user to approve Ollama's macOS prompt. Its
+    /// size is nil for the same reason LM Studio's is. Added in the Ollama lane; the id is new, so no
+    /// existing `bootstrap.json` row changes meaning.
+    static let ollama = InstallerComponentDescriptor(
+        id: "ollama",
+        title: "Ollama",
+        detail: "The advanced local model runner, installed from Ollama's own download",
+        localSteps: [.app(.ollama), .ready(.ollama)])
+
+    /// One model row for either app. The app is made ready first, so a model row works whether it follows
+    /// the app's install in the same queue, or is queued on its own against an app that is installed but
+    /// was never opened (LM Studio) or is not running (Ollama).
+    ///
+    /// This is the mechanism for Ollama's default models, which are decision D4 and still open: no Ollama
+    /// model is named here. A default added later is one call, listed in `allComponents` so the durable
+    /// state tracks it.
+    static func localModel(_ ref: LocalModelRef, title: String? = nil, detail: String,
+                           downloadBytes: Int64?) -> InstallerComponentDescriptor {
+        InstallerComponentDescriptor(
+            id: componentID(for: ref),
+            title: title ?? ref.modelID,
+            detail: detail,
+            localSteps: [.ready(ref.backend), .model(ref)],
+            downloadBytes: downloadBytes)
+    }
+
+    /// A model row's durable id. LM Studio keeps 1.1.0's `model:<id>`, which is already on users' disks in
+    /// `bootstrap.json`; Ollama's gets its own prefix so the same model id on both apps is two rows.
+    static func componentID(for ref: LocalModelRef) -> String {
+        switch ref.backend {
+        case .lmStudio: return "model:\(ref.modelID)"
+        case .ollama: return "ollama-model:\(ref.modelID)"
+        }
+    }
 
     /// The two optional local models, by the exact identifiers O3 resolved. `downloadBytes` is MEASURED,
     /// not estimated: `lms ls --llm --json` reported these `sizeBytes` for the two model keys on
@@ -188,22 +236,19 @@ enum BootstrapInstallPlan {
     /// row carries. If the picker ships its own copy of these numbers, collapse the two into this
     /// descriptor rather than keeping a second owner - the spec's "~4 GB" for gemma was out by 1.7x, and
     /// the way that gets found again is two places disagreeing.
-    static let gemma = InstallerComponentDescriptor(
-        id: "model:\(LMStudioInstaller.gemmaModelID)",
-        title: LMStudioInstaller.gemmaModelID,
+    static let gemma = localModel(
+        LocalModelRef(backend: .lmStudio, modelID: LMStudioInstaller.gemmaModelID),
         detail: "The local model email mode runs on",
-        lmStudioSteps: [.model(LMStudioInstaller.gemmaModelID)],
         downloadBytes: 6_861_935_454)
 
-    static let qwen = InstallerComponentDescriptor(
-        id: "model:\(LMStudioInstaller.qwenModelID)",
-        title: LMStudioInstaller.qwenModelID,
+    static let qwen = localModel(
+        LocalModelRef(backend: .lmStudio, modelID: LMStudioInstaller.qwenModelID),
         detail: "The local model cleanup and prompt prep prefer",
-        lmStudioSteps: [.model(LMStudioInstaller.qwenModelID)],
         downloadBytes: 17_190_793_452)
 
-    /// LM Studio first: a model row cannot run before the CLI that fetches it exists.
-    static let optionalLocalModels = [lmStudio, gemma, qwen]
+    /// LM Studio first: a model row cannot run before the CLI that fetches it exists. Ollama is appended,
+    /// so every existing row keeps its place.
+    static let optionalLocalModels = [lmStudio, gemma, qwen, ollama]
 
     /// Every component the app can install, in one list. The durable bootstrap state is keyed off this,
     /// so a surface that installs an optional row records it in the same file the core rows use.
@@ -315,19 +360,26 @@ final class FoundationInstallerProcessRunner: InstallerProcessRunning {
     }
 }
 
-/// The engine's seam onto the LM Studio mechanism. Production drives `LMStudioInstaller`; the
-/// deterministic rail injects a double, so no gate ever attaches a disk image, writes to `/Applications`,
-/// or spends a gigabyte of Ben's bandwidth to prove the queue works.
-protocol InstallerLMStudioPerforming {
-    /// Acquire, verify, and install LM Studio. An existing install is reported, never replaced.
-    func installApplication() throws
-    func installModel(_ modelID: String) throws
+/// The engine's seam onto the local-app mechanisms. Production drives `LMStudioInstaller` and
+/// `OllamaInstaller`; the deterministic rail injects a double, so no gate ever attaches a disk image,
+/// writes to `/Applications`, opens an app, or spends a gigabyte of Ben's bandwidth to prove the queue works.
+///
+/// `report` carries what a running step is doing that its phase cannot say (`InstallerLocalActivity`):
+/// real bytes from an Ollama pull, or the wait for Ollama's macOS prompt. It is never persisted.
+protocol InstallerLocalPerforming {
+    /// Acquire, verify, and install the app. An existing install is reported, never replaced.
+    func installApplication(_ backend: LocalBackendID,
+                            report: @escaping (InstallerLocalActivity) -> Void) throws
+    /// Make the app usable by a model step (`InstallerLocalStep.ready`). Idempotent: an app that is already
+    /// ready returns at once.
+    func makeReady(_ backend: LocalBackendID, report: @escaping (InstallerLocalActivity) -> Void) throws
+    func installModel(_ ref: LocalModelRef, report: @escaping (InstallerLocalActivity) -> Void) throws
 }
 
 /// The production adapter. It adds no policy of its own: resolution, verification, the no-overwrite
-/// guard, and the `lms` delegation all stay in `LMStudioInstaller`, and retry/backoff stays in the
+/// guard, the `lms` delegation and the pull all stay in the two installers, and retry/backoff stays in the
 /// engine that calls this.
-struct LiveInstallerLMStudioPerformer: InstallerLMStudioPerforming {
+struct LiveInstallerLocalPerformer: InstallerLocalPerforming {
     let downloadDirectory: URL
     private let fileManager: FileManager
 
@@ -336,20 +388,46 @@ struct LiveInstallerLMStudioPerformer: InstallerLMStudioPerforming {
         self.fileManager = fileManager
     }
 
-    func installApplication() throws {
-        // A per-attempt filename, because `downloadDMG` refuses to write over anything that already
-        // exists - including a half-finished file from a previous attempt. The disk image is scratch:
-        // it is removed whether the install succeeds or fails.
-        let dmg = downloadDirectory
-            .appendingPathComponent("LMStudio-\(UUID().uuidString).dmg", isDirectory: false)
-        defer { try? fileManager.removeItem(at: dmg) }
-        let source = try LMStudioInstaller.resolveOfficialDMG()
-        _ = try LMStudioInstaller.downloadDMG(source: source, to: dmg)
-        _ = try LMStudioInstaller.installDMG(at: dmg, expectedBytes: source.expectedBytes)
+    func installApplication(_ backend: LocalBackendID,
+                            report: @escaping (InstallerLocalActivity) -> Void) throws {
+        switch backend {
+        case .lmStudio:
+            // A per-attempt filename, because `downloadDMG` refuses to write over anything that already
+            // exists - including a half-finished file from a previous attempt. The disk image is scratch:
+            // it is removed whether the install succeeds or fails.
+            let dmg = downloadDirectory
+                .appendingPathComponent("LMStudio-\(UUID().uuidString).dmg", isDirectory: false)
+            defer { try? fileManager.removeItem(at: dmg) }
+            let source = try LMStudioInstaller.resolveOfficialDMG()
+            _ = try LMStudioInstaller.downloadDMG(source: source, to: dmg)
+            _ = try LMStudioInstaller.installDMG(at: dmg, expectedBytes: source.expectedBytes)
+        case .ollama:
+            let dmg = downloadDirectory
+                .appendingPathComponent("Ollama-\(UUID().uuidString).dmg", isDirectory: false)
+            defer { try? fileManager.removeItem(at: dmg) }
+            let source = try OllamaInstaller.resolveOfficialDMG()
+            _ = try OllamaInstaller.downloadDMG(source: source, to: dmg, fileManager: fileManager)
+            _ = try OllamaInstaller.installDMG(at: dmg, expectedBytes: source.expectedBytes,
+                                              fileManager: fileManager)
+        }
     }
 
-    func installModel(_ modelID: String) throws {
-        _ = try LMStudioInstaller.installModel(modelID)
+    func makeReady(_ backend: LocalBackendID, report: @escaping (InstallerLocalActivity) -> Void) throws {
+        switch backend {
+        case .lmStudio:
+            _ = try LMStudioInstaller.ensureCLIReady(fileManager: fileManager)
+        case .ollama:
+            _ = try OllamaInstaller.ensureServerReady(onAwaitingApproval: { report(.awaitingApproval(.ollama)) })
+        }
+    }
+
+    func installModel(_ ref: LocalModelRef, report: @escaping (InstallerLocalActivity) -> Void) throws {
+        switch ref.backend {
+        case .lmStudio:
+            _ = try LMStudioInstaller.installModel(ref.modelID)
+        case .ollama:
+            _ = try OllamaInstaller.pullModel(ref.modelID, progress: { report(.bytes($0)) })
+        }
     }
 }
 
@@ -459,7 +537,7 @@ final class InstallerEngine {
 
     private let paths: InstallerPaths
     private let runner: InstallerProcessRunning
-    private let lmStudio: InstallerLMStudioPerforming
+    private let local: InstallerLocalPerforming
     private let sleep: Sleep
     private let fileManager: FileManager
     private let daemonInstaller: DaemonInstallPerforming?
@@ -467,13 +545,13 @@ final class InstallerEngine {
 
     init(paths: InstallerPaths = .live,
          runner: InstallerProcessRunning = FoundationInstallerProcessRunner(),
-         lmStudio: InstallerLMStudioPerforming? = nil,
+         local: InstallerLocalPerforming? = nil,
          sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
          fileManager: FileManager = .default,
          daemonInstaller: DaemonInstallPerforming? = nil) {
         self.paths = paths
         self.runner = runner
-        self.lmStudio = lmStudio ?? LiveInstallerLMStudioPerformer(
+        self.local = local ?? LiveInstallerLocalPerformer(
             downloadDirectory: paths.applicationSupport
                 .appendingPathComponent("downloads", isDirectory: true),
             fileManager: fileManager)
@@ -491,7 +569,11 @@ final class InstallerEngine {
 
     /// Install one row. The row's result retains the final real error and the number of command
     /// attempts used; no error is swallowed into a generic "setup failed" string.
-    func install(_ descriptor: InstallerComponentDescriptor) -> InstallerComponentResult {
+    ///
+    /// `activity` hears what a running local step reports (bytes, or the approval wait), on the calling
+    /// thread, while the row runs. It is presentation only and never changes the result.
+    func install(_ descriptor: InstallerComponentDescriptor,
+                 activity: ((InstallerLocalActivity) -> Void)? = nil) -> InstallerComponentResult {
         var attempts = 0
         do {
             try validate(descriptor)
@@ -576,8 +658,8 @@ final class InstallerEngine {
                 }
             }
 
-            for step in descriptor.lmStudioSteps {
-                attempts += try runLMStudioWithRetry(step)
+            for step in descriptor.localSteps {
+                attempts += try runLocalWithRetry(step, report: activity ?? { _ in })
             }
 
             return InstallerComponentResult(componentID: descriptor.id, title: descriptor.title,
@@ -598,7 +680,7 @@ final class InstallerEngine {
     /// Install all rows in order, collecting every outcome. A failed descriptor is not a reason to
     /// skip the next descriptor: B10's failure boundary is one row.
     func installAll(_ descriptors: [InstallerComponentDescriptor]) -> [InstallerComponentResult] {
-        descriptors.map(install)
+        descriptors.map { install($0) }
     }
 
     func installAllAsync(_ descriptors: [InstallerComponentDescriptor],
@@ -706,26 +788,66 @@ final class InstallerEngine {
         }
     }
 
-    /// The LM Studio twin of `runWithRetry`. Same policy object, same three attempts, same backoff:
-    /// O5's rule is a property of the engine, not of the transport, so an `lms get` that died on a dead
-    /// socket is retried and a 404 is not.
-    private func runLMStudioWithRetry(_ step: InstallerLMStudioStep) throws -> Int {
+    /// The local-app twin of `runWithRetry`. Same policy object, same three attempts, same backoff:
+    /// O5's rule is a property of the engine, not of the transport, so an `lms get` or a pull that died on
+    /// a dead socket is retried and a 404 is not.
+    private func runLocalWithRetry(_ step: InstallerLocalStep,
+                                   report: @escaping (InstallerLocalActivity) -> Void) throws -> Int {
         var attempt = 1
         while true {
             if attempt > 1 { sleep(InstallerRetryPolicy.delayBeforeAttempt(attempt)) }
             do {
                 switch step {
-                case .application: try lmStudio.installApplication()
-                case .model(let modelID): try lmStudio.installModel(modelID)
+                case .app(let backend): try local.installApplication(backend, report: report)
+                case .ready(let backend): try local.makeReady(backend, report: report)
+                case .model(let ref): try local.installModel(ref, report: report)
                 }
                 return attempt
             } catch {
-                let failure = Self.failure(forLMStudio: error)
+                let failure = Self.failure(forLocal: error)
                 if !InstallerRetryPolicy.shouldRetry(failure, attempt: attempt) {
                     throw AttemptedFailure(failure: failure, attempts: attempt)
                 }
                 attempt += 1
             }
+        }
+    }
+
+    /// Classify a local-app failure by the installer that threw it.
+    static func failure(forLocal error: Error) -> InstallerFailure {
+        if let ollamaError = error as? OllamaInstaller.InstallerError {
+            return failure(forOllama: ollamaError)
+        }
+        return failure(forLMStudio: error)
+    }
+
+    /// Ollama's errors through the same rule as LM Studio's. Two are Ollama's own:
+    /// - an unanswered macOS prompt is `.process`, never retried: the engine asking again would only put the
+    ///   same question to a user who is not there, and the message already says what to do;
+    /// - a pull that ended early is `.transport`, retried: Ollama resumes the blobs it already has. A pull
+    ///   stalled for the whole idle bound is not, since two more full bounds would be most of an hour.
+    static func failure(forOllama error: OllamaInstaller.InstallerError) -> InstallerFailure {
+        let message = error.description
+        switch error {
+        case .network, .pullIncomplete:
+            return InstallerFailure(category: .transport, message: message)
+        case .httpStatus(let status):
+            if (500...599).contains(status) {
+                return InstallerFailure(category: .server(status), message: message)
+            }
+            return InstallerFailure(category: .client(status), message: message)
+        case .invalidPublishedResponse, .invalidDMG, .invalidMountedImage, .invalidApplication:
+            return InstallerFailure(category: .checksumMismatch, message: message)
+        case .invalidModelIdentifier:
+            return InstallerFailure(category: .invalidPlan, message: message)
+        case .command(_, let result):
+            let classified = InstallerCommandResult(
+                exitCode: result.status, stdout: result.stdout, stderr: result.stderr)
+            return InstallerFailure(category: Self.category(forOutput: classified.output), message: message)
+        case .pullFailed(_, let reason):
+            return InstallerFailure(category: Self.category(forOutput: reason), message: message)
+        case .destinationExists, .approvalTimedOut, .serverNotRunning, .pullStalled, .operation:
+            return InstallerFailure(category: .process, message: message)
         }
     }
 
@@ -779,12 +901,12 @@ final class InstallerEngine {
         }
         // A row that does nothing would report itself installed. That is the one outcome a first-run
         // queue must never produce, because every surface downstream reads "installed" as usable.
-        guard descriptor.virtualEnvironmentRelativePath != nil || !descriptor.lmStudioSteps.isEmpty else {
+        guard descriptor.virtualEnvironmentRelativePath != nil || !descriptor.localSteps.isEmpty else {
             throw InstallerFailure(category: .invalidPlan,
                                    message: "installer component has no work to do")
         }
-        for step in descriptor.lmStudioSteps {
-            if case .model(let modelID) = step, modelID.isEmpty {
+        for step in descriptor.localSteps {
+            if case .model(let ref) = step, ref.modelID.isEmpty {
                 throw InstallerFailure(category: .invalidPlan,
                                        message: "installer component has an empty model identifier")
             }

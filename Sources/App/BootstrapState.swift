@@ -291,6 +291,11 @@ final class BootstrapInstallCoordinator {
     /// `onChange` closure remains for the single owner that constructed a coordinator itself.
     static let didChange = Notification.Name("ViddyDictate.bootstrapInstallDidChange")
 
+    /// Posted when a running row reports activity (`activity(for:)`): real bytes from an Ollama pull, or the
+    /// wait for Ollama's macOS prompt. Separate from `didChange` because nothing durable changed; at most a
+    /// few times a second, since the pull throttles its own reports.
+    static let didReportActivity = Notification.Name("ViddyDictate.bootstrapInstallDidReportActivity")
+
     private let engine: InstallerEngine
     private let store: BootstrapStateStore
     private let worker = DispatchQueue(label: AppIdentity.queueLabel("bootstrap-install"),
@@ -299,6 +304,7 @@ final class BootstrapInstallCoordinator {
     private var cancelled = false
     private var running = false
     private var setupPresented = false
+    private var activities: [String: InstallerLocalActivity] = [:]
     private let onChange: SnapshotHandler?
 
     // Production supplies the daemon installer so the STT row also stages the bundled daemon into the
@@ -315,6 +321,12 @@ final class BootstrapInstallCoordinator {
     var snapshot: BootstrapSnapshot { store.snapshot() }
 
     var isRunning: Bool { lock.withLock { running } }
+
+    /// What the running row last reported, or nil when it reported nothing (or is not running). Cleared
+    /// the moment the row finishes, so a finished row never shows a stale byte count or approval wait.
+    func activity(for componentID: String) -> InstallerLocalActivity? {
+        lock.withLock { activities[componentID] }
+    }
     var isSetupPresented: Bool { lock.withLock { setupPresented } }
 
     @discardableResult
@@ -358,7 +370,11 @@ final class BootstrapInstallCoordinator {
                 guard !self.isCancelled() else { break }
                 self.store.markInstalling(componentID: descriptor.id)
                 self.publish()
-                let result = self.engine.install(descriptor)
+                let result = self.engine.install(descriptor) { activity in
+                    self.lock.withLock { self.activities[descriptor.id] = activity }
+                    NotificationCenter.default.post(name: Self.didReportActivity, object: self)
+                }
+                self.lock.withLock { self.activities[descriptor.id] = nil }
                 results.append(result)
                 self.store.apply(result)
                 self.publish()

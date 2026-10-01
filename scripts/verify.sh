@@ -439,6 +439,12 @@ tier_deterministic() {
         run_gate deterministic "headless installer engine and retry/hash policy selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --installer-engine-selftest || true
+        run_gate deterministic "Ollama installer trust chain, approval wait, and pull progress (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --ollama-installer-selftest || true
+        run_gate deterministic "local-app install plan, lms-ready order, and D3 app choice (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-local-steps-selftest || true
         run_gate deterministic "point-of-use install offer and zero-local cloud-button selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --point-of-use-offer-selftest || true

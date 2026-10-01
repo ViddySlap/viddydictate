@@ -119,17 +119,55 @@ enum InstallProgress {
     /// number nobody measured - the same rule the picker follows when it says "plus LM Studio" instead
     /// of guessing.
     static func statusText(_ row: Row) -> String {
-        switch row.phase {
+        statusText(phase: row.phase, bytesCompleted: row.bytesCompleted, bytesExpected: row.bytesExpected)
+    }
+
+    /// The same words for a row that is not one of the picker's: B7's shape does not depend on where the
+    /// bytes were counted.
+    static func statusText(phase: Phase, bytesCompleted: UInt64, bytesExpected: UInt64?) -> String {
+        switch phase {
         case .waiting: return waitingText
         case .done: return doneText
         case .failed: return "failed"
         case .running:
-            guard let expected = row.bytesExpected, expected > 0 else {
-                return row.bytesCompleted > 0 ? ComponentPicker.downloadSize(row.bytesCompleted)
-                                              : "starting"
+            guard let expected = bytesExpected, expected > 0 else {
+                return bytesCompleted > 0 ? ComponentPicker.downloadSize(bytesCompleted)
+                                          : "starting"
             }
-            return "\(ComponentPicker.downloadSize(row.bytesCompleted)) of "
+            return "\(ComponentPicker.downloadSize(min(bytesCompleted, expected))) of "
                 + ComponentPicker.downloadSize(expected)
+        }
+    }
+
+    // MARK: - Reported activity
+
+    /// What a local step is waiting on when the thing it waits for is the USER, not a download: a macOS
+    /// prompt the app raised on its first launch. Its own words, never "failed" and never a byte count.
+    static func awaitingApprovalText(_ backend: LocalBackendID) -> String {
+        "waiting for you to approve \(backend.displayName)'s macOS prompt"
+    }
+
+    /// The right-hand side of one installer row keyed by its DESCRIPTOR rather than a picker row: Ollama's
+    /// app and model rows, which the picker does not list. Phase from the durable bootstrap record, detail
+    /// from what the running step reported: real bytes from a streamed pull, or the approval wait.
+    ///
+    /// TODO(S3c/S8): the Ollama rows on the Setup tab, the revived first-run window, and the point-of-use
+    /// panel's running page read `BootstrapInstallCoordinator.activity(for:)` and render through this.
+    static func statusText(for record: BootstrapComponentRecord, activity: InstallerLocalActivity?) -> String {
+        switch record.phase {
+        case .pending: return waitingText
+        case .installed: return doneText
+        case .failed: return "failed"
+        case .installing:
+            switch activity {
+            case .awaitingApproval(let backend)?:
+                return awaitingApprovalText(backend)
+            case .bytes(let reading)?:
+                return statusText(phase: .running, bytesCompleted: reading.completed,
+                                  bytesExpected: reading.expected)
+            case nil:
+                return "installing"
+            }
         }
     }
 
@@ -230,6 +268,25 @@ enum InstallProgress {
     static func retryIdentifier(_ id: ComponentPicker.RowID) -> String {
         "install-progress-retry-\(id.rawValue)"
     }
+}
+
+// MARK: - Reported bytes
+
+/// A byte count an installer step REPORTED, as opposed to one sampled from a cache this app owns. Ollama's
+/// `/api/pull` streams its own byte counts, which is the one vendor download whose progress is real rather
+/// than a phase. `completed` never exceeds what a step has seen so far; `expected` is nil while unknown.
+struct InstallerByteProgress: Equatable {
+    let completed: UInt64
+    let expected: UInt64?
+}
+
+/// What a running local step is doing that its phase alone cannot say. Never persisted: it lives only while
+/// the row runs, so a relaunch cannot find a stale "waiting for approval" on disk.
+enum InstallerLocalActivity: Equatable {
+    /// Real bytes from the step's own download.
+    case bytes(InstallerByteProgress)
+    /// The app is up to its macOS prompt, and the step is waiting for the user to answer it.
+    case awaitingApproval(LocalBackendID)
 }
 
 // MARK: - Speed

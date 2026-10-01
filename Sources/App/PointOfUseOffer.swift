@@ -86,6 +86,16 @@ struct PointOfUseFeature: Equatable {
 
     static let all = [dictation, webSearch, email, cleanup, promptPrep]
 
+    /// The same feature on Ollama, the advanced option (spec D3): its app, then the model it holds. Only a
+    /// feature a local text model serves has one.
+    ///
+    /// Ollama's default models are decision D4, still open, so no model row is named and the Ollama choice
+    /// installs the app alone. TODO(D4): append the feature's default Ollama model here, built with
+    /// `BootstrapInstallPlan.localModel(_:detail:downloadBytes:)` and listed in `allComponents`.
+    var ollamaComponents: [InstallerComponentDescriptor] {
+        satisfaction == .textProvider ? [BootstrapInstallPlan.ollama] : []
+    }
+
     /// The feature behind a route, so a landing that already knows which route it ran can ask for the
     /// offer without a second mapping table growing somewhere else.
     static func forRoute(_ route: LLMRouteID) -> PointOfUseFeature? {
@@ -121,6 +131,9 @@ struct PointOfUseInstallOffer: Equatable {
     /// installer - the same descriptors, the same engine, a second entry point rather than a second path.
     let components: [InstallerComponentDescriptor]
     let buttons: [PointOfUseButton]
+    /// Set only on a Mac with neither local app: which app "Install now" could install instead. `components`
+    /// and "Install now" stay the recommended LM Studio install; the choice is what a panel offers beside it.
+    var localAppChoice: PointOfUseLocalAppChoice? = nil
 
     var totalDownloadBytes: Int64? {
         let measured = components.compactMap(\.downloadBytes)
@@ -139,6 +152,55 @@ struct PointOfUseChooser: Equatable {
     /// The components "Set up local models" would install, kept beside the chooser so pressing that button
     /// enters the same install offer rather than a second flow.
     let localComponents: [InstallerComponentDescriptor]
+    /// Set only on a Mac with neither local app: "Set up local models" then asks WHICH app. `localComponents`
+    /// stays the recommended LM Studio install, which is what the button does until a panel draws the choice.
+    var localAppChoice: PointOfUseLocalAppChoice? = nil
+}
+
+/// One app "Set up local models" can install on a Mac with neither (spec D3/D8).
+struct PointOfUseLocalAppOption: Equatable {
+    let backend: LocalBackendID
+    /// The app's own name.
+    let title: String
+    /// "Simple - recommended" or "Advanced". Never the same words for both: D3 says never as equals.
+    let label: String
+    let recommended: Bool
+    let detail: String
+    /// What the user must expect and do during the install, said before they commit to it. Ollama's macOS
+    /// prompt; nil for LM Studio, which raises none.
+    let warning: String?
+    /// Exactly what the install queue is handed, in dependency order.
+    let components: [InstallerComponentDescriptor]
+    /// Always `.install`. Picking an app is choosing an install, not a new kind of action.
+    let button: PointOfUseButton
+}
+
+/// Which local app to install, when the machine has neither (spec D3): **LM Studio, the simple install,
+/// first and recommended; Ollama, the advanced option, second.** Never presented as equals: most users will
+/// run one app, and Ollama is the more technical one.
+///
+/// Every button here is `.install` or `.skip`, so the `PointOfUseRoute` invariant holds on this page too:
+/// the panel can still only skip, install, or open a provider's sign-in.
+///
+/// TODO(S3c/S8): `InstallOfferPanel` renders this as the page "Set up local models" (or "Install now") opens
+/// when an offer carries it, and hands the picked app to `PointOfUseOfferPresenter.installLocalApp(_:)`.
+/// Until then the panel installs LM Studio, the recommended option, exactly as before.
+struct PointOfUseLocalAppChoice: Equatable {
+    let header: String
+    let lines: [String]
+    /// LM Studio first. `--installer-local-steps-selftest` pins the order and the single recommendation.
+    let options: [PointOfUseLocalAppOption]
+
+    /// The options' install buttons in order, then Not now.
+    var buttons: [PointOfUseButton] {
+        options.map(\.button) + [PointOfUseButton(
+            id: PointOfUsePolicy.skipButtonID, title: "Not now",
+            detail: "Nothing is installed and your text is untouched.", route: .skip)]
+    }
+
+    func option(_ backend: LocalBackendID) -> PointOfUseLocalAppOption? {
+        options.first { $0.backend == backend }
+    }
 }
 
 enum PointOfUseOffer: Equatable {
@@ -173,6 +235,14 @@ enum PointOfUseOffer: Equatable {
         }
     }
 
+    /// Which app to install, when the machine has neither.
+    var localAppChoice: PointOfUseLocalAppChoice? {
+        switch self {
+        case .install(let offer): return offer.localAppChoice
+        case .chooser(let chooser): return chooser.localAppChoice
+        }
+    }
+
     /// Content-safe one-line record for the app log. Feature identity and button ids only: this surface
     /// appears at the exact moment a transcript was in flight, so it must not be able to log one.
     var logToken: String {
@@ -181,8 +251,9 @@ enum PointOfUseOffer: Equatable {
         case .install: kind = "install"
         case .chooser: kind = "chooser"
         }
+        let apps = localAppChoice.map { " apps=" + $0.options.map(\.backend.rawValue).joined(separator: ",") } ?? ""
         return "point-of-use offer=\(kind) feature=\(featureID) "
-            + "buttons=\(buttons.map(\.id).joined(separator: ","))"
+            + "buttons=\(buttons.map(\.id).joined(separator: ","))" + apps
     }
 }
 
@@ -194,33 +265,51 @@ enum PointOfUsePolicy {
     static func isSatisfied(_ component: InstallerComponentDescriptor,
                             presences: [LLMProvider: LLMProviderDetection.Presence],
                             bootstrap: BootstrapSnapshot) -> Bool? {
-        guard !component.lmStudioSteps.isEmpty else {
+        guard !component.localSteps.isEmpty else {
             return bootstrap.isComponentUsable(component.id)
         }
         let local = presences[.local]
-        // These steps are LM Studio's: its app, and a model in IT. A merged `.local` presence also counts
-        // Ollama, so when it carries per-app readings, LM Studio's own reading answers: its install, and its
-        // catalog (nil while it is stopped, even when Ollama's answered). Models match on the app too, since
-        // the same id in Ollama is not the LM Studio model this row would install. A hand-built presence
-        // without the breakdown keeps the single-app reading.
-        let lmStudio = local.flatMap { $0.localReading(.lmStudio) }
-        let lmStudioInstalled = lmStudio.map(\.installed) ?? local?.installed
-        let lmStudioModels = lmStudio.map(\.models) ?? local?.availableLocalModels
-        for step in component.lmStudioSteps {
+        // Each step names its app, and that app's OWN reading answers: its install, and its catalog (nil
+        // while it is stopped, even when the other app's answered). Models match on the app too, since the
+        // same id in the other app is not the model this row would install. Without that app's own reading
+        // (a hand-built presence), LM Studio keeps the merged single-app reading it had in 1.1.0; for Ollama
+        // the merged fields measure nothing, so it answers nil rather than guessing.
+        for step in component.localSteps {
+            let backend = step.backend
+            let reading = local.flatMap { $0.localReading(backend) }
+            let mergedFallback = backend == .lmStudio
+            let installed = reading.map(\.installed) ?? (mergedFallback ? local?.installed : nil)
+            let models = reading.map(\.models) ?? (mergedFallback ? local?.availableLocalModels : nil)
             switch step {
-            case .application:
-                guard let lmStudioInstalled else { return nil }
-                if !lmStudioInstalled { return false }
-            case .model(let modelID):
-                guard let lmStudioInstalled else { return nil }
-                guard lmStudioInstalled else { return false }
-                guard let models = lmStudioModels else { return nil }
-                if !models.contains(where: { $0.backend == .lmStudio && $0.modelID == modelID }) {
+            case .app, .ready:
+                guard let installed else { return nil }
+                if !installed { return false }
+            case .model(let ref):
+                guard let installed else { return nil }
+                guard installed else { return false }
+                guard let models else { return nil }
+                if !models.contains(where: { $0.backend == ref.backend && Self.sameModel($0.modelID, ref) }) {
                     return false
                 }
             }
         }
         return true
+    }
+
+    /// Ollama's implicit `:latest` makes `x` and `x:latest` one model; LM Studio ids compare exactly.
+    private static func sameModel(_ listed: String, _ ref: LocalModelRef) -> Bool {
+        switch ref.backend {
+        case .lmStudio: return listed == ref.modelID
+        case .ollama: return OllamaBackend.canonicalModelName(listed) == OllamaBackend.canonicalModelName(ref.modelID)
+        }
+    }
+
+    /// True only when the machine measurably has NEITHER local app, the one situation D3's choice is for.
+    /// An unmeasured local presence is never counted as neither.
+    static func hasNoLocalApp(presences: [LLMProvider: LLMProviderDetection.Presence]) -> Bool {
+        guard let local = presences[.local] else { return false }
+        if let installed = local.installedLocalBackends { return installed.isEmpty }
+        return !local.installed
     }
 
     /// True only when the machine measurably has nothing: no local model, no Claude CLI, no Codex CLI.
@@ -255,10 +344,70 @@ enum PointOfUsePolicy {
         }
         guard !outstanding.isEmpty else { return nil }
 
-        if feature.satisfaction == .textProvider, hasNothingInstalled(presences: presences) {
-            return .chooser(chooser(for: feature, localComponents: outstanding))
+        // D3: on a Mac with neither app, the offer also carries which app to install. The LM Studio option
+        // is exactly the outstanding list above, so "Install now" is unchanged by the choice existing.
+        var appChoice: PointOfUseLocalAppChoice?
+        if feature.satisfaction == .textProvider, hasNoLocalApp(presences: presences),
+           outstanding.contains(where: { $0.id == BootstrapInstallPlan.lmStudio.id }) {
+            let ollama = feature.ollamaComponents.filter {
+                isSatisfied($0, presences: presences, bootstrap: bootstrap) != true
+            }
+            appChoice = localAppChoice(for: feature, lmStudioComponents: outstanding,
+                                       ollamaComponents: ollama)
         }
-        return .install(installOffer(for: feature, outstanding: outstanding))
+
+        if feature.satisfaction == .textProvider, hasNothingInstalled(presences: presences) {
+            var offer = chooser(for: feature, localComponents: outstanding)
+            offer.localAppChoice = appChoice
+            return .chooser(offer)
+        }
+        var offer = installOffer(for: feature, outstanding: outstanding)
+        offer.localAppChoice = appChoice
+        return .install(offer)
+    }
+
+    /// D3's two options, LM Studio first as the simple, recommended install and Ollama second as the
+    /// advanced option, which carries the warning about its macOS prompt.
+    static func localAppChoice(for feature: PointOfUseFeature,
+                               lmStudioComponents: [InstallerComponentDescriptor],
+                               ollamaComponents: [InstallerComponentDescriptor]) -> PointOfUseLocalAppChoice {
+        PointOfUseLocalAppChoice(
+            header: "SET UP LOCAL MODELS - PICK ONE APP",
+            lines: [
+                "\(feature.title) runs on a local model app on this Mac. Most people only need one.",
+                "You can add the other later from Settings > Setup.",
+            ],
+            options: [
+                PointOfUseLocalAppOption(
+                    backend: .lmStudio, title: LocalBackendID.lmStudio.displayName,
+                    label: "Simple - recommended", recommended: true,
+                    detail: "The simple install. ViddyDictate installs LM Studio from its own installer, "
+                        + "then the model \(feature.title.lowercased()) uses.",
+                    warning: nil,
+                    components: lmStudioComponents,
+                    button: PointOfUseButton(
+                        id: lmStudioAppButtonID, title: "Install LM Studio",
+                        detail: sizeDetail(for: lmStudioComponents), route: .install)),
+                PointOfUseLocalAppOption(
+                    backend: .ollama, title: LocalBackendID.ollama.displayName,
+                    label: "Advanced", recommended: false,
+                    detail: "The advanced option, for people who already use Ollama. ViddyDictate installs "
+                        + "it from Ollama's own download.",
+                    warning: OllamaInstaller.adminPromptWarning,
+                    components: ollamaComponents,
+                    button: PointOfUseButton(
+                        id: ollamaAppButtonID, title: "Install Ollama",
+                        detail: sizeDetail(for: ollamaComponents), route: .install)),
+            ])
+    }
+
+    /// D3: the Preferred local app follows what got installed from the choice. Automatic (nil) already does,
+    /// through `LocalBackendPreference.effective`: with one app installed it IS that app. An explicit choice
+    /// naming the OTHER app would keep new routes pinned to an app the user just passed over, so it returns
+    /// to automatic; an explicit choice of this app is kept as it is.
+    static func preferenceAfterInstalling(_ backend: LocalBackendID,
+                                          explicit: LocalBackendID?) -> LocalBackendID? {
+        explicit == backend ? explicit : nil
     }
 
     // MARK: - Copy
@@ -275,6 +424,10 @@ enum PointOfUsePolicy {
         if outstanding.contains(where: { $0.id == BootstrapInstallPlan.lmStudio.id }),
            outstanding.count > 1 {
             lines.append("LM Studio is not installed yet, so that goes first and the model follows.")
+        }
+        // D8: Ollama's macOS prompt is said before the install and stays on the running page beside it.
+        if outstanding.contains(where: { $0.id == BootstrapInstallPlan.ollama.id }) {
+            lines.append(OllamaInstaller.adminPromptWarning)
         }
         // B8: a component is usable the moment it lands. Saying so is what makes Install now a smaller
         // decision than it looks.
@@ -331,7 +484,8 @@ enum PointOfUsePolicy {
 
     private static func needsLine(feature: PointOfUseFeature,
                                   outstanding: [InstallerComponentDescriptor]) -> String {
-        let named = outstanding.filter { $0.id != BootstrapInstallPlan.lmStudio.id }
+        let apps = [BootstrapInstallPlan.lmStudio.id, BootstrapInstallPlan.ollama.id]
+        let named = outstanding.filter { !apps.contains($0.id) }
         let subjects = named.isEmpty ? outstanding : named
         let titles = list(subjects.map(\.title))
         guard let size = size(of: outstanding) else {
@@ -388,6 +542,8 @@ enum PointOfUsePolicy {
     static let claudeButtonID = "set-up-claude"
     static let codexButtonID = "set-up-codex"
     static let localButtonID = "set-up-local-models"
+    static let lmStudioAppButtonID = "install-lm-studio"
+    static let ollamaAppButtonID = "install-ollama"
 
     static let surfaceIdentifier = "point-of-use-offer"
     static let headerIdentifier = "point-of-use-header"
@@ -415,5 +571,16 @@ enum PointOfUsePolicy {
             let reason = record.failureMessage.map { Preflight.bounded($0) } ?? "stopped"
             return "\(record.title)   failed - \(reason)"
         }
+    }
+
+    /// `progressLine` with what the running row reported: real bytes for an Ollama pull, or the wait for
+    /// Ollama's macOS prompt. Every other phase reads exactly as `progressLine` does.
+    ///
+    /// TODO(S3c/S8): `InstallOfferPanel`'s running page renders rows through this, with
+    /// `BootstrapInstallCoordinator.activity(for:)`, and redraws on `didReportActivity`.
+    static func progressLine(_ record: BootstrapComponentRecord,
+                             activity: InstallerLocalActivity?) -> String {
+        guard record.phase == .installing, activity != nil else { return progressLine(record) }
+        return "\(record.title)   \(InstallProgress.statusText(for: record, activity: activity))"
     }
 }

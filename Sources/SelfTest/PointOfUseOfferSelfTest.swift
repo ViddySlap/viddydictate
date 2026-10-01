@@ -343,26 +343,30 @@ enum PointOfUseOfferSelfTest {
 
     // MARK: - the installer
 
-    /// An LM Studio performer that fails a scripted number of times, then succeeds.
-    private final class ScriptedPerformer: InstallerLMStudioPerforming {
+    /// A local-app performer that fails a scripted number of times, then succeeds. Its readiness step always
+    /// succeeds and consumes no scripted failure, so every count below is the app or model step's alone.
+    private final class ScriptedPerformer: InstallerLocalPerforming {
         private var remaining: [Error]
         private(set) var applicationCalls = 0
         private(set) var modelCalls: [String] = []
 
         init(failures: [Error]) { self.remaining = failures }
 
-        func installApplication() throws {
+        func installApplication(_ backend: LocalBackendID,
+                                report: @escaping (InstallerLocalActivity) -> Void) throws {
             applicationCalls += 1
             if !remaining.isEmpty { throw remaining.removeFirst() }
         }
 
-        func installModel(_ modelID: String) throws {
-            modelCalls.append(modelID)
+        func makeReady(_ backend: LocalBackendID, report: @escaping (InstallerLocalActivity) -> Void) throws {}
+
+        func installModel(_ ref: LocalModelRef, report: @escaping (InstallerLocalActivity) -> Void) throws {
+            modelCalls.append(ref.modelID)
             if !remaining.isEmpty { throw remaining.removeFirst() }
         }
     }
 
-    private static func engine(_ performer: InstallerLMStudioPerforming) -> InstallerEngine {
+    private static func engine(_ performer: InstallerLocalPerforming) -> InstallerEngine {
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("point-of-use-\(UUID().uuidString)", isDirectory: true)
         return InstallerEngine(
@@ -370,13 +374,14 @@ enum PointOfUseOfferSelfTest {
                                   applicationSupport: scratch,
                                   modelCache: scratch.appendingPathComponent("cache"),
                                   packageCache: scratch.appendingPathComponent("package-cache")),
-            lmStudio: performer,
+            local: performer,
             sleep: { _ in })
     }
 
     private static func checkEngine(_ check: SelfTestReporter) {
         check("an LM Studio row is a descriptor, not a special case",
-              BootstrapInstallPlan.gemma.lmStudioSteps == [.model(LMStudioInstaller.gemmaModelID)])
+              BootstrapInstallPlan.gemma.localSteps == [
+                .ready(.lmStudio), .model(LocalModelRef(backend: .lmStudio, modelID: LMStudioInstaller.gemmaModelID))])
         check("an LM Studio row owns no python environment",
               BootstrapInstallPlan.lmStudio.virtualEnvironmentRelativePath == nil)
         check("the shipped component list is the core plus the optional rows",

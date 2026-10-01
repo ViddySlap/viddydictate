@@ -124,6 +124,13 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S3b: the Local model dropdown over the merged catalog, as data. One app keeps the
     // pre-Ollama titles byte for byte; both apps are grouped and named; picks are (app, id). Built-in mutants.
     case localPickerMergeSelftest = "--local-picker-merge-selftest"
+    // Ollama lane S6 (G5): the Ollama installer's trust chain (every hop allowlisted, bundle id, codesign,
+    // Team ID), the no-overwrite rule, start by path and the approval wait, and pull progress, over scripted
+    // I/O with built-in negative controls.
+    case ollamaInstallerSelftest = "--ollama-installer-selftest"
+    // Ollama lane S6: the local-app install plan (LM Studio app -> lms-ready -> model, Ollama app -> server-ready
+    // -> pull), the D3 point-of-use app choice, and unchanged persisted ids. Scratch only; built-in mutants.
+    case installerLocalStepsSelftest = "--installer-local-steps-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
