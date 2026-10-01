@@ -358,7 +358,7 @@ enum FirstRunSetupFixtureSelfTest {
                  ComponentPicker.bytes(for: .ollamaGemma) == 6_583_656_505
                     && BootstrapInstallPlan.ollamaGemma.downloadBytes == 6_583_656_505)
         r.record("qwen3-coder:30b carries the one flagged library figure until the Mac measures it",
-                 ComponentPicker.bytes(for: .ollamaQwen) == ComponentPicker.ollamaQwenLibraryBytes
+                 ComponentPicker.bytes(for: .ollamaQwen) == ComponentPicker.ollamaQwenMeasuredBytes
                     && BootstrapInstallPlan.ollamaQwen.downloadBytes.map(UInt64.init) == ComponentPicker.bytes(for: .ollamaQwen))
 
         let small = ollamaSelection(mac16)

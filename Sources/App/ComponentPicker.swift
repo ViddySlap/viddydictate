@@ -77,17 +77,16 @@ enum ComponentPicker {
             lmStudio: nil,
             ollama: nil,
             ollamaGemma: ComponentPicker.ollamaGemmaMeasuredBytes,
-            ollamaQwen: ComponentPicker.ollamaQwenLibraryBytes)
+            ollamaQwen: ComponentPicker.ollamaQwenMeasuredBytes)
     }
 
     /// `gemma4:e4b` as Ollama stores it: `/api/tags` `size` from the lane's Mac probe, 2026-09-30. MEASURED,
     /// the same way the LM Studio rows were, from the app that will hold it.
     static let ollamaGemmaMeasuredBytes: UInt64 = 6_583_656_505
 
-    /// `qwen3-coder:30b`: the Ollama library's published 19 GB, NOT yet a measurement. The one flagged exception
-    /// to O1 in this file, held only until the Mac pull lands; the fit check runs on it exactly as on the rest.
-    // TODO(measured): replace with /api/tags bytes from notes/mac-pull-qwen3coder-20260930.md
-    static let ollamaQwenLibraryBytes: UInt64 = 19_000_000_000
+    /// `qwen3-coder:30b` as Ollama stores it: `/api/tags` `size` from the lane's Mac pull, 2026-09-30. MEASURED,
+    /// like every other row here (it replaced the library's published 19 GB, held only until the pull landed).
+    static let ollamaQwenMeasuredBytes: UInt64 = 18_556_700_761
 
     /// The bundled runtime's footprint INSIDE the app, measured from the staged bundle on 2026-08-27.
     /// It is quoted on the disclosure row and is deliberately not part of any download total.
@@ -514,7 +513,7 @@ enum ComponentPicker {
     static func availability(_ id: RowID, facts: MachineFacts,
                              sizes: SizeCatalog = .measured) -> Availability {
         // Every model row on either app, keyed on `localModel` rather than LM Studio's `modelID`: an Ollama row
-        // that skipped this check would pre-tick a 19 GB pull on a Mac the loader will refuse it on.
+        // that skipped this check would pre-tick an 18.6 GB pull on a Mac the loader will refuse it on.
         guard let modelBytes = bytes(for: id, sizes: sizes), id.localModel != nil else { return .fits }
         guard let budget = facts.budgetBytes,
               let maxBudget = facts.maxBudgetBytes,
