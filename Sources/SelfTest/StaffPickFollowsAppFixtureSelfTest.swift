@@ -19,7 +19,12 @@ import Foundation
 /// assertion aimed at each one reports it:
 /// (1) no follow: resolution reads the stored LM Studio staff pick as a pin (the pre-S3d store);
 /// (2) customized routes follow too, overriding the user's (app, model);
+/// (3) a backend that accepts a non-loopback `OLLAMA_HOST` (the pre-S3d behaviour);
 /// (4) opening an LM-Studio-only store writes the effective app into every untouched route.
+///
+/// The `OLLAMA_HOST` half runs the real `LLMProviderDetection.observeLocal` over the real `OllamaBackend`
+/// on a scripted transport that RECORDS every request and would answer any of them, so "no request reached
+/// the other machine" is counted, not assumed. The app launch is a recorder too.
 enum StaffPickFollowsAppFixtureSelfTest {
     private static let ollamaCoder = BootstrapInstallPlan.ollamaCleanupModelID
     private static let ollamaGemma = BootstrapInstallPlan.ollamaEmailModelID
@@ -65,6 +70,71 @@ enum StaffPickFollowsAppFixtureSelfTest {
         let resolve: (ModelsPowerSettingsStore, LLMRouteID) -> LLMRouteResolution
         /// Open the store at `url`, recording every write.
         let open: (URL, @escaping ModelsPowerSettingsStore.Writer, PreferenceBox) -> ModelsPowerSettingsStore
+        /// Ollama, as observation sees it, for `environment` over `script`.
+        var ollama: ([String: String], OllamaScript) -> LocalModelBackend = { environment, script in
+            OllamaBackend(transport: script.transport, environment: environment, homeDirectory: "/follow-fixture-home")
+        }
+    }
+
+    // MARK: - A scripted Ollama that records every request
+
+    private static let ollamaAppPath = "/Applications/Ollama.app"
+    private static let remoteHost = "192.168.1.50:11434"
+
+    /// Installed as the desktop app, and answering EVERY request on any host: version, tags (both staff
+    /// picks), chat. Only the recorder says whether anything was asked.
+    final class OllamaScript {
+        private(set) var requests: [URL] = []
+        private(set) var launches: [String] = []
+
+        var transport: OllamaBackend.Transport {
+            OllamaBackend.Transport(
+                send: { request, _ in self.serve(request) },
+                pathStatus: { path in
+                    path == StaffPickFollowsAppFixtureSelfTest.ollamaAppPath
+                        ? OllamaBackend.PathStatus(exists: true, isDirectory: true, isExecutable: true)
+                        : .missing
+                })
+        }
+
+        func launched(_ path: String) { launches.append(path) }
+
+        func serve(_ request: URLRequest) -> (Data?, HTTPURLResponse?, Error?) {
+            guard let url = request.url else { return (nil, nil, NSError(domain: NSURLErrorDomain, code: -1)) }
+            requests.append(url)
+            let body: String
+            switch url.path {
+            case "/api/version": body = "{\"version\":\"0.35.0\"}"
+            case "/api/tags":
+                body = """
+                {"models":[
+                  {"name":"\(StaffPickFollowsAppFixtureSelfTest.ollamaGemma)","size":6600000000,"digest":"follow-gemma",
+                   "capabilities":["completion","vision"]},
+                  {"name":"\(StaffPickFollowsAppFixtureSelfTest.ollamaCoder)","size":19000000000,"digest":"follow-coder",
+                   "capabilities":["completion","tools"]}
+                ]}
+                """
+            case "/api/chat": body = "{\"message\":{\"role\":\"assistant\",\"content\":\"fixture\"},\"done\":true}"
+            default: body = "{\"error\":\"not scripted\"}"
+            }
+            return (Data(body.utf8),
+                    HTTPURLResponse(url: url, statusCode: url.path == "/api/show" ? 404 : 200,
+                                    httpVersion: "HTTP/1.1", headerFields: nil),
+                    nil)
+        }
+    }
+
+    /// LM Studio not installed, so the presence is Ollama's alone.
+    private static let absentLMStudio = LMStudioBackend(dependencies: .init(
+        isInstalled: { false }, serverResponds: { false }, installedCatalog: { nil },
+        residentSnapshot: { [] }, ensureLoaded: { _, _ in false }, unload: { _ in }))
+
+    /// A starter aimed at Ollama (pinned AND preferred), whose launch is the script's recorder.
+    private static func starter(_ script: OllamaScript) -> LLMProviderDetection.LocalBackendStarter {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        return LLMProviderDetection.LocalBackendStarter(
+            pinnedBackends: [.ollama], preferredExplicit: .ollama, launch: { script.launched($0) },
+            pollTimeout: 1, pollInterval: 0.5, now: { clock }, sleep: { clock = clock.addingTimeInterval($0) })
     }
 
     private static func makeStore(_ url: URL, writer: @escaping ModelsPowerSettingsStore.Writer,
@@ -98,6 +168,9 @@ enum StaffPickFollowsAppFixtureSelfTest {
         "a customized Local route keeps its exact (app, model) when the Preferred app changes"
     private static let fileIdenticalCheck =
         "LM Studio only: the stored file is byte-identical after load, resolution and save"
+    private static let remoteRefusedCheck =
+        "OLLAMA_HOST=192.168.1.50:11434: Ollama is unavailable with the on-this-Mac reason, and the transport "
+        + "received ZERO requests"
 
     static func run() -> Bool {
         Settings.registerDefaults()
@@ -117,6 +190,7 @@ enum StaffPickFollowsAppFixtureSelfTest {
         print("--- contract (real ModelsPowerSettingsStore.resolveRoute) ---")
         checkContract(realPolicy, root: root, reporter)
         checkDisplay(root: root, reporter)
+        checkOllamaHostSurfaces(reporter)
         checkNegativeControls(root: root, reporter)
 
         print(reporter.passed
@@ -172,6 +246,7 @@ enum StaffPickFollowsAppFixtureSelfTest {
         checkCustomized(policy, root: root, reporter)
         checkGlobalControl(policy, root: root, reporter)
         checkLMStudioOnly(policy, root: root, reporter)
+        checkOllamaHost(policy, reporter)
     }
 
     /// A fresh store seeded on a Mac with no Ollama, then Ollama is the only app: every untouched route follows.
@@ -386,6 +461,76 @@ enum StaffPickFollowsAppFixtureSelfTest {
                         !String(decoding: onDisk, as: UTF8.self).contains("localBackend"))
     }
 
+    // MARK: - OLLAMA_HOST: Local means on this Mac
+
+    private static func checkOllamaHost(_ policy: Policy, _ reporter: SelfTestReporter) {
+        let remote = OllamaScript()
+        let observed = LLMProviderDetection.observeLocal(
+            backends: [absentLMStudio, policy.ollama(["OLLAMA_HOST": remoteHost], remote)],
+            starter: starter(remote))
+        reporter.record(remoteRefusedCheck,
+                        observed.presence.state == .unavailable(OllamaBackend.remoteHostReason)
+                            && remote.requests.isEmpty && remote.launches.isEmpty && observed.models == nil,
+                        "state=\(observed.presence.state) requests=\(remote.requests.map(\.absoluteString)) "
+                            + "launches=\(remote.launches)")
+
+        let local = OllamaScript()
+        let accepted = LLMProviderDetection.observeLocal(
+            backends: [absentLMStudio, policy.ollama(["OLLAMA_HOST": "localhost:11434"], local)],
+            starter: starter(local))
+        reporter.record("OLLAMA_HOST=localhost:11434 is accepted: Ollama is available with both staff picks",
+                        accepted.presence.state == .available
+                            && Set((accepted.models ?? []).map(\.ref))
+                                == [ref(.ollama, ollamaGemma), ref(.ollama, ollamaCoder)]
+                            && !local.requests.isEmpty && local.requests.allSatisfy { $0.host == "localhost" },
+                        "state=\(accepted.presence.state) requests=\(local.requests.count)")
+    }
+
+    /// The rest of the refusal, on the real backend only: the loopback table, chat, the installer and the
+    /// Setup row. None of it sends a request.
+    private static func checkOllamaHostSurfaces(_ reporter: SelfTestReporter) {
+        let loopback = ["127.0.0.1", "127.8.9.10", "localhost", "LOCALHOST", "localhost.", "::1", "[::1]",
+                        "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1"]
+        let elsewhere = ["192.168.1.50", "10.0.0.1", "128.0.0.1", "127.0.0.1.example.com", "127.1", "::2",
+                         "::ffff:192.168.1.50", "example.local", "localhost.example.com", "", "fe80::1"]
+        let wrongIn = loopback.filter { !OllamaBackend.isLoopbackHost($0) }
+        let wrongOut = elsewhere.filter { OllamaBackend.isLoopbackHost($0) }
+        reporter.record("loopback is 127.0.0.0/8, ::1 and localhost, parsed, never prefix-matched",
+                        wrongIn.isEmpty && wrongOut.isEmpty, "not loopback: \(wrongIn) loopback: \(wrongOut)")
+        reporter.record("OLLAMA_HOST=0.0.0.0 is this Mac (S2b maps it to 127.0.0.1)",
+                        OllamaBackend(transport: OllamaScript().transport, environment: ["OLLAMA_HOST": "0.0.0.0"])
+                            .localOnlyRefusal == nil)
+
+        let script = OllamaScript()
+        let backend = OllamaBackend(transport: script.transport, environment: ["OLLAMA_HOST": remoteHost],
+                                    homeDirectory: "/follow-fixture-home")
+        let chat = backend.chat(openAIBody: ["model": ollamaGemma, "messages": [["role": "user", "content": "x"]]],
+                                keepAliveSeconds: 60, contextTokens: 8192, think: false, timeout: 5)
+        let loaded = backend.ensureLoaded(ref(.ollama, ollamaGemma), ttlSeconds: 60, contextTokens: 8192)
+        backend.unload(ref(.ollama, ollamaGemma))
+        var pullRefused = false
+        do { _ = try OllamaInstaller.pullModel(ollamaGemma, backend: backend, stream: { _, _, _ in 200 }) }
+        catch { pullRefused = "\(error)".contains("another machine") }
+        var startRefused = false
+        do { _ = try OllamaInstaller.ensureServerReady(backend: backend, commandRunner: { _, _ in
+            script.launched("command"); throw NSError(domain: "fixture", code: 1) }) }
+        catch { startRefused = "\(error)".contains("another machine") }
+        reporter.record("a remote OLLAMA_HOST: chat, load, unload, pull and start send nothing and run nothing",
+                        chat.0 == nil && (chat.2 as NSError?)?.code == OllamaBackend.ErrorCode.remoteHostRefused.rawValue
+                            && !loaded && pullRefused && startRefused
+                            && script.requests.isEmpty && script.launches.isEmpty,
+                        "requests=\(script.requests.count) launches=\(script.launches.count) "
+                            + "pull=\(pullRefused) start=\(startRefused)")
+
+        let observed = LLMProviderDetection.observeLocal(backends: [absentLMStudio, backend], starter: starter(script))
+        let row = LocalAppRows.build(presence: observed.presence).first { $0.backend == .ollama }
+        reporter.record("the Setup row shows Ollama installed, not used, with the reason and no Start",
+                        row?.state == .notUsed(reason: OllamaBackend.remoteHostReason)
+                            && row?.detail == OllamaBackend.remoteHostReason && row?.button(.start) == nil
+                            && script.requests.isEmpty,
+                        "\(row?.stateWord ?? "no row"): \(row?.status ?? "")")
+    }
+
     // MARK: - Display (the pickers and the preset line show what runs)
 
     private static func checkDisplay(root: URL, _ reporter: SelfTestReporter) {
@@ -456,6 +601,14 @@ enum StaffPickFollowsAppFixtureSelfTest {
             checkContract(followsAll, root: root, $0)
         }
 
+        // (3) Ollama honours a non-loopback OLLAMA_HOST, as S2b did before this slice: it probes and lists
+        // whatever server the variable names.
+        var acceptsRemote = realPolicy
+        acceptsRemote.ollama = { environment, script in AcceptsRemoteHost(environment: environment, script: script) }
+        requireCaught(reporter, mutant: "Ollama backend that accepts a non-loopback OLLAMA_HOST", by: remoteRefusedCheck) {
+            checkContract(acceptsRemote, root: root, $0)
+        }
+
         // (4) Opening the store materializes the effective app into every untouched route.
         let materializes = Policy(resolve: realPolicy.resolve, open: { url, writer, preference in
             let store = makeStore(url, writer: writer, preference: preference)
@@ -472,6 +625,32 @@ enum StaffPickFollowsAppFixtureSelfTest {
         requireCaught(reporter, mutant: "store open that writes the Preferred app into untouched routes",
                       by: fileIdenticalCheck) {
             checkContract(materializes, root: root, $0)
+        }
+    }
+
+    /// Mutant (3): Ollama as observation saw it before S3d, sending to wherever `OLLAMA_HOST` points.
+    private struct AcceptsRemoteHost: LocalModelBackend {
+        let environment: [String: String]
+        let script: OllamaScript
+        var id: LocalBackendID { .ollama }
+        var backgroundLaunchPath: String? { StaffPickFollowsAppFixtureSelfTest.ollamaAppPath }
+        private var base: URL { OllamaBackend.baseURL(ollamaHost: environment["OLLAMA_HOST"]) }
+        private func get(_ path: String) -> Data? {
+            let (data, response, _) = script.serve(URLRequest(url: base.appendingPathComponent(path)))
+            return response?.statusCode == 200 ? data : nil
+        }
+        func isInstalled() -> Bool { true }
+        func serverResponds() -> Bool { get("api/version") != nil }
+        func installedModels() -> [LocalInstalledModel]? {
+            get("api/tags").flatMap(OllamaCatalog.parseLocalTags).map { $0.map(OllamaBackend.installedModel(from:)) }
+        }
+        func residentModels() -> [LocalResidentModel]? { [] }
+        func ensureLoaded(_ ref: LocalModelRef, ttlSeconds: Int, contextTokens: Int?) -> Bool { false }
+        func unload(_ ref: LocalModelRef) {}
+        func routableModelOptions() -> [LMStudioModelOption]? {
+            installedModels()?.map {
+                LMStudioModelOption(modelID: $0.ref.modelID, label: $0.label, sizeBytes: $0.sizeBytes, backend: .ollama)
+            }
         }
     }
 

@@ -163,7 +163,8 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case featureTourRender = "--feature-tour-render"
     // Ollama lane S3d: an untouched Local route runs the effective Preferred local app's staff pick (D1/D4),
     // decided at resolution time and never written; customized routes keep their (app, model); LM-Studio-only
-    // resolution and models-power.json are 1.1.0's byte for byte. Scratch stores; built-in mutants.
+    // resolution and models-power.json are 1.1.0's byte for byte; an OLLAMA_HOST on another machine is never
+    // used or sent anything. Scratch stores and a recording Ollama transport; built-in mutants.
     case staffPickFollowsAppSelftest = "--staff-pick-follows-app-selftest"
 }
 

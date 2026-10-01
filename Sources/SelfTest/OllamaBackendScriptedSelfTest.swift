@@ -588,13 +588,22 @@ enum OllamaBackendScriptedSelfTest {
                             actual == expected, actual == expected ? "" : actual)
         }
 
+        // A loopback OLLAMA_HOST is where requests actually go. A server on another machine is parsed as given
+        // above but never used (S3d): "Local" means on this Mac, so it receives nothing at all.
         let fake = FakeOllama()
-        let custom = makeBackend(fake, environment: ["OLLAMA_HOST": "example.local:9999"])
+        let custom = makeBackend(fake, environment: ["OLLAMA_HOST": "localhost:11500"])
         _ = custom.serverResponds()
         let request = fake.requests.last
-        reporter.record("the environment's OLLAMA_HOST is where requests actually go",
-                        request?.host == "example.local" && request?.port == 9999 && !custom.isLoopback
+        reporter.record("a loopback OLLAMA_HOST is where requests actually go",
+                        request?.host == "localhost" && request?.port == 11500 && custom.isLoopback
                             && makeBackend(fake, environment: ["OLLAMA_HOST": "0.0.0.0"]).isLoopback)
+        let remoteFake = FakeOllama()
+        let remote = makeBackend(remoteFake, environment: ["OLLAMA_HOST": "example.local:9999"])
+        let remoteAnswered = remote.serverResponds() || remote.installedModels() != nil
+        reporter.record("a non-loopback OLLAMA_HOST is refused and receives no request",
+                        !remote.isLoopback && !remoteAnswered && remoteFake.requests.isEmpty
+                            && remote.localOnlyRefusal == OllamaBackend.remoteHostReason,
+                        "requests=\(remoteFake.requests.count)")
     }
 
     // MARK: - Negative controls

@@ -114,6 +114,16 @@ protocol LocalModelBackend {
     /// Nil for LM Studio (its server is started lazily by `lms server start` inside the load, unchanged) and
     /// for a CLI-only Ollama (a daemon the user manages, which ViddyDictate does not own).
     var backgroundLaunchPath: String? { get }
+
+    /// Why ViddyDictate will not use this app at all, or nil when it may. Observation reports the app with
+    /// this reason and never probes, reads or starts it. Ollama's is a server on another machine
+    /// (`OLLAMA_HOST`): "Local" means on this Mac.
+    var localOnlyRefusal: String? { get }
+}
+
+extension LocalModelBackend {
+    /// Most apps are always on this Mac.
+    var localOnlyRefusal: String? { nil }
 }
 
 /// The Preferred local app (spec D1/D3): an optional EXPLICIT choice, and what it means when there is none.

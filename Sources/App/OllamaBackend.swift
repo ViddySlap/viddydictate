@@ -75,6 +75,8 @@ final class OllamaBackend: LocalModelBackend {
         /// The OpenAI-shaped body could not be represented as a native `/api/chat` body (no model, no
         /// messages, a remote image, ...). Surfaces as the clients' existing `.unavailable` path.
         case requestNotRepresentable = 1
+        /// `OLLAMA_HOST` names a server on another machine, so nothing is sent (see `localOnlyRefusal`).
+        case remoteHostRefused = 2
     }
 
     /// The desktop app, system-wide and per-user.
@@ -150,6 +152,15 @@ final class OllamaBackend: LocalModelBackend {
     /// Only the desktop app is ever started by observation. A CLI-only (Homebrew) install is a daemon the user
     /// runs with `ollama serve` or `brew services`; ViddyDictate does not own it and never starts it.
     var backgroundLaunchPath: String? { installedAppPath }
+
+    /// "Local" means on this Mac. When `OLLAMA_HOST` names a server on another machine, ViddyDictate does not
+    /// use Ollama at all: this is the reason the presence shows, observation neither probes nor starts it, and
+    /// `endpoint` refuses every path, so no version, tags, show, ps, load, chat or pull request is ever sent
+    /// there. nil when `baseURL` is loopback (`isLoopback`).
+    var localOnlyRefusal: String? { isLoopback ? nil : Self.remoteHostReason }
+
+    static let remoteHostReason =
+        "Ollama is set to use a server on another machine (OLLAMA_HOST). ViddyDictate only uses Ollama on this Mac."
 
     /// `GET /api/version` answers 200 with a JSON `version` string within `versionTimeout`. Anything else
     /// (refused, timed out, a non-Ollama server on the port answering with HTML) is "not responding".
@@ -396,6 +407,10 @@ final class OllamaBackend: LocalModelBackend {
     /// `residentModels()`, or this request reloads it at the new size.
     func chat(openAIBody: [String: Any], keepAliveSeconds: Int, contextTokens: Int, think: Bool,
               timeout: TimeInterval) -> (Data?, HTTPURLResponse?, Error?) {
+        if let refusal = localOnlyRefusal {
+            return (nil, nil, NSError(domain: Self.errorDomain, code: ErrorCode.remoteHostRefused.rawValue,
+                                      userInfo: [NSLocalizedDescriptionKey: refusal]))
+        }
         guard let model = (openAIBody["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty else {
             return (nil, nil, Self.notRepresentable("no model in the chat body"))
@@ -455,8 +470,8 @@ final class OllamaBackend: LocalModelBackend {
     ///   becomes `127.0.0.1`. It is how a user tells the SERVER to listen on every interface, not an
     ///   address to connect to, and the server it names is this Mac.
     ///
-    /// A non-loopback host is honoured as given, which means text would leave this Mac; the routing slice
-    /// decides whether Local may use such a host (`isLoopback`).
+    /// A non-loopback host is parsed as given, and then never used: text would leave this Mac, so `endpoint`
+    /// refuses it and the presence reports `localOnlyRefusal` (`isLoopback`).
     static func baseURL(ollamaHost raw: String?) -> URL {
         let fallback = URL(string: defaultBaseURL)!
         let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -521,10 +536,71 @@ final class OllamaBackend: LocalModelBackend {
         return (host, String(value[value.index(after: colon)...]))
     }
 
-    /// Whether `baseURL` points at this Mac.
+    /// Whether `baseURL` points at this Mac (`isLoopbackHost`).
     var isLoopback: Bool {
-        guard let host = baseURL.host?.lowercased() else { return false }
-        return host == "localhost" || host == "::1" || host == "[::1]" || host.hasPrefix("127.")
+        guard let host = baseURL.host else { return false }
+        return Self.isLoopbackHost(host)
+    }
+
+    /// Loopback is `localhost`, an IPv4 literal in 127.0.0.0/8, and `::1` (also as an IPv4-mapped 127/8
+    /// address). Literals are parsed, never prefix-matched, so a NAME such as `127.0.0.1.example.com` is not
+    /// loopback, and neither is a shorthand like `127.1`: anything not plainly this Mac is refused.
+    static func isLoopbackHost(_ raw: String) -> Bool {
+        var host = raw.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if let zone = host.firstIndex(of: "%") { host = String(host[..<zone]) }
+        if host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" { return true }
+        if let octets = ipv4Octets(host) { return octets[0] == 127 }
+        guard let groups = ipv6Groups(host) else { return false }
+        if groups == [0, 0, 0, 0, 0, 0, 0, 1] { return true }
+        return groups[0..<5].allSatisfy { $0 == 0 } && groups[5] == 0xffff && groups[6] >> 8 == 127
+    }
+
+    /// Four dotted decimal octets, each 0...255, or nil.
+    private static func ipv4Octets(_ text: String) -> [Int]? {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [Int] = []
+        for part in parts {
+            guard (1...3).contains(part.count), part.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = Int(part), value <= 255 else { return nil }
+            octets.append(value)
+        }
+        return octets
+    }
+
+    /// The eight 16-bit groups of an IPv6 literal (one `::`, an optional dotted IPv4 tail), or nil.
+    private static func ipv6Groups(_ text: String) -> [Int]? {
+        guard text.contains(":") else { return nil }
+        func groups(_ part: Substring) -> [Int]? {
+            if part.isEmpty { return [] }
+            var out: [Int] = []
+            let fields = part.split(separator: ":", omittingEmptySubsequences: false)
+            for (index, field) in fields.enumerated() {
+                if index == fields.count - 1, field.contains(".") {
+                    guard let v4 = ipv4Octets(String(field)) else { return nil }
+                    out += [v4[0] << 8 | v4[1], v4[2] << 8 | v4[3]]
+                    continue
+                }
+                guard (1...4).contains(field.count), field.allSatisfy({ $0.isHexDigit }),
+                      let value = Int(field, radix: 16) else { return nil }
+                out.append(value)
+            }
+            return out
+        }
+        let halves = text.components(separatedBy: "::")
+        switch halves.count {
+        case 1:
+            guard let all = groups(Substring(text)), all.count == 8 else { return nil }
+            return all
+        case 2:
+            guard let head = groups(Substring(halves[0])), let tail = groups(Substring(halves[1])),
+                  head.count + tail.count < 8 else { return nil }
+            return head + Array(repeating: 0, count: 8 - head.count - tail.count) + tail
+        default:
+            return nil
+        }
     }
 
     // MARK: - Names
@@ -548,8 +624,12 @@ final class OllamaBackend: LocalModelBackend {
         get("api/ps", timeout: Self.residencyTimeout).flatMap(OllamaCatalog.parseResident)
     }
 
+    /// Every request's URL, and the one gate that keeps text on this Mac: nil for a non-loopback `baseURL`,
+    /// so no caller (this backend's own probes, loads and chat, or the installer's pull) can build a request
+    /// to another machine.
     func endpoint(_ path: String) -> URL? {
-        URL(string: baseURL.absoluteString + "/" + path)
+        guard isLoopback else { return nil }
+        return URL(string: baseURL.absoluteString + "/" + path)
     }
 
     /// The body of a 2xx GET, or nil on a transport error or any other status.

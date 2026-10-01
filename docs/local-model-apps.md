@@ -93,6 +93,16 @@ and used whenever it is running. ViddyDictate never starts it, because it is a s
 Setup tab shows it as "Installed as a command-line tool (Homebrew), not running" until you start it
 with `ollama serve` or `brew services start ollama` and choose Check again.
 
+### Ollama on another machine (`OLLAMA_HOST`)
+
+Local means on this Mac. ViddyDictate reads `OLLAMA_HOST` the way Ollama does, so an Ollama on
+another port of this Mac is found, and `0.0.0.0` (which tells the server to listen everywhere) means
+this Mac. Only loopback is used: `localhost`, `127.0.0.0/8`, and `::1`. When `OLLAMA_HOST` names any
+other host, ViddyDictate does not use Ollama at all and never sends it a request, not even a version
+check. The Setup tab shows Ollama as not used, with "Ollama is set to use a server on another
+machine (OLLAMA_HOST). ViddyDictate only uses Ollama on this Mac." Local routes then run in LM
+Studio if it is available, and otherwise are off.
+
 ## Memory
 
 Both apps sit under the same guard: the **Model memory budget** on the Setup tab. Before a load,

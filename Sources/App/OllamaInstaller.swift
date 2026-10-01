@@ -415,6 +415,8 @@ enum OllamaInstaller {
                                   bound: TimeInterval = approvalWaitBound,
                                   pollInterval: TimeInterval = approvalPollInterval,
                                   onAwaitingApproval: () -> Void = {}) throws -> ReadyOutcome {
+        // A server on another machine is never used, so there is nothing here to start or wait for.
+        if let refusal = backend.localOnlyRefusal { throw InstallerError.serverNotRunning(refusal) }
         if backend.serverResponds() { return .alreadyRunning }
         guard let appPath = backend.installedAppPath else {
             if backend.isInstalled() {
@@ -465,6 +467,7 @@ enum OllamaInstaller {
               !modelID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw InstallerError.invalidModelIdentifier(modelID)
         }
+        if let refusal = backend.localOnlyRefusal { throw InstallerError.operation(refusal) }
         guard let installed = backend.installedModels() else {
             throw InstallerError.operation(
                 "Ollama's model list did not answer; refusing to guess whether \(modelID) is installed")

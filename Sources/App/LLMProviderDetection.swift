@@ -283,15 +283,19 @@ enum LLMProviderDetection {
         /// Only an Ollama desktop app is ever started (see `LocalModelBackend.backgroundLaunchPath`).
         let startable: Bool
         let startAttempted: Bool
+        /// Set when ViddyDictate will not use this installed app at all (`LocalModelBackend.localOnlyRefusal`):
+        /// it was not probed, read or started, and this is the reason the user is given.
+        let refusal: String?
 
         init(backend: LocalBackendID, installed: Bool, responding: Bool, models: [LMStudioModelOption]?,
-             startable: Bool = false, startAttempted: Bool = false) {
+             startable: Bool = false, startAttempted: Bool = false, refusal: String? = nil) {
             self.backend = backend
             self.installed = installed
             self.responding = responding
             self.models = models
             self.startable = startable
             self.startAttempted = startAttempted
+            self.refusal = refusal
         }
 
         /// Running with at least one model it can route to.
@@ -362,6 +366,7 @@ enum LLMProviderDetection {
     static func localReason(_ reading: LocalBackendReading, soleApp: Bool) -> String {
         let name = reading.backend.displayName
         if !reading.installed { return "\(name) is not installed" }
+        if let refusal = reading.refusal { return refusal }
         if !reading.responding {
             if reading.startAttempted { return ollamaDidNotStartReason }
             // A CLI-only Ollama is a daemon the user runs; say what is true and nothing more.
@@ -429,6 +434,14 @@ enum LLMProviderDetection {
                 continue
             }
             let launchPath = backend.backgroundLaunchPath
+            if let refusal = backend.localOnlyRefusal {
+                // Not on this Mac: no probe, no catalog, no start, so nothing is ever sent there.
+                Log.write("local: \(backend.id.displayName) is not used: \(refusal)")
+                readings.append(LocalBackendReading(
+                    backend: backend.id, installed: true, responding: false, models: nil,
+                    startable: launchPath != nil, refusal: refusal))
+                continue
+            }
             var responding = backend.serverResponds()
             var attempted = false
             if !responding, let launchPath, targets.contains(backend.id) {

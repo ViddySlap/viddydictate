@@ -197,7 +197,9 @@ has. With both apps listed, the buttons read "Unload all in LM Studio" and "Unlo
 The idle window and the context size travel on each request and affect only that request's model.
 ViddyDictate does not change Ollama's settings, its defaults, or any environment variable, so
 models other apps load follow Ollama's own defaults. The one Ollama environment variable it reads
-is `OLLAMA_HOST`, from its own process environment, to find the server.
+is `OLLAMA_HOST`, from its own process environment, to find the server, and only a loopback value
+(`localhost`, `127.0.0.0/8`, `::1`) is used. A server on another machine is never sent anything; see
+[local-model-apps.md](local-model-apps.md).
 
 ### Verification
 

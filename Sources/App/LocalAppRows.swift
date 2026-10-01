@@ -36,6 +36,9 @@ enum LocalAppRows {
         case notRunning
         /// A command-line (Homebrew) Ollama whose server does not answer.
         case commandLineNotRunning
+        /// Installed, but ViddyDictate will not use it (S3a's reading carries the reason): Ollama pointed at a
+        /// server on another machine by `OLLAMA_HOST`. No Start, since starting it would not change that.
+        case notUsed(reason: String)
         /// Answering. `models` is nil when its catalog did not answer.
         case running(models: Int?, commandLine: Bool)
     }
@@ -167,6 +170,9 @@ enum LocalAppRows {
         case .commandLineNotRunning:
             // No Open (there is no app) and no Start (a daemon the user manages). The detail says how.
             break
+        case .notUsed:
+            // Starting or opening it would not bring it to this Mac. The detail says why.
+            attention = true
         case .running(_, let commandLine):
             if !commandLine { buttons = [Button(action: .open, title: openTitle, isEnabled: true)] }
         }
@@ -180,6 +186,7 @@ enum LocalAppRows {
         guard measured else { return .checking }
         guard let reading else { return .notMeasured }
         guard reading.installed else { return .notInstalled }
+        if let refusal = reading.refusal { return .notUsed(reason: refusal) }
         let commandLine = isCommandLine(reading)
         guard reading.responding else { return commandLine ? .commandLineNotRunning : .notRunning }
         return .running(models: reading.models?.count, commandLine: commandLine)
@@ -214,6 +221,7 @@ enum LocalAppRows {
         case .notInstalled: return "NOT INSTALLED"
         case .notRunning: return "NOT RUNNING"
         case .commandLineNotRunning: return "NOT RUNNING"
+        case .notUsed: return "NOT USED"
         case .running: return "RUNNING"
         }
     }
@@ -226,6 +234,7 @@ enum LocalAppRows {
         case .notRunning: return "Installed, not running"
         case .commandLineNotRunning:
             return "Installed as a command-line tool (Homebrew), not running"
+        case .notUsed: return "Installed, not used"
         case .running(let models, _):
             guard let models else { return "Running; its model list did not answer" }
             switch models {
@@ -254,6 +263,8 @@ enum LocalAppRows {
             }
         case .commandLineNotRunning:
             return commandLineStartCopy
+        case .notUsed(let reason):
+            return reason
         case .running(_, let commandLine):
             return commandLine
                 ? "Installed as a command-line tool (Homebrew). Its server is yours to start and stop." : nil
