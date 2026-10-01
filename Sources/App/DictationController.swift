@@ -144,6 +144,11 @@ final class DictationController {
         }
     }
 
+    /// Re-says what the speech engine is doing while a retained take waits on a warming daemon, so a slow
+    /// cold start reads as "starting… 12s" rather than as a broken engine. Main thread only; it stops
+    /// itself when the take is delivered, given up, or cancelled.
+    private var warmingTicker: Timer?
+
     /// The cleanup-suspect A/B picker (prompt-injection backstop). When `CleanupLogic.cleanupSuspect`
     /// flags an output, we show this instead of auto-pasting; `pendingPick` holds the two candidates
     /// awaiting the user's Left/Right/Return choice (driven via `hotkey.abPickerActive`).
@@ -1075,8 +1080,11 @@ final class DictationController {
                            completion: @escaping (RetainedTakeRecoveryResult) -> Void) {
         if retentionWasEnabled {
             Log.write("stt.recovery queued take=\(takeID.uuidString) source=retained-clip")
-            hud.toast("Transcription unavailable. Retrying retained take...")
+            // A daemon that reports its warm-up phase gets a plain "Speech engine is starting… 12s";
+            // an older one keeps the original wording (DaemonWarmingHUD.legacyRetryToast).
+            hud.toast(DaemonWarmingHUD.recoveryToast(for: DaemonClient.lastWarmStatus, now: Date()))
             note("retrying transcription")
+            startWarmingTicker(generation: generation)
         }
         let stillCurrent: () -> Bool = { [weak self] in
             guard let self else { return false }
@@ -1085,12 +1093,37 @@ final class DictationController {
         retainedTakeRecovery.recover(
             takeID: takeID, retentionWasEnabled: retentionWasEnabled,
             stillCurrent: stillCurrent
-        ) { result in
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard stillCurrent() else { return }
+                self?.stopWarmingTicker()
                 completion(result)
             }
         }
+    }
+
+    /// Every 2 s while this take's retained retry is pending, toast the daemon's latest warm-up phase.
+    /// Says nothing when there is nothing true to say (an older daemon, a ready one, a stale reading), so
+    /// the recovery spinner shows exactly as before. Stops on its own once the take is no longer this
+    /// generation or no longer finishing, which covers Esc and a new take.
+    private func startWarmingTicker(generation: Int) {
+        stopWarmingTicker()
+        warmingTicker = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard generation == self.takeGeneration,
+                  self.state == .finishing || self.state == .oneShotFinishing else {
+                self.stopWarmingTicker()
+                return
+            }
+            guard let message = DaemonWarmingHUD.message(for: DaemonClient.lastWarmStatus, now: Date())
+            else { return }
+            self.hud.toast(message, duration: 2.5)
+        }
+    }
+
+    private func stopWarmingTicker() {
+        warmingTicker?.invalidate()
+        warmingTicker = nil
     }
 
     /// Pure request builder shared by the runtime cleanup path and deterministic route-coverage tests.

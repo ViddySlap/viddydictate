@@ -13,6 +13,15 @@ enum DaemonClient {
         set { modelLock.lock(); _lastKnownModel = newValue; modelLock.unlock() }
     }
 
+    private static var _lastWarmStatus: DaemonWarmStatus?
+
+    /// The latest `/health` answer's warm-up account, refreshed by every health read (including each
+    /// `ensureUp` poll); nil when nothing usable answered. The HUD reads it while a take waits.
+    static var lastWarmStatus: DaemonWarmStatus? {
+        get { modelLock.lock(); defer { modelLock.unlock() }; return _lastWarmStatus }
+        set { modelLock.lock(); _lastWarmStatus = newValue; modelLock.unlock() }
+    }
+
     /// The three distinguishable answers to "is the daemon up". `health` below collapses the two failure
     /// shapes into one Boolean because that is all its callers need; preflight (W5) needs them apart,
     /// since "it answered and is still loading its model" and "nothing answered at all" send a user to
@@ -29,15 +38,25 @@ enum DaemonClient {
         var req = URLRequest(url: base.appendingPathComponent("health"))
         req.timeoutInterval = 2.0
         URLSession.shared.dataTask(with: req) { data, _, error in
-            if let error = error { completion(.unreachable(detail: error.localizedDescription)); return }
+            if let error = error {
+                lastWarmStatus = nil
+                completion(.unreachable(detail: error.localizedDescription)); return
+            }
             guard let data = data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                lastWarmStatus = nil
                 completion(.unreachable(detail: "bad response")); return
             }
+            let status = DaemonWarmStatus.parse(obj, observedAt: Date())
+            lastWarmStatus = status
             let ready = (obj["ready"] as? Bool) ?? false
             let model = (obj["model"] as? String) ?? "?"
             guard ready else {
-                completion(.notReady(detail: (obj["error"] as? String) ?? "loading")); return
+                // A daemon that reports its phase says which one ("downloading for 45s"); an older
+                // daemon keeps the plain "loading".
+                let detail = (obj["error"] as? String)
+                    ?? DaemonWarmingHUD.preflightDetail(for: status) ?? "loading"
+                completion(.notReady(detail: detail)); return
             }
             lastKnownModel = model
             completion(.ready(model: model))

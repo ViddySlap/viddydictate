@@ -97,6 +97,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // DMGU1: app-update availability policy, with an injected transport and opener. Deterministic: five
     // arms (compare/failures/nag/link/control), each exercised by a scripts/verify.sh gate.
     case appUpdateSelftest = "--app-update-selftest"
+    // A slow speech-engine warm must be visible: what the HUD and Preflight say from the daemon's
+    // /health phase fields, with an ignore-phase mutant that must be caught. Deterministic and pure.
+    case daemonWarmingHUDSelftest = "--daemon-warming-hud-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
