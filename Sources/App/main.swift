@@ -179,6 +179,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // it), agreeing with ModelManager. Scratch stores, fixed facts, an injected resident read; built-in
     // mutants (the 1.1.0 double count, a backend-blind resident set). Named so no other flag contains it.
     case residentFitSelftest = "--resident-fit-selftest"
+    // The restrictive Codex config parsed as TOML, with a dotted feature name and the 1.1.0 bare-key
+    // writer as its negative control. Offline: a fixture inventory and a scratch directory only.
+    case codexConfigTOMLSelftest = "--codex-config-toml-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

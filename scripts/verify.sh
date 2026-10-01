@@ -633,6 +633,9 @@ tier_deterministic() {
         run_gate deterministic "daemon warming HUD phase fixture selftest (ignore-phase mutant caught)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --daemon-warming-hud-selftest || true
+        run_gate deterministic "Codex restrictive config is valid TOML with dotted feature keys" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --codex-config-toml-selftest || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

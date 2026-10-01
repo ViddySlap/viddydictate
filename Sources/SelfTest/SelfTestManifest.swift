@@ -509,6 +509,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .residentFitSelftest: .init(tier: .deterministic) { _ in
         ResidentFitFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure: the production config writer over a fixture inventory in a TMPDIR scratch directory, parsed
+    // by a strict in-process TOML subset. No Codex binary runs.
+    .codexConfigTOMLSelftest: .init(tier: .deterministic) { _ in
+        CodexConfigTOMLSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in
