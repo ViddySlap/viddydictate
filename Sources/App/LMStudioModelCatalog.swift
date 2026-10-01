@@ -1,17 +1,30 @@
 import Foundation
 
-/// One LM Studio model that can be selected for a Local route. `modelID` is the exact
-/// `modelKey` accepted by LM Studio's OpenAI-compatible API; `label` is presentation only.
+/// One installed model that can be selected for a Local route. `modelID` is the exact id the serving app
+/// accepts (LM Studio's `modelKey`, Ollama's tag name); `label` is presentation only.
+///
+/// The name predates a second local app and is kept for SOURCE COMPATIBILITY: `ModelFitSelfTest` (protected
+/// by chain `vdfit`, never edited) and a dozen other gates build these with `init(modelID:label:)`. So the
+/// runtime catalog carries every app's models in this one type, and `backend` says which app serves each.
+/// It is the LAST init parameter and defaults to `.lmStudio`, so every construction written before backends
+/// existed still compiles and still means exactly what it meant.
+///
+/// Equality includes `backend`: the same id on two apps is two different models (see `LocalModelRef`).
 struct LMStudioModelOption: Equatable {
     let modelID: String
     let label: String
     let sizeBytes: Int64?
+    let backend: LocalBackendID
 
-    init(modelID: String, label: String, sizeBytes: Int64? = nil) {
+    init(modelID: String, label: String, sizeBytes: Int64? = nil, backend: LocalBackendID = .lmStudio) {
         self.modelID = modelID
         self.label = label
         self.sizeBytes = sizeBytes
+        self.backend = backend
     }
+
+    /// The model's full identity. Match on this, never on `modelID` alone, once more than one app is present.
+    var ref: LocalModelRef { LocalModelRef(backend: backend, modelID: modelID) }
 }
 
 /// One installed model row from `lms ls --llm --json`. Vision capability is reported through EITHER of

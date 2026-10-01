@@ -116,13 +116,7 @@ final class OllamaBackend: LocalModelBackend {
     /// neither is found. The app's bundle is only checked for existence here; the installer slice owns
     /// bundle-id and signature checks.
     var installKind: OllamaInstallKind? {
-        for path in Self.appBundlePaths {
-            let expanded = path.hasPrefix("~/")
-                ? (homeDirectory as NSString).appendingPathComponent(String(path.dropFirst(2)))
-                : path
-            let status = transport.pathStatus(expanded)
-            if status.exists && status.isDirectory { return .app }
-        }
+        if installedAppPath != nil { return .app }
         for path in Self.cliPaths {
             let status = transport.pathStatus(path)
             if status.exists && !status.isDirectory && status.isExecutable { return .cli }
@@ -130,7 +124,25 @@ final class OllamaBackend: LocalModelBackend {
         return nil
     }
 
+    /// The expanded path of the first desktop app found, in `appBundlePaths` order, or nil for a CLI-only or
+    /// absent install. Recorded because the app must be opened by PATH: right after an install LaunchServices
+    /// has not registered it yet, and `open -a Ollama` fails with "Unable to find application" (Mac probe B3).
+    var installedAppPath: String? {
+        for path in Self.appBundlePaths {
+            let expanded = path.hasPrefix("~/")
+                ? (homeDirectory as NSString).appendingPathComponent(String(path.dropFirst(2)))
+                : path
+            let status = transport.pathStatus(expanded)
+            if status.exists && status.isDirectory { return expanded }
+        }
+        return nil
+    }
+
     func isInstalled() -> Bool { installKind != nil }
+
+    /// Only the desktop app is ever started by observation. A CLI-only (Homebrew) install is a daemon the user
+    /// runs with `ollama serve` or `brew services`; ViddyDictate does not own it and never starts it.
+    var backgroundLaunchPath: String? { installedAppPath }
 
     /// `GET /api/version` answers 200 with a JSON `version` string within `versionTimeout`. Anything else
     /// (refused, timed out, a non-Ollama server on the port answering with HTML) is "not responding".
@@ -195,6 +207,15 @@ final class OllamaBackend: LocalModelBackend {
             isVision: model.isVision,
             supportsTools: answered ? model.supportsTools : nil,
             supportsThinking: answered ? model.supportsThinking : nil)
+    }
+
+    /// Every usable model from `installedModels()`, tagged `.ollama`, in Ollama's own order. Ollama's catalog
+    /// already drops cloud and non-completion models, so nothing further is filtered here.
+    func routableModelOptions() -> [LMStudioModelOption]? {
+        installedModels()?.map {
+            LMStudioModelOption(modelID: $0.ref.modelID, label: $0.label, sizeBytes: $0.sizeBytes,
+                                backend: .ollama)
+        }
     }
 
     // MARK: - Residency

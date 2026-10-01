@@ -60,6 +60,22 @@ struct LMStudioBackend: LocalModelBackend {
         dependencies.unload(ref.modelID)
     }
 
+    /// The `llm` rows of the same `lms ls --llm --json` read, mapped exactly as `LMStudioModelCatalog.parse`
+    /// maps them, so presence and routing see the list `ModelResidency.availableModels()` produced before
+    /// backends existed: same rows, same order, same labels and sizes, a `vlm` row still excluded.
+    func routableModelOptions() -> [LMStudioModelOption]? {
+        dependencies.installedCatalog()?.compactMap(Self.routableOption(from:))
+    }
+
+    static func routableOption(from model: LMStudioInstalledModel) -> LMStudioModelOption? {
+        guard model.type == "llm" else { return nil }
+        return LMStudioModelOption(modelID: model.modelID, label: model.label, sizeBytes: model.sizeBytes)
+    }
+
+    /// Never started by observation. LM Studio's server comes up lazily through `lms server start` inside
+    /// `ModelResidency.ensureLoaded`, exactly as in 1.1.0; this adapter does not add a second way.
+    var backgroundLaunchPath: String? { nil }
+
     // MARK: - Pure mappings (the fixture seam)
 
     /// One `lms ls --llm --json` row. Vision is `isVisionCapable`, i.e. EITHER provider marker (`type ==

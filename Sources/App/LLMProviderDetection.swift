@@ -38,14 +38,31 @@ enum LLMProviderDetection {
         let installed: Bool
         let state: LLMProviderAvailabilityState
         /// Local-only installed model catalog. nil means discovery could not answer; an empty list is a
-        /// measured zero-model state. Cloud presences leave this nil.
+        /// measured zero-model state. Cloud presences leave this nil. For `.local` it is every running local
+        /// app's models, each tagged with its app: LM Studio's first, then Ollama's, each in its own order.
         let availableLocalModels: [LMStudioModelOption]?
+        /// Each local app's own reading, for a `.local` presence built by `observeLocal`. nil for a cloud
+        /// presence and for one built by hand: `installed` then says only "some local app", so a caller that
+        /// needs one app in particular (the LM Studio install offer) falls back to the merged fields.
+        let localBackendReadings: [LocalBackendReading]?
 
         init(installed: Bool, state: LLMProviderAvailabilityState,
-             availableLocalModels: [LMStudioModelOption]? = nil) {
+             availableLocalModels: [LMStudioModelOption]? = nil,
+             localBackendReadings: [LocalBackendReading]? = nil) {
             self.installed = installed
             self.state = state
             self.availableLocalModels = availableLocalModels
+            self.localBackendReadings = localBackendReadings
+        }
+
+        /// One app's reading, or nil when this presence carries no per-app breakdown.
+        func localReading(_ backend: LocalBackendID) -> LocalBackendReading? {
+            localBackendReadings?.first { $0.backend == backend }
+        }
+
+        /// The installed local apps, or nil when this presence carries no per-app breakdown.
+        var installedLocalBackends: Set<LocalBackendID>? {
+            localBackendReadings.map { Set($0.filter(\.installed).map(\.backend)) }
         }
     }
 
@@ -254,27 +271,215 @@ enum LLMProviderDetection {
         let models: [LMStudioModelOption]?
     }
 
-    static func observeLocal() -> LocalObservation {
-        let lmsInstalled = ModelResidency.isInstalled
-        guard lmsInstalled else {
-            let state = localState(lmsInstalled: false, serverResponding: false)
-            return LocalObservation(
-                presence: Presence(installed: false, state: state), models: nil)
+    /// What one local app measured as, before the merge. `startAttempted` records that observation opened
+    /// the app and it still did not answer inside the bounded poll, which changes what the user is told.
+    struct LocalBackendReading: Equatable {
+        let backend: LocalBackendID
+        let installed: Bool
+        let responding: Bool
+        /// Its routable models, tagged with its app. nil when it is not responding or its catalog did not
+        /// answer; empty is a measured zero-model app.
+        let models: [LMStudioModelOption]?
+        /// Only an Ollama desktop app is ever started (see `LocalModelBackend.backgroundLaunchPath`).
+        let startable: Bool
+        let startAttempted: Bool
+
+        init(backend: LocalBackendID, installed: Bool, responding: Bool, models: [LMStudioModelOption]?,
+             startable: Bool = false, startAttempted: Bool = false) {
+            self.backend = backend
+            self.installed = installed
+            self.responding = responding
+            self.models = models
+            self.startable = startable
+            self.startAttempted = startAttempted
         }
 
-        let serverResponding = ModelResidency.serverResponds()
-        guard serverResponding else {
-            let state = localState(lmsInstalled: true, serverResponding: false)
-            return LocalObservation(
-                presence: Presence(installed: true, state: state), models: nil)
+        /// Running with at least one model it can route to.
+        var isUsable: Bool { responding && !(models ?? []).isEmpty }
+    }
+
+    /// How observation may start a local app that is installed but not answering (spec D2, step 1). Every
+    /// side effect is a closure, so a gate records the launch instead of performing it; `.never` is the
+    /// default everywhere except the two production observers (launch hydration and preflight).
+    ///
+    /// The start is attempted at most ONCE per observation, only for an app that is the backend of some Local
+    /// route pin or is the Preferred local app, only when that app has a `backgroundLaunchPath`, and then
+    /// polled for at most `pollTimeout` before one re-probe. LM Studio is never started here (its server
+    /// comes up lazily inside the load, as in 1.1.0), and neither is a CLI-only Ollama.
+    struct LocalBackendStarter {
+        /// The backends of every Local route pin, independent of what is installed.
+        let pinnedBackends: Set<LocalBackendID>
+        /// The explicit Preferred local app, nil for automatic. Resolved against what is installed with
+        /// `LocalBackendPreference.effective` once the installs are measured.
+        let preferredExplicit: LocalBackendID?
+        /// Open the app at this path in the background. Production runs `open -g <path>`.
+        let launch: (String) -> Void
+        let pollTimeout: TimeInterval
+        let pollInterval: TimeInterval
+        let now: () -> Date
+        let sleep: (TimeInterval) -> Void
+
+        /// Starts nothing: no app is a target and the launch closure is inert.
+        static let never = LocalBackendStarter(
+            pinnedBackends: [], preferredExplicit: nil, launch: { _ in }, pollTimeout: 0, pollInterval: 0,
+            now: { Date() }, sleep: { _ in })
+
+        /// The bound on the post-open poll. Long enough for an installed app to bring its server up; a
+        /// first-run app waiting on its macOS prompt (Mac probe B3) never answers, and costs this one wait
+        /// followed by guidance, not a hang.
+        static let defaultPollTimeout: TimeInterval = 10
+        static let defaultPollInterval: TimeInterval = 0.5
+
+        /// Production: the current Local route pins and the stored Preferred local app.
+        static func live(store: ModelsPowerSettingsStore = Settings.modelsPower) -> LocalBackendStarter {
+            let pinned = Set(store.routeIDs().compactMap { route -> LocalBackendID? in
+                let bundle = store.selectedBundle(for: route)
+                return bundle.provider == .local ? bundle.resolvedLocalBackend : nil
+            })
+            return LocalBackendStarter(
+                pinnedBackends: pinned, preferredExplicit: Settings.preferredLocalBackend,
+                launch: LLMProviderDetection.openInBackground, pollTimeout: defaultPollTimeout,
+                pollInterval: defaultPollInterval, now: { Date() }, sleep: { Thread.sleep(forTimeInterval: $0) })
         }
 
-        let models = ModelResidency.availableModels()
-        let state = localState(
-            lmsInstalled: true, serverResponding: true, availableModels: models)
-        return LocalObservation(
-            presence: Presence(installed: true, state: state, availableLocalModels: models),
-            models: models)
+        /// The apps observation may start this time, given what is installed.
+        func targets(installed: Set<LocalBackendID>) -> Set<LocalBackendID> {
+            pinnedBackends.union([
+                LocalBackendPreference.effective(explicit: preferredExplicit, installed: installed),
+            ])
+        }
+    }
+
+    /// The copy for an Ollama app observation opened that still did not answer. A fresh install does not
+    /// start its server until the user answers macOS's "install its command line tool" prompt (Mac probe
+    /// B3), which ViddyDictate must never automate, so this tells the user what to do rather than a state.
+    static let ollamaDidNotStartReason =
+        "Ollama didn't start. Open Ollama and approve its macOS prompt, then try again."
+
+    /// One app's reason for not being usable, in its own name. `soleApp` is true when it is the only local
+    /// app installed: LM Studio then keeps its exact 1.1.0 strings (the catalog-neutral ones included), and
+    /// Ollama's mirror them.
+    static func localReason(_ reading: LocalBackendReading, soleApp: Bool) -> String {
+        let name = reading.backend.displayName
+        if !reading.installed { return "\(name) is not installed" }
+        if !reading.responding {
+            if reading.startAttempted { return ollamaDidNotStartReason }
+            // A CLI-only Ollama is a daemon the user runs; say what is true and nothing more.
+            if reading.backend == .ollama && !reading.startable { return "Ollama is installed but not running" }
+            return "\(name) is not running"
+        }
+        if let models = reading.models, models.isEmpty {
+            return soleApp ? "no local models installed" : "\(name) has no models installed"
+        }
+        return soleApp ? "local model catalog unavailable" : "\(name)'s model catalog is unavailable"
+    }
+
+    /// Merge every local app's reading into the ONE `.local` presence routing and preflight read. Pure.
+    ///
+    /// - Available when ANY app is running with at least one routable model.
+    /// - The catalog is every responding app's models, in `readings` order (LM Studio, then Ollama). nil only
+    ///   when no app's catalog answered at all, which keeps "unmeasured" distinct from "empty".
+    /// - With LM Studio the only app installed, every field is exactly what the single-app `localState`
+    ///   produced in 1.1.0. With neither installed the reason names both apps; with both installed and
+    ///   neither usable it gives each app's own reason.
+    static func mergedLocalPresence(_ readings: [LocalBackendReading]) -> Presence {
+        let installed = readings.filter(\.installed)
+        let answered = readings.compactMap(\.models)
+        let models: [LMStudioModelOption]? = answered.isEmpty ? nil : answered.flatMap { $0 }
+
+        let state: LLMProviderAvailabilityState
+        if readings.contains(where: \.isUsable) {
+            state = .available
+        } else if installed.isEmpty {
+            state = .unavailable(readings.count > 1
+                ? readings.map(\.backend.displayName).joined(separator: " and ") + " are not installed"
+                : readings.first.map { localReason($0, soleApp: true) } ?? "local model availability not measured")
+        } else if installed.count == 1 {
+            state = .unavailable(localReason(installed[0], soleApp: true))
+        } else {
+            state = .unavailable(installed.map { localReason($0, soleApp: false) }.joined(separator: "; "))
+        }
+        return Presence(installed: !installed.isEmpty, state: state, availableLocalModels: models,
+                        localBackendReadings: readings)
+    }
+
+    /// The local apps production observes, in merge order.
+    static func liveLocalBackends() -> [LocalModelBackend] {
+        [LMStudioBackend(), OllamaBackend()]
+    }
+
+    /// Measure every local app and merge them. Each app is probed exactly as far as it can answer: not
+    /// installed stops there, not responding stops before the catalog. LM Studio's probe runs the same three
+    /// `lms` reads 1.1.0's single-app observation ran, in the same order.
+    ///
+    /// Before a non-responding app is written off, `starter` may open it once (see `LocalBackendStarter`),
+    /// wait for it within the bound, and re-probe. The default starts nothing, so a gate or a diagnostic
+    /// that calls this can never launch an app.
+    static func observeLocal(backends: [LocalModelBackend] = liveLocalBackends(),
+                             starter: LocalBackendStarter = .never) -> LocalObservation {
+        let installedFlags = backends.map { $0.isInstalled() }
+        let installedSet = Set(zip(backends, installedFlags).filter { $0.1 }.map { $0.0.id })
+        let targets = starter.targets(installed: installedSet)
+
+        var readings: [LocalBackendReading] = []
+        for (backend, installed) in zip(backends, installedFlags) {
+            guard installed else {
+                readings.append(LocalBackendReading(
+                    backend: backend.id, installed: false, responding: false, models: nil))
+                continue
+            }
+            let launchPath = backend.backgroundLaunchPath
+            var responding = backend.serverResponds()
+            var attempted = false
+            if !responding, let launchPath, targets.contains(backend.id) {
+                attempted = true
+                Log.write("local: \(backend.id.displayName) is installed but not answering; "
+                    + "opening it in the background")
+                starter.launch(launchPath)
+                responding = waitForServer(backend, starter: starter)
+            }
+            let models = responding ? backend.routableModelOptions() : nil
+            readings.append(LocalBackendReading(
+                backend: backend.id, installed: true, responding: responding, models: models,
+                startable: launchPath != nil, startAttempted: attempted && !responding))
+        }
+
+        let presence = mergedLocalPresence(readings)
+        return LocalObservation(presence: presence, models: presence.availableLocalModels)
+    }
+
+    /// Poll `serverResponds` until it answers or `pollTimeout` passes, sleeping `pollInterval` between
+    /// probes. Bounded by the injected clock, so a scripted gate that never answers still ends.
+    private static func waitForServer(_ backend: LocalModelBackend, starter: LocalBackendStarter) -> Bool {
+        let deadline = starter.now().addingTimeInterval(starter.pollTimeout)
+        repeat {
+            starter.sleep(starter.pollInterval)
+            if backend.serverResponds() { return true }
+        } while starter.now() < deadline
+        return false
+    }
+
+    /// `open -g <path>`: launch without taking focus. By path, never by name (see `backgroundLaunchPath`).
+    /// Waits for `open` itself, which returns once LaunchServices has the request, not for the app, and
+    /// never longer than a few seconds: a wedged `open` must not hold the observation past its own bound.
+    static func openInBackground(_ path: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-g", path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() }
+        catch {
+            Log.write("local: could not open \(path) in the background")
+            return
+        }
+        if exited.wait(timeout: .now() + 5) == .timedOut {
+            if process.isRunning { process.terminate() }
+            Log.write("local: open of \(path) did not return in time")
+        }
     }
 
     // MARK: - Live measurement
@@ -286,7 +491,9 @@ enum LLMProviderDetection {
     /// to the scheduled cloud update check, and re-running them on every preflight would charge a
     /// user-initiated status refresh for work that answers a different question.
     static func observeAll(codexState: @autoclosure () -> CodexConnectionState
-                            = CodexProviderRuntime.connectionState()) -> [LLMProvider: Presence] {
+                            = CodexProviderRuntime.connectionState(),
+                           localStarter: @autoclosure () -> LocalBackendStarter = .live())
+        -> [LLMProvider: Presence] {
         let claude = observeClaude()
 
         let codexInstalled = FileManager.default.isExecutableFile(
@@ -297,7 +504,7 @@ enum LLMProviderDetection {
             ? availability(from: codexState())
             : .unavailable("the codex CLI is not installed")
 
-        let local = observeLocal()
+        let local = observeLocal(starter: localStarter())
         return [
             .claude: claude,
             .codex: Presence(installed: codexInstalled, state: codexAvailability),

@@ -115,6 +115,12 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // The Option+L retrieval leg only ever hands LM Studio a Local model id, even after the header's
     // global provider action pins .searchRetrieval to Claude or Codex. Scratch stores, built-in mutants.
     case searchRetrievalLocalOnlySelftest = "--search-retrieval-local-only-selftest"
+    // Ollama lane S3a (G3): Local routes resolve by (app, model), step once across local apps when the
+    // pinned app is down or nothing in it fits, and never into the cloud. Scratch stores, built-in mutants.
+    case localBackendRoutingSelftest = "--local-backend-routing-selftest"
+    // Ollama lane S3a (G6): the merged .local presence over scripted LM Studio and Ollama backends, the
+    // pinned-app start (recorded, never launched), and the Preferred-local-app truth table. Built-in mutants.
+    case localPresenceSelftest = "--local-presence-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

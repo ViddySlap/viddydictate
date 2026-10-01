@@ -184,12 +184,25 @@ enum SearchClient {
     /// (`resolveLocalRoute`), through the same capacity-aware policy a Local pin gets, so a small Mac still
     /// lands on an installed model that fits. `Settings.searchModel` stays the answer only when there is no
     /// Local route at all (off), as before. Gated by `--search-retrieval-local-only-selftest`.
+    ///
+    /// The id half of `retrievalModelRef(store:)`. Kept as the String seam because `ModelFitSelfTest` (protected
+    /// by chain `vdfit`) and both call sites below read an id; the app half is resolved but not yet used.
     static func retrievalModelID(store: ModelsPowerSettingsStore = Settings.modelsPower) -> String {
+        retrievalModelRef(store: store).modelID
+    }
+
+    /// The retrieval leg's Local model WITH the app that serves it: the route resolves by `(app, model)`
+    /// now, and the same id can name different models in LM Studio and Ollama. Settings.searchModel, the
+    /// off-route answer, is an LM Studio key, so it keeps LM Studio.
+    ///
+    /// TODO(S5): `lmChat` and the residency prep still take the bare id and always talk to LM Studio's
+    /// endpoint; they switch to this ref when the clients go through the backend seam.
+    static func retrievalModelRef(store: ModelsPowerSettingsStore = Settings.modelsPower) -> LocalModelRef {
         let fallback = LLMProviderBundle.local(Settings.searchModel)
         let resolution = store.resolveRoute(.searchRetrieval, fallback: fallback)
         let local = resolution.bundle?.provider == .local
             ? resolution : store.resolveLocalRoute(.searchRetrieval, fallback: fallback)
-        return local.bundle?.modelID ?? Settings.searchModel
+        return local.bundle?.localRef ?? LocalModelRef(backend: .lmStudio, modelID: Settings.searchModel)
     }
 
     /// Run the qwen tool-calling loop and return the union of retrieved results (or a failure). Mirrors

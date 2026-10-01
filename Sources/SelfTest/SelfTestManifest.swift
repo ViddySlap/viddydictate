@@ -413,6 +413,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .searchRetrievalLocalOnlySelftest: .init(tier: .deterministic) { _ in
         SearchRetrievalLocalOnlyFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure policy plus scratch ModelsPowerSettingsStores under a fresh temporary directory, with injected
+    // two-app catalogs and capacity facts. No LM Studio, no Ollama, no live preferences.
+    .localBackendRoutingSelftest: .init(tier: .deterministic) { _ in
+        LocalBackendRoutingFixtureSelfTest.run() ? 0 : 1
+    },
+    // Scripted: the real LMStudioBackend over injected dependencies and the real OllamaBackend over a
+    // scripted transport; the app launch is a recorder. No lms, no socket, no process, no preferences.
+    .localPresenceSelftest: .init(tier: .deterministic) { _ in
+        LocalPresenceFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

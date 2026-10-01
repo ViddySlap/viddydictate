@@ -1,19 +1,69 @@
 import Foundation
 
 /// A local-model substitution that keeps a route useful without hiding that the preferred model was not
-/// the one that ran. The identifiers come from route settings and LM Studio's installed catalog, never
+/// the one that ran. The identifiers come from route settings and the local apps' installed catalogs, never
 /// from dictated text or provider output.
+///
+/// `crossing` is set only when the substitute runs in the OTHER local app (spec D2). The message then says
+/// which app was skipped and why instead of offering an install, because the preferred model may well be
+/// installed; its app was down or it did not fit. Nil keeps every same-app substitution byte-identical.
 struct LLMRouteUpgradeOffer: Equatable {
     let preferredModelID: String
     let runningModelID: String
+    let crossing: LocalBackendCrossing?
+
+    init(preferredModelID: String, runningModelID: String, crossing: LocalBackendCrossing? = nil) {
+        self.preferredModelID = preferredModelID
+        self.runningModelID = runningModelID
+        self.crossing = crossing
+    }
 
     var message: String {
-        "Running on \(runningModelID). Install \(preferredModelID) for the preferred local model."
+        if let crossing {
+            let opening = crossing.cause.clause(pinned: crossing.from, sentenceStart: true)
+            return "\(opening), so this ran on \(runningModelID) in \(crossing.to.displayName)."
+        }
+        return "Running on \(runningModelID). Install \(preferredModelID) for the preferred local model."
     }
 
     var logToken: String {
-        "preferred=\(preferredModelID) running=\(runningModelID)"
+        let crossed = crossing.map { " crossed=\($0.from.rawValue)>\($0.to.rawValue)" } ?? ""
+        return "preferred=\(preferredModelID) running=\(runningModelID)\(crossed)"
     }
+}
+
+/// One step from the pinned local app to the other one (spec D2): taken only when the pinned app is not
+/// answering after its start attempt, or nothing installed in it fits. Never a step out of Local.
+struct LocalBackendCrossing: Equatable {
+    enum Cause: Equatable {
+        /// The pinned app contributed no model to the catalog: not running (after the start attempt), not
+        /// installed, or empty.
+        case pinnedAppNotRunning
+        /// The pinned app answered, but this model (the pin, or the model that just refused) did not fit.
+        case modelDidNotFit(modelID: String)
+        /// The pinned app answered, but none of its installed models fits.
+        case nothingFits
+
+        /// The half-sentence naming the pinned app. `sentenceStart` capitalizes the one clause that opens
+        /// with an ordinary word; an app name or a model id is left exactly as it is spelled.
+        func clause(pinned: LocalBackendID, sentenceStart: Bool = false) -> String {
+            switch self {
+            case .pinnedAppNotRunning: return "\(pinned.displayName) wasn't running"
+            case .modelDidNotFit(let modelID):
+                return "\(modelID) didn't fit in memory on \(pinned.displayName)"
+            case .nothingFits:
+                return "\(sentenceStart ? "Nothing" : "nothing") installed in \(pinned.displayName) fit in memory"
+            }
+        }
+    }
+
+    let from: LocalBackendID
+    let to: LocalBackendID
+    let cause: Cause
+
+    /// The degraded reason. It names both apps, in the house's lower-case diagnostic register:
+    /// "ran on LM Studio, Ollama wasn't running".
+    var reason: String { "ran on \(to.displayName), \(cause.clause(pinned: from))" }
 }
 
 /// What actually runs a route on this attempt, decided at execution time rather than stored.
@@ -70,13 +120,41 @@ enum LLMRouteResolution: Equatable {
 /// Local-model capacity facts needed to judge fit, injected so LLMAvailabilityRouting itself never
 /// spawns a process or reads the kernel. `fits` runs the identical arithmetic
 /// ModelManager.fits/estimatedIncomingBytes already implement rather than a second copy.
+///
+/// Sizes come in two shapes. `sizeBytes` is keyed by bare model id, as it always was, and means LM Studio's
+/// model. `sizeBytesByRef`, when present, is keyed by `(backend, id)` and is the ONLY answer for every ref:
+/// the same id on two apps is two files, so neither may borrow the other's size. Without it, an LM Studio
+/// ref reads `sizeBytes` and any other app's ref is unmeasured. Full per-backend capacity is the next slice.
 struct LLMLocalCapacityFacts {
     let sizeBytes: (String) -> Int64?
     let wiredBytes: UInt64
     let budgetBytes: UInt64
+    let sizeBytesByRef: ((LocalModelRef) -> Int64?)?
+
+    init(sizeBytes: @escaping (String) -> Int64?, wiredBytes: UInt64, budgetBytes: UInt64,
+         sizeBytesByRef: ((LocalModelRef) -> Int64?)? = nil) {
+        self.sizeBytes = sizeBytes
+        self.wiredBytes = wiredBytes
+        self.budgetBytes = budgetBytes
+        self.sizeBytesByRef = sizeBytesByRef
+    }
 
     func fits(_ modelID: String) -> Bool {
-        guard let size = sizeBytes(modelID), size > 0,
+        fits(size: sizeBytes(modelID))
+    }
+
+    /// The on-disk size of `ref`, never another app's model that happens to share its id.
+    func sizeBytes(of ref: LocalModelRef) -> Int64? {
+        if let sizeBytesByRef { return sizeBytesByRef(ref) }
+        return ref.backend == .lmStudio ? sizeBytes(ref.modelID) : nil
+    }
+
+    func fits(_ ref: LocalModelRef) -> Bool {
+        fits(size: sizeBytes(of: ref))
+    }
+
+    private func fits(size: Int64?) -> Bool {
+        guard let size, size > 0,
               let incoming = ModelManager.estimatedIncomingBytes(sizeBytes: size)
         else { return true } // unmeasured: do not block a model we cannot size
         return ModelManager.fits(wiredBytes: wiredBytes, incomingBytes: incoming, budgetBytes: budgetBytes)
@@ -110,8 +188,18 @@ struct LLMLocalCapacityFacts {
 /// A size refusal is answerable - it means try another installed model that fits - so it carries the
 /// failed model id and is kept distinct from an ordinary connectivity/load failure, which stays terminal.
 enum LLMLocalRouteFailure: Equatable {
-    /// The named model's estimated incoming allocation exceeded the live wire budget.
-    case overBudget(modelID: String)
+    /// The named model's estimated incoming allocation exceeded the live wire budget. `backend` names the app
+    /// it ran in when the caller knows it; nil (a caller that only has the bare id) excludes that id in EVERY
+    /// local app, which is the conservative reading and is exactly the old behaviour on one app.
+    case overBudget(modelID: String, backend: LocalBackendID? = nil)
+
+    /// Whether the step-down must skip `ref`.
+    func excludes(_ ref: LocalModelRef) -> Bool {
+        switch self {
+        case .overBudget(let modelID, let backend):
+            return ref.modelID == modelID && (backend == nil || backend == ref.backend)
+        }
+    }
 }
 
 /// Availability-resolved routing (Public V1 locked decision 4): the explicit user pin if it is set and
@@ -130,9 +218,10 @@ enum LLMAvailabilityRouting {
 
     /// Pure policy. `bundle` supplies a provider's configured bundle for the route (nil when the route has
     /// no bundle for it), `availability` supplies live provider state, and `localModels` is the measured
-    /// installed-model catalog when Local has been probed. `localCapacity` carries the machine's
-    /// wired/budget facts and per-model sizes so a Local substitution cannot hand LM Studio a model this
-    /// Mac cannot hold. The provider map and catalog are only read for a provider the ladder reaches.
+    /// installed-model catalog when Local has been probed: every running local app's models, each tagged
+    /// with its app. `localCapacity` carries the machine's wired/budget facts and per-model sizes so a Local
+    /// substitution cannot hand a local app a model this Mac cannot hold. The provider map and catalog are
+    /// only read for a provider the ladder reaches.
     static func resolve(pin: LLMProviderBundle,
                         bundle: (LLMProvider) -> LLMProviderBundle?,
                         availability: (LLMProvider) -> LLMProviderAvailabilityState,
@@ -146,32 +235,73 @@ enum LLMAvailabilityRouting {
         /// configured model only when this machine can actually hold it. When it cannot, the largest
         /// installed model that DOES fit runs instead; the substitution still carries the upgrade offer.
         /// `localCapacity` is injected (never read here) so this stays a pure policy function.
-        /// `excludingModelIDs` is the single-retry seam: a model that just refused for capacity is not
-        /// offered again, so the substitute is a genuinely different installed model. An empty exclusion
-        /// set keeps the ordinary first-attempt behavior byte-for-byte.
+        ///
+        /// A Local pin is `(app, model)`: the configured bundle's `resolvedLocalBackend` and its id, and
+        /// "installed" and "fits" match on BOTH, so the same id in two apps is never confused. The step-down
+        /// looks in the pinned app first. Only when that app contributed nothing (not running after its start
+        /// attempt) or nothing in it fits does it take the largest fitting model in the OTHER app (spec D2),
+        /// and that step names both apps through `crossing`. It is still one step, still inside Local.
+        ///
+        /// `exclusion` is the single-retry seam: a model that just refused for capacity is not offered
+        /// again, so the substitute is a genuinely different installed model. No exclusion keeps the
+        /// ordinary first-attempt behavior byte-for-byte.
         func localCandidate(
-            excludingModelIDs: Set<String> = []
-        ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?)? {
+            excluding exclusion: LLMLocalRouteFailure? = nil
+        ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?, crossing: LocalBackendCrossing?)? {
             guard let configured = bundle(.local) else { return nil }
             guard let localModels, !localModels.isEmpty else { return nil }
 
-            func fits(_ modelID: String) -> Bool { localCapacity?.fits(modelID) ?? true }
-
-            if !excludingModelIDs.contains(configured.modelID),
-               localModels.contains(where: { $0.modelID == configured.modelID }),
-               fits(configured.modelID) {
-                return (configured, nil)
+            let pinnedRef = configured.localRef
+            func excluded(_ ref: LocalModelRef) -> Bool { exclusion?.excludes(ref) ?? false }
+            func fits(_ ref: LocalModelRef) -> Bool { localCapacity?.fits(ref) ?? true }
+            func size(_ option: LMStudioModelOption) -> Int64 {
+                localCapacity?.sizeBytes(of: option.ref) ?? 0
             }
-            guard let replacement = localModels
-                .filter({ !excludingModelIDs.contains($0.modelID) && fits($0.modelID) })
-                .max(by: {
-                    (localCapacity?.sizeBytes($0.modelID) ?? 0) < (localCapacity?.sizeBytes($1.modelID) ?? 0)
-                })
-            else { return nil }
-            return (
-                .local(replacement.modelID),
-                LLMRouteUpgradeOffer(
-                    preferredModelID: configured.modelID, runningModelID: replacement.modelID))
+            /// The largest runnable model in one app, in that app's catalog order on a size tie, exactly as
+            /// the single-app policy always chose.
+            func largestFitting(in backend: LocalBackendID) -> LMStudioModelOption? {
+                localModels
+                    .filter { $0.backend == backend && !excluded($0.ref) && fits($0.ref) }
+                    .max(by: { size($0) < size($1) })
+            }
+
+            if !excluded(pinnedRef),
+               localModels.contains(where: { $0.ref == pinnedRef }),
+               fits(pinnedRef) {
+                return (configured, nil, nil)
+            }
+            if let replacement = largestFitting(in: pinnedRef.backend) {
+                return (
+                    .local(ref: replacement.ref),
+                    LLMRouteUpgradeOffer(
+                        preferredModelID: configured.modelID, runningModelID: replacement.modelID),
+                    nil)
+            }
+
+            // D2: the pinned app cannot run this route. Say why in terms of that app, then take the largest
+            // fitting model in the other one.
+            let pinnedAppAnswered = localModels.contains { $0.backend == pinnedRef.backend }
+            let cause: LocalBackendCrossing.Cause
+            if !pinnedAppAnswered {
+                cause = .pinnedAppNotRunning
+            } else if case .overBudget(let refusedID, _)? = exclusion {
+                cause = .modelDidNotFit(modelID: refusedID)
+            } else if localModels.contains(where: { $0.ref == pinnedRef }) {
+                cause = .modelDidNotFit(modelID: pinnedRef.modelID)
+            } else {
+                cause = .nothingFits
+            }
+            for other in LocalBackendID.allCases where other != pinnedRef.backend {
+                guard let replacement = largestFitting(in: other) else { continue }
+                let crossing = LocalBackendCrossing(from: pinnedRef.backend, to: other, cause: cause)
+                return (
+                    .local(ref: replacement.ref),
+                    LLMRouteUpgradeOffer(
+                        preferredModelID: configured.modelID, runningModelID: replacement.modelID,
+                        crossing: crossing),
+                    crossing)
+            }
+            return nil
         }
 
         // B16: Local is an explicit privacy boundary. When it is the user's pin, an unavailable or
@@ -179,13 +309,14 @@ enum LLMAvailabilityRouting {
         if pin.provider == .local {
             // A capacity refusal is not terminal. The model that just ran does not fit RIGHT NOW, so step
             // down ONCE to the largest OTHER installed model that fits, still inside Local (B16: this can
-            // never climb into cloud). Every other Local failure, and a retry that finds nothing, keeps
-            // the existing off behavior so the raw transcript still lands.
-            if pinState.canRun, case .overBudget(let failedModelID)? = localFailure,
+            // never climb into cloud; the other local app is still Local). Every other Local failure, and a
+            // retry that finds nothing, keeps the existing off behavior so the raw transcript still lands.
+            if pinState.canRun, let failure = localFailure,
                let refusal = failedProviders[.local],
-               let retry = localCandidate(excludingModelIDs: [failedModelID]) {
+               let retry = localCandidate(excluding: failure) {
                 return .degraded(
-                    retry.bundle, from: .local, reason: refusal, upgradeOffer: retry.offer)
+                    retry.bundle, from: .local, reason: retry.crossing?.reason ?? refusal,
+                    upgradeOffer: retry.offer)
             }
             guard failedProviders[.local] == nil, pinState.canRun else {
                 return .off(reason: "local pin is unavailable; automatic cloud fallback is disabled - "
@@ -200,7 +331,8 @@ enum LLMAvailabilityRouting {
             if let offer = candidate.offer {
                 return .degraded(
                     candidate.bundle, from: .local,
-                    reason: "preferred local model \(pin.modelID) is not installed",
+                    reason: candidate.crossing?.reason
+                        ?? "preferred local model \(pin.modelID) is not installed",
                     upgradeOffer: offer)
             }
             return .pinned(candidate.bundle)

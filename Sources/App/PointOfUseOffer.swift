@@ -198,16 +198,26 @@ enum PointOfUsePolicy {
             return bootstrap.isComponentUsable(component.id)
         }
         let local = presences[.local]
+        // These steps are LM Studio's: its app, and a model in IT. A merged `.local` presence also counts
+        // Ollama, so when it carries per-app readings, LM Studio's own reading answers: its install, and its
+        // catalog (nil while it is stopped, even when Ollama's answered). Models match on the app too, since
+        // the same id in Ollama is not the LM Studio model this row would install. A hand-built presence
+        // without the breakdown keeps the single-app reading.
+        let lmStudio = local.flatMap { $0.localReading(.lmStudio) }
+        let lmStudioInstalled = lmStudio.map(\.installed) ?? local?.installed
+        let lmStudioModels = lmStudio.map(\.models) ?? local?.availableLocalModels
         for step in component.lmStudioSteps {
             switch step {
             case .application:
-                guard let local else { return nil }
-                if !local.installed { return false }
+                guard let lmStudioInstalled else { return nil }
+                if !lmStudioInstalled { return false }
             case .model(let modelID):
-                guard let local else { return nil }
-                guard local.installed else { return false }
-                guard let models = local.availableLocalModels else { return nil }
-                if !models.contains(where: { $0.modelID == modelID }) { return false }
+                guard let lmStudioInstalled else { return nil }
+                guard lmStudioInstalled else { return false }
+                guard let models = lmStudioModels else { return nil }
+                if !models.contains(where: { $0.backend == .lmStudio && $0.modelID == modelID }) {
+                    return false
+                }
             }
         }
         return true

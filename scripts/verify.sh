@@ -561,6 +561,12 @@ tier_deterministic() {
         run_gate deterministic "search-retrieval local-only selftest (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --search-retrieval-local-only-selftest || true
+        run_gate deterministic "local routing by app and model, cross-app step-down (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-backend-routing-selftest || true
+        run_gate deterministic "merged local presence and pinned-app start (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-presence-selftest || true
         run_gate deterministic "app-update compare arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --app-update-selftest --only compare || true

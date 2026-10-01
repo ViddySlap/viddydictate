@@ -53,8 +53,14 @@ enum SettingsDefaultsSelfTest {
                         originalIdleSeconds == 600)
         reporter.record("local model memory budget slider defaults to position 54",
                         originalBudgetPosition == 54)
-        reporter.record("preferred local app defaults to LM Studio",
-                        originalPreferredBackend == .lmStudio)
+        // Automatic is "no explicit choice", not a stored LM Studio: with only Ollama installed, automatic
+        // must follow it, which a registered default would silently prevent.
+        Settings.preferredLocalBackend = nil
+        reporter.record("preferred local app defaults to automatic (no explicit choice stored)",
+                        Settings.preferredLocalBackend == nil)
+        reporter.record("automatic with nothing installed resolves to LM Studio",
+                        LocalBackendPreference.effective(explicit: Settings.preferredLocalBackend,
+                                                         installed: []) == .lmStudio)
 
         Settings.modelIdleUnloadSeconds = 420
         Settings.modelMemoryBudgetSliderPosition = 73.5
@@ -65,6 +71,9 @@ enum SettingsDefaultsSelfTest {
         Settings.preferredLocalBackend = .ollama
         reporter.record("preferred local app setting persists",
                         Settings.preferredLocalBackend == .ollama)
+        Settings.preferredLocalBackend = nil
+        reporter.record("choosing automatic again clears the explicit choice",
+                        Settings.preferredLocalBackend == nil)
 
         Settings.modelMemoryBudgetSliderPosition = -1
         reporter.record("local model memory budget slider clamps below zero",

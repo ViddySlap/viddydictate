@@ -344,9 +344,14 @@ final class ModelsPowerSettingsStore {
     /// when this machine cannot hold the configured model, routing already substitutes a smaller installed
     /// one, so a capacity refusal on the second pass is a refusal of the SUBSTITUTE. Passing nil keeps the
     /// original behavior (blame the pin) byte-for-byte for every caller that does not step down.
+    ///
+    /// `failedLocalRef` is the same fact with the app attached, and wins when both are given. A bare
+    /// `failedLocalModelID` cannot say which app refused, so it excludes that id in every local app; on a Mac
+    /// with one app that is exactly the old exclusion.
     func resolveRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
                       failedProviders: [LLMProvider: String] = [:],
-                      failedLocalModelID: String? = nil) -> LLMRouteResolution {
+                      failedLocalModelID: String? = nil,
+                      failedLocalRef: LocalModelRef? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
         let pin = selectedBundle(for: route, fallback: fallback)
         return LLMAvailabilityRouting.resolve(
@@ -359,7 +364,8 @@ final class ModelsPowerSettingsStore {
             localModels: localModels,
             localCapacity: localCapacity(localModels),
             localFailure: Self.localCapacityRefusal(
-                in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
+                in: failedProviders, failed: Self.failedLocalIdentity(
+                    ref: failedLocalRef, modelID: failedLocalModelID, pin: pin)),
             failedProviders: failedProviders)
     }
 
@@ -372,7 +378,8 @@ final class ModelsPowerSettingsStore {
     /// a cloud provider, so the result is a Local bundle or `.off`. Read-only, like `resolveRoute`.
     func resolveLocalRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
                            failedProviders: [LLMProvider: String] = [:],
-                           failedLocalModelID: String? = nil) -> LLMRouteResolution {
+                           failedLocalModelID: String? = nil,
+                           failedLocalRef: LocalModelRef? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
         let pin = rememberedBundle(for: .local, route: route)
             ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
@@ -384,8 +391,19 @@ final class ModelsPowerSettingsStore {
             localModels: localModels,
             localCapacity: localCapacity(localModels),
             localFailure: Self.localCapacityRefusal(
-                in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
+                in: failedProviders, failed: Self.failedLocalIdentity(
+                    ref: failedLocalRef, modelID: failedLocalModelID, pin: pin)),
             failedProviders: failedProviders)
+    }
+
+    /// Which model a capacity refusal blames: the ref when the caller has one, else the bare id in every app,
+    /// else the pin in its own app (the pin's app is known, so blaming it never reaches the other app).
+    private static func failedLocalIdentity(
+        ref: LocalModelRef?, modelID: String?, pin: LLMProviderBundle
+    ) -> (modelID: String, backend: LocalBackendID?) {
+        if let ref { return (ref.modelID, ref.backend) }
+        if let modelID { return (modelID, nil) }
+        return (pin.modelID, pin.resolvedLocalBackend)
     }
 
     /// Classify a per-run Local failure into the typed reason routing needs in order to step down to a
@@ -396,10 +414,10 @@ final class ModelsPowerSettingsStore {
     /// route runs a model the pin never names. The caller can only ever ask for one step-down, so no
     /// shrinking loop exists.
     private static func localCapacityRefusal(
-        in failedProviders: [LLMProvider: String], failedModelID: String
+        in failedProviders: [LLMProvider: String], failed: (modelID: String, backend: LocalBackendID?)
     ) -> LLMLocalRouteFailure? {
         guard failedProviders[.local] == CleanupClient.overBudgetMessage else { return nil }
-        return .overBudget(modelID: failedModelID)
+        return .overBudget(modelID: failed.modelID, backend: failed.backend)
     }
 
     /// Real local-model capacity facts for route resolution: sizes from the already-cached installed
@@ -407,13 +425,31 @@ final class ModelsPowerSettingsStore {
     /// no process spawn). Any of the three being unreadable, or no local catalog measured yet, means
     /// "do not filter" (nil) rather than a facts struct that would refuse everything with fabricated
     /// zeros.
+    ///
+    /// Sizes are keyed by `(app, id)`: with both apps running the same id can appear twice, which would trap
+    /// `Dictionary(uniqueKeysWithValues:)` if keyed by id, and must never lend one app's size to the other.
+    /// The id-keyed closure keeps its old meaning, LM Studio's model, for any caller that reads it directly.
     static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
         else { return nil }
-        let sizes = Dictionary(uniqueKeysWithValues: models.compactMap { m in m.sizeBytes.map { (m.modelID, $0) } })
-        return LLMLocalCapacityFacts(sizeBytes: { sizes[$0] }, wiredBytes: wired, budgetBytes: budget)
+        return capacityFacts(models: models, wiredBytes: wired, budgetBytes: budget)
+    }
+
+    /// The pure half of `liveLocalCapacity`, so a gate can check the size keying without the kernel.
+    /// First row wins for a duplicate ref, as `LMStudioModelCatalog.parseInstalled` already dedupes ids.
+    static func capacityFacts(models: [LMStudioModelOption], wiredBytes: UInt64,
+                              budgetBytes: UInt64) -> LLMLocalCapacityFacts {
+        var byRef: [LocalModelRef: Int64] = [:]
+        for model in models {
+            guard let size = model.sizeBytes, byRef[model.ref] == nil else { continue }
+            byRef[model.ref] = size
+        }
+        return LLMLocalCapacityFacts(
+            sizeBytes: { byRef[LocalModelRef(backend: .lmStudio, modelID: $0)] },
+            wiredBytes: wiredBytes, budgetBytes: budgetBytes,
+            sizeBytesByRef: { byRef[$0] })
     }
 
     // MARK: durable mutations

@@ -101,6 +101,30 @@ protocol LocalModelBackend {
     func ensureLoaded(_ ref: LocalModelRef, ttlSeconds: Int, contextTokens: Int?) -> Bool
     /// Unload `ref`. Harmless when it is not resident. A ref naming another backend is ignored.
     func unload(_ ref: LocalModelRef)
+
+    /// The models a Local TEXT route may run, tagged with this backend, or nil when the catalog could not be
+    /// read. Narrower than `installedModels()` where the app says so: LM Studio's text routes have only ever
+    /// offered `llm` rows (`LMStudioModelCatalog.parse`), and this keeps that exact list.
+    func routableModelOptions() -> [LMStudioModelOption]?
+
+    /// The app bundle observation may open in the background when this backend is installed but its server
+    /// does not answer, or nil when observation must never start it. A PATH, not a name: right after an
+    /// install LaunchServices has not registered the app yet and `open -a <name>` fails (Mac probe, B3).
+    /// Nil for LM Studio (its server is started lazily by `lms server start` inside the load, unchanged) and
+    /// for a CLI-only Ollama (a daemon the user manages, which ViddyDictate does not own).
+    var backgroundLaunchPath: String? { get }
+}
+
+/// The Preferred local app (spec D1/D3): an optional EXPLICIT choice, and what it means when there is none.
+enum LocalBackendPreference {
+    /// The explicit choice wins. With none ("automatic"), the one installed app is the preference, and with
+    /// both or neither installed it is LM Studio, the simple install D3 recommends. Pure, so the truth table
+    /// is gated without a Mac.
+    static func effective(explicit: LocalBackendID?, installed: Set<LocalBackendID>) -> LocalBackendID {
+        if let explicit { return explicit }
+        if installed.count == 1, let only = installed.first { return only }
+        return .lmStudio
+    }
 }
 
 extension LLMProviderBundle {
@@ -108,4 +132,15 @@ extension LLMProviderBundle {
     /// one of those meant LM Studio, so absent resolves to `.lmStudio` and an existing `models-power.json`
     /// keeps exactly the meaning it had. Only meaningful when `provider == .local`.
     var resolvedLocalBackend: LocalBackendID { localBackend ?? .lmStudio }
+
+    /// The identity of the model a Local bundle names. Only meaningful when `provider == .local`.
+    var localRef: LocalModelRef { LocalModelRef(backend: resolvedLocalBackend, modelID: modelID) }
+
+    /// A Local bundle that runs `ref`. LM Studio is written as nil, the spelling every 1.1.0 bundle already
+    /// uses for it, so a substitution on an LM-Studio-only Mac is byte-identical to `.local(id)`; any other
+    /// backend is written explicitly. Either way `resolvedLocalBackend` is the app it will run on.
+    static func local(ref: LocalModelRef) -> LLMProviderBundle {
+        LLMProviderBundle(provider: .local, modelID: ref.modelID,
+                          localBackend: ref.backend == .lmStudio ? nil : ref.backend)
+    }
 }

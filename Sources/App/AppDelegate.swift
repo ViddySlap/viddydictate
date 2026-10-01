@@ -898,13 +898,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Local availability must begin fail-closed and become runnable only after LM Studio and its
+    /// Local availability must begin fail-closed and become runnable only after a local app and its
     /// installed-model catalog have both answered. The probe is off the main thread because it shells out
-    /// to `lms`; the catalog remains runtime-only and is never written under LM Studio or into durable app
-    /// settings.
+    /// to `lms` and may open a pinned Ollama app and wait for it (bounded, see `LocalBackendStarter`); the
+    /// catalog remains runtime-only and is never written under either app or into durable app settings.
     private func hydrateLocalAvailability() {
         DispatchQueue.global(qos: .utility).async {
-            let measured = LLMProviderDetection.observeLocal()
+            let measured = LLMProviderDetection.observeLocal(starter: .live())
             DispatchQueue.main.async {
                 Settings.modelsPower.setLocalAvailabilityState(
                     measured.presence.state, models: measured.models)
