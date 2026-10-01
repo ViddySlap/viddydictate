@@ -383,6 +383,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .appUpdateSelftest: .init(tier: .deterministic) { arguments in
         AppUpdateSelfTest.run(arguments: arguments)
     },
+    // Pure: inline /api/tags, /api/show and /api/ps fixtures through a parser with no networking, no
+    // Process and no Settings reads. No Ollama needs to be installed or running.
+    .ollamaCatalogSelftest: .init(tier: .deterministic) { _ in
+        OllamaTagsFixtureSelfTest.run() ? 0 : 1
+    },
+    // Pure: dictionaries in, dictionaries out, then the in-process CleanupClient classifiers over a
+    // synthetic 200 response. No socket is opened and no model is loaded.
+    .ollamaTransportSelftest: .init(tier: .deterministic) { _ in
+        OllamaTranslatorFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

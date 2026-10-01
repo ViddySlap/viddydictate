@@ -387,6 +387,12 @@ tier_deterministic() {
         run_gate deterministic "LM Studio installed-model catalog fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --lmstudio-model-catalog-selftest || true
+        run_gate deterministic "Ollama catalog fixture selftest (tags/show/ps, negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --ollama-catalog-selftest || true
+        run_gate deterministic "Ollama chat translator fixture selftest (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --ollama-transport-selftest || true
         run_gate deterministic "typed provider/route/bundle migration selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --model-routing-selftest || true

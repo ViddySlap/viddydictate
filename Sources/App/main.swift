@@ -97,6 +97,12 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // DMGU1: app-update availability policy, with an injected transport and opener. Deterministic: five
     // arms (compare/failures/nag/link/control), each exercised by a scripts/verify.sh gate.
     case appUpdateSelftest = "--app-update-selftest"
+    // Ollama lane S2 (G1): the pure /api/tags, /api/show and /api/ps parser over offline fixtures, with
+    // built-in negative controls. Appended, so every earlier flag keeps its first-wins dispatch position.
+    case ollamaCatalogSelftest = "--ollama-catalog-selftest"
+    // Ollama lane S2 (G2): the pure OpenAI <-> native /api/chat translator, run through the existing
+    // CleanupClient classifiers, with built-in negative controls.
+    case ollamaTransportSelftest = "--ollama-transport-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
