@@ -97,6 +97,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // DMGU1: app-update availability policy, with an injected transport and opener. Deterministic: five
     // arms (compare/failures/nag/link/control), each exercised by a scripts/verify.sh gate.
     case appUpdateSelftest = "--app-update-selftest"
+    // The restrictive Codex config parsed as TOML, with a dotted feature name and the 1.1.0 bare-key
+    // writer as its negative control. Offline: a fixture inventory and a scratch directory only.
+    case codexConfigTOMLSelftest = "--codex-config-toml-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

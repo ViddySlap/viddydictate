@@ -400,6 +400,33 @@ enum CodexIsolationFoundation {
         inventory.values.filter { $0.stage.isForceable }.map(\ .name).sorted()
     }
 
+    /// One `[features]` force-off line per forceable feature.
+    ///
+    /// The key MUST go through `tomlKey`. A TOML bare key is exactly `[A-Za-z0-9_-]+`; anything else is
+    /// read as a dotted key path. codex-cli 0.154 began listing `guardianv2.thread_context` beside the
+    /// boolean `guardianv2`, and the bare line `guardianv2.thread_context = false` asks TOML to extend a
+    /// boolean with a sub-key, so Codex refused the whole generated config and every quarantine failed
+    /// from 2026-09-15. Quoted, the line is valid and the force-off actually applies to that feature.
+    /// `key` is a parameter only so the offline suite can run the old bare writer as a negative control.
+    static func restrictiveFeatureLines(
+        from inventory: [String: FeatureInventoryEntry],
+        key: (String) -> String = tomlKey
+    ) -> [String] {
+        restrictiveFeatureNames(from: inventory).map { "\(key($0)) = false" }
+    }
+
+    /// Bare when TOML allows a bare key, quoted otherwise. Bare names keep their historical bytes, so a
+    /// receipt minted for an inventory with no dotted feature keeps the same restrictive-config hash.
+    static func tomlKey(_ name: String) -> String {
+        let bare = !name.isEmpty && name.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, 0x5F, 0x2D: return true
+            default: return false
+            }
+        }
+        return bare ? name : tomlString(name)
+    }
+
     static var featureInventoryAuditBaseline: [String: FeatureInventoryEntry] {
         // Source-owned bytes are fixed and covered by the executable signature. A failure here is a
         // programmer error, not untrusted runtime input.
@@ -678,8 +705,7 @@ enum CodexIsolationFoundation {
             "",
             "[features]",
         ]
-        lines.append(contentsOf: restrictiveFeatureNames(
-            from: featureInventory).map { "\($0) = false" })
+        lines.append(contentsOf: restrictiveFeatureLines(from: featureInventory))
         lines += ["", "[mcp_servers]"]
         for skillPath in normalizedSkills {
             lines += [
