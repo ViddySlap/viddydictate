@@ -42,15 +42,19 @@ enum SettingsDefaultsSelfTest {
         print("--- local model defaults and persistence ---")
         let originalIdleSeconds = Settings.modelIdleUnloadSeconds
         let originalBudgetPosition = Settings.modelMemoryBudgetSliderPosition
+        let originalPreferredBackend = Settings.preferredLocalBackend
         defer {
             Settings.modelIdleUnloadSeconds = originalIdleSeconds
             Settings.modelMemoryBudgetSliderPosition = originalBudgetPosition
+            Settings.preferredLocalBackend = originalPreferredBackend
         }
 
         reporter.record("local model idle unload defaults to 600 seconds",
                         originalIdleSeconds == 600)
         reporter.record("local model memory budget slider defaults to position 54",
                         originalBudgetPosition == 54)
+        reporter.record("preferred local app defaults to LM Studio",
+                        originalPreferredBackend == .lmStudio)
 
         Settings.modelIdleUnloadSeconds = 420
         Settings.modelMemoryBudgetSliderPosition = 73.5
@@ -58,6 +62,9 @@ enum SettingsDefaultsSelfTest {
                         Settings.modelIdleUnloadSeconds == 420)
         reporter.record("local model memory budget slider position persists",
                         Settings.modelMemoryBudgetSliderPosition == 73.5)
+        Settings.preferredLocalBackend = .ollama
+        reporter.record("preferred local app setting persists",
+                        Settings.preferredLocalBackend == .ollama)
 
         Settings.modelMemoryBudgetSliderPosition = -1
         reporter.record("local model memory budget slider clamps below zero",

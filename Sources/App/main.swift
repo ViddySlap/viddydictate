@@ -103,6 +103,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S2 (G2): the pure OpenAI <-> native /api/chat translator, run through the existing
     // CleanupClient classifiers, with built-in negative controls.
     case ollamaTransportSelftest = "--ollama-transport-selftest"
+    // Ollama lane S1: the local-backend identity types, the bundle's tolerant localBackend field (a 1.1.0
+    // models-power.json round-trips byte-identical) and the LM Studio adapter, with built-in negative controls.
+    case localBackendCodecSelftest = "--local-backend-codec-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

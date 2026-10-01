@@ -29,6 +29,9 @@ enum Settings {
         // one idle TTL at load time. The budget position is the Setup slider's visible 0…100 value.
         static let modelIdleUnloadSeconds = "modelIdleUnloadSeconds"
         static let modelMemoryBudgetSliderPosition = "modelMemoryBudgetSliderPosition"
+        // Which local app (LM Studio / Ollama) seeds new Local routes and breaks same-family ties. A
+        // LocalBackendID rawValue. Stored only in this slice; nothing reads it for routing yet.
+        static let preferredLocalBackend = "preferredLocalBackend"
         // Cleanup mode (post-processing layer). Model-pluggable: the model id, endpoint, prompt,
         // and safety timeout are all config so the pending Gemma 3 4B IT QAT head-to-head swaps in
         // without a code change.
@@ -139,6 +142,7 @@ enum Settings {
         static let reduceRepeats = true
         static let modelIdleUnloadSeconds = 600
         static let modelMemoryBudgetSliderPosition = 54.0
+        static let preferredLocalBackend = LocalBackendID.lmStudio   // today's only backend
         // Cleanup model: qwen3-coder-30b-a3b is the on-disk pick that clears the golden green
         // bar (the locked first-pass llama-3.2-3b hallucinates on the hardest meta-dictation,
         // golden sample 3). Model-pluggable: change this one value to swap back to the 3B or to
@@ -208,6 +212,7 @@ enum Settings {
             K.reduceRepeats: Defaults.reduceRepeats,
             K.modelIdleUnloadSeconds: Defaults.modelIdleUnloadSeconds,
             K.modelMemoryBudgetSliderPosition: Defaults.modelMemoryBudgetSliderPosition,
+            K.preferredLocalBackend: Defaults.preferredLocalBackend.rawValue,
             K.cleanupModel: Defaults.cleanupModel,
             K.cleanupEndpoint: Defaults.cleanupEndpoint,
             K.cleanupSystemPrompt: firmCleanupPrompt,
@@ -684,6 +689,17 @@ enum Settings {
                   forKey: K.modelMemoryBudgetSliderPosition)
             notify()
         }
+    }
+
+    /// The Preferred local app (spec D1): which backend's tested default seeds new Local routes, which app
+    /// the install offer proposes on a Mac with neither, and the tie-break when a family is on both. An
+    /// unknown stored value (a newer build's backend) falls back to the default rather than failing.
+    static var preferredLocalBackend: LocalBackendID {
+        get {
+            let raw = d.string(forKey: K.preferredLocalBackend) ?? Defaults.preferredLocalBackend.rawValue
+            return LocalBackendID(rawValue: raw) ?? Defaults.preferredLocalBackend
+        }
+        set { d.set(newValue.rawValue, forKey: K.preferredLocalBackend); notify() }
     }
 
     static func resetToDefaults() {

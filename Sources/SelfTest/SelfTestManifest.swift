@@ -393,6 +393,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .ollamaTransportSelftest: .init(tier: .deterministic) { _ in
         OllamaTranslatorFixtureSelfTest.run() ? 0 : 1
     },
+    // Scratch-only: the real ModelsPowerSettingsStore writes under a fresh temporary directory, and the LM
+    // Studio adapter runs over an injected catalog. No lms process, no model, no live preferences.
+    .localBackendCodecSelftest: .init(tier: .deterministic) { _ in
+        LocalBackendCodecFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

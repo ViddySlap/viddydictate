@@ -396,6 +396,9 @@ tier_deterministic() {
         run_gate deterministic "typed provider/route/bundle migration selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --model-routing-selftest || true
+        run_gate deterministic "local-backend identity + bundle codec fixture selftest (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-backend-codec-selftest || true
         run_gate deterministic "availability-resolved routing selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --availability-routing-selftest || true

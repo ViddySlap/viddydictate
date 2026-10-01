@@ -125,12 +125,15 @@ struct LLMAutoUpdateProvenance: Equatable, Codable {
 /// so adding them cannot change the shipped Local/Claude prompt bytes.
 /// L6 extends that same schema with optional ratification and auto-update provenance. Old stored bundles
 /// decode with both fields nil, preserving their exact bundle and making no retroactive ratification claim.
+/// The Ollama lane adds an optional `localBackend` the same way, without a version bump: absent decodes to
+/// nil (which resolves to LM Studio, see `resolvedLocalBackend`), nil encodes with NO key so a 1.1.0 file
+/// round-trips byte-identical, and an unknown raw value decodes to nil rather than failing the bundle.
 ///
 /// The decoder accepts both pre-A1 persisted shapes:
 /// - custom/P/M model choice: `{kind:"local|cloud", id:"..."}`
 /// - legacy Low Power Claude arm: `{model:"...", effort:"..."}`
 /// New writes are canonical `{version, provider, modelID, effort?, basePromptVersion?,
-/// basePromptHash?, envelopeVersion?, ratified?, autoUpdated?}` bundles.
+/// basePromptHash?, envelopeVersion?, ratified?, autoUpdated?, localBackend?}` bundles.
 struct LLMProviderBundle: Equatable, Codable {
     static let currentVersion = 2
 
@@ -143,11 +146,14 @@ struct LLMProviderBundle: Equatable, Codable {
     var envelopeVersion: String?
     var ratified: LLMRatificationProvenance?
     var autoUpdated: LLMAutoUpdateProvenance?
+    /// Which local app runs a Local bundle; nil for every bundle written before backends existed. Read it
+    /// through `resolvedLocalBackend`, never directly, so nil keeps meaning LM Studio.
+    var localBackend: LocalBackendID?
 
     init(version: Int = currentVersion, provider: LLMProvider, modelID: String, effort: String? = nil,
          basePromptVersion: String? = nil, basePromptHash: String? = nil,
          envelopeVersion: String? = nil, ratified: LLMRatificationProvenance? = nil,
-         autoUpdated: LLMAutoUpdateProvenance? = nil) {
+         autoUpdated: LLMAutoUpdateProvenance? = nil, localBackend: LocalBackendID? = nil) {
         self.version = version
         self.provider = provider
         self.modelID = modelID
@@ -157,6 +163,7 @@ struct LLMProviderBundle: Equatable, Codable {
         self.envelopeVersion = envelopeVersion
         self.ratified = ratified
         self.autoUpdated = autoUpdated
+        self.localBackend = localBackend
     }
 
     static func local(_ id: String) -> LLMProviderBundle {
@@ -179,6 +186,7 @@ struct LLMProviderBundle: Equatable, Codable {
         case version, provider, modelID, effort
         case basePromptVersion, basePromptHash, envelopeVersion
         case ratified, autoUpdated
+        case localBackend
         case kind, id       // pre-A1 ModeModel
         case model          // pre-A1 LowPowerPolicy.CloudArm
     }
@@ -192,6 +200,11 @@ struct LLMProviderBundle: Equatable, Codable {
         envelopeVersion = try c.decodeIfPresent(String.self, forKey: .envelopeVersion)
         ratified = try c.decodeIfPresent(LLMRatificationProvenance.self, forKey: .ratified)
         autoUpdated = try c.decodeIfPresent(LLMAutoUpdateProvenance.self, forKey: .autoUpdated)
+        // Tolerant like `LLMProvider.decodeStored`: a backend this build does not know (a newer build's, or
+        // a hand edit) and a value of the wrong JSON type both read as nil, so a future backend can never
+        // make the whole models-power.json undecodable.
+        localBackend = (try? c.decodeIfPresent(String.self, forKey: .localBackend))
+            .flatMap(LocalBackendID.init(rawValue:))
 
         if let rawProvider = try c.decodeIfPresent(String.self, forKey: .provider),
            let decodedProvider = LLMProvider.decodeStored(rawProvider) {
@@ -229,6 +242,9 @@ struct LLMProviderBundle: Equatable, Codable {
         try c.encodeIfPresent(envelopeVersion, forKey: .envelopeVersion)
         try c.encodeIfPresent(ratified, forKey: .ratified)
         try c.encodeIfPresent(autoUpdated, forKey: .autoUpdated)
+        // IfPresent, never `encode`: a nil must leave no key at all (not `null`), or every existing file
+        // would change bytes on its next write.
+        try c.encodeIfPresent(localBackend?.rawValue, forKey: .localBackend)
     }
 }
 
