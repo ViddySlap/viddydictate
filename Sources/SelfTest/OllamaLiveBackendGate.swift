@@ -69,6 +69,13 @@ enum OllamaLiveBackendGate {
             print("\(tag) PASS: catalog checks only")
             return true
         }
+        let budgetCheck = fitsBudget(target)
+        guard budgetCheck.fits else {
+            print("\(tag) [skip] SKIPPED load/unload: \(target.ref.modelID) does not fit this Mac's model budget "
+                  + "(\(budgetCheck.detail)); this gate never loads what ViddyDictate would refuse")
+            print("\(tag) PASS: catalog checks only")
+            return true
+        }
         let wasResident = residentBefore.contains(OllamaBackend.canonicalModelName(target.ref.modelID))
         let foreign = before.filter {
             OllamaBackend.canonicalModelName($0.ref.modelID) != OllamaBackend.canonicalModelName(target.ref.modelID)
@@ -160,13 +167,27 @@ enum OllamaLiveBackendGate {
         return passed
     }
 
-    /// The smallest usable model that is not vision-capable (the cheapest completion model to load), else
-    /// the smallest of all. An unknown size sorts last, so a model that reported one is preferred.
+    /// The smallest usable model, vision-capable or not: the gate exercises load, expiry and unload, which a
+    /// vision model does just as well, and a live check must cost the Mac as little memory as it can. (Preferring
+    /// a non-vision model once picked an 18.6 GB coder over a 1.9 GB vision model and wired 19 GB for nothing.)
+    /// An unknown size sorts last, so a model that reported one is preferred.
     private static func pickTarget(_ models: [LocalInstalledModel]) -> LocalInstalledModel? {
-        func smallest(_ list: [LocalInstalledModel]) -> LocalInstalledModel? {
-            list.min { ($0.sizeBytes ?? Int64.max) < ($1.sizeBytes ?? Int64.max) }
+        models.min { ($0.sizeBytes ?? Int64.max) < ($1.sizeBytes ?? Int64.max) }
+    }
+
+    /// ADR 0018 applies to this gate too: it never loads a model the app itself would refuse. Live wired memory
+    /// plus the incoming size x the policy's footprint factor must fit the user's own budget; unreadable facts
+    /// mean no load, the same fail-closed rule as the app.
+    private static func fitsBudget(_ model: LocalInstalledModel) -> (fits: Bool, detail: String) {
+        guard let size = model.sizeBytes, size > 0,
+              let wired = SystemMemory.wiredBytes,
+              let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition) else {
+            return (false, "memory facts unreadable")
         }
-        return smallest(models.filter { !$0.isVision }) ?? smallest(models)
+        let incoming = UInt64(Double(size) * ModelManager.incomingFootprintFactor)
+        let detail = "wired \(SystemMemory.formatGB(wired)) + incoming \(SystemMemory.formatGB(incoming)) "
+            + "against a budget of \(SystemMemory.formatGB(budget))"
+        return (wired + incoming <= budget, detail)
     }
 
     private static func same(_ lhs: String, _ rhs: String) -> Bool {
