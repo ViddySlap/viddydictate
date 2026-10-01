@@ -349,6 +349,9 @@ tier_deterministic() {
     run_gate deterministic "Whisper tail audio-clock structural selftest" \
         python3 "$ROOT/scripts/test-whisper-tail-clock.py" || true
 
+    run_gate deterministic "Whisper daemon offline-first warm and phase health (socket-guarded, mutants)" \
+        python3 "$ROOT/scripts/test-whisperd-offline-warm.py" || true
+
     if [[ ! -d node_modules ]]; then
         record_failure deterministic \
             "node_modules is absent; refusing build-web.sh because its fallback npm install may use the network"

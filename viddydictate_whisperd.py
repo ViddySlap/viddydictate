@@ -19,7 +19,11 @@ loops before returning. ViddyDictate can override these settings per request; ca
 the headers receive the daemon defaults.
 
 Endpoints (all 127.0.0.1 only):
-  GET  /health      -> {"ready": bool, "model": str, "idle_s": float}
+  GET  /health      -> {"ready": bool, "model": str, "idle_s": float, "error": str|null,
+                        "phase": str, "phase_s": float, "phase_detail": str|null}
+                       `phase` is one of starting|resolving|downloading|loading|ready|error and
+                       `phase_s` the seconds spent in it, so a caller can say what a slow warm is
+                       doing. The first four keys are unchanged; older callers ignore the rest.
   POST /transcribe  -> body = raw audio bytes (webm/mp4/ogg/wav); X-Audio-Format header gives the
                        container; X-Condition-Previous-Text (0/1) and X-Clean (0/1) override the
                        anti-hallucination defaults for this request; X-Initial-Prompt-B64 (base64
@@ -39,6 +43,13 @@ Config (env):
   VIDDYDICTATE_WHISPER_LOGPROB_THOLD    logprob_threshold (default -1.0)
   VIDDYDICTATE_WHISPER_COMPRESSION_THOLD compression_ratio_threshold (default 2.4)
   VIDDYDICTATE_WHISPER_MAX_REPEATS      collapse a word/short-phrase run repeated >= this many times (default 3)
+
+OFFLINE-FIRST WARM: the model is loaded from its local Hugging Face snapshot directory whenever one is
+complete on disk, with HF_HUB_OFFLINE=1 set before huggingface_hub is imported, so a cold start never
+waits on huggingface.co. Handing mlx_whisper a repo id instead makes it call snapshot_download, which
+asks the Hub for repo info with no timeout before it looks at the cache; right after a Mac wakes, that
+one request stalled a warm for five minutes. Only a model that is not on disk at all goes to the
+network, and then behind a bounded reachability probe (see _download_snapshot).
 
 The turbo model handles both partials and the final pass. A separate final-pass model remains an
 optional future extension.
@@ -94,25 +105,228 @@ _ready = threading.Event()          # set once the model is warm
 _load_error = [None]                # holds the load exception if warmup failed
 _tx_lock = threading.Lock()         # serialize transcribes (one resident MLX model)
 _last_activity = [time.monotonic()] # transcribe activity only — health polls don't count
+# What mlx_whisper is handed as path_or_hf_repo. The warm replaces the repo id with the local snapshot
+# directory it loaded from, and every transcribe passes the SAME string: mlx_whisper's ModelHolder
+# caches by that string, so a different one would load the 1.5 GB model a second time.
+_model_source = [MODEL]
+
+# Warm-up phase, reported by /health so the app can say what a slow start is doing instead of
+# silently retrying. Exactly one of these names at a time; `phase_detail` qualifies it (today only
+# "waiting for the network" while a first-install download cannot reach the Hub).
+PHASES = ("starting", "resolving", "downloading", "loading", "ready", "error")
+_phase_lock = threading.Lock()
+_phase = {"name": "starting", "since": time.monotonic(), "detail": None}
+
+# First-install download bounds (only reached when the model is not on disk). huggingface_hub reads
+# HF_HUB_ETAG_TIMEOUT (per-file metadata request) and HF_HUB_DOWNLOAD_TIMEOUT (stalled file transfer)
+# when it is imported; a user's own values win. Its repo_info call honours neither and has no timeout
+# at all, which is why _download_snapshot probes reachability itself with an explicit timeout first.
+HF_ETAG_TIMEOUT_S = "15"
+HF_DOWNLOAD_TIMEOUT_S = "60"
+NETWORK_PROBE_TIMEOUT_S = 10.0
+NETWORK_RETRY_S = (2.0, 5.0, 10.0, 20.0, 30.0)
+_sleep = time.sleep                 # injectable so the gate never really waits
+
+# mlx_whisper.load_models.load_model (mlx-whisper 0.4.3) reads config.json and then
+# weights.safetensors, falling back to weights.npz. A snapshot without both is not loadable.
+SNAPSHOT_CONFIG = "config.json"
+SNAPSHOT_WEIGHTS = ("weights.safetensors", "weights.npz")
 
 
 def _log(msg: str) -> None:
     print(f"[viddydictate-whisperd] {msg}", flush=True)
 
 
-def _warmup() -> None:
-    """Load the model once so the first real transcribe is fast. Uses the exact code path
-    (mlx_whisper.transcribe with the default float16 dtype) so the ModelHolder cache is primed."""
-    try:
-        import numpy as np
-        import mlx_whisper
+def _set_phase(name: str, detail: Optional[str] = None) -> None:
+    """Move to `name`, logging how long the previous phase lasted. A detail-only change (same phase)
+    is logged too, without resetting the phase clock."""
+    if name not in PHASES:
+        raise ValueError(f"unknown phase {name!r}")
+    now = time.monotonic()
+    with _phase_lock:
+        prev, since, prev_detail = _phase["name"], _phase["since"], _phase["detail"]
+        if prev == name:
+            _phase["detail"] = detail
+        else:
+            _phase.update(name=name, since=now, detail=detail)
+    if prev != name:
+        _log(f"warm: phase {prev} -> {name} after {now - since:.2f}s in {prev}"
+             + (f" ({detail})" if detail else ""))
+    elif detail != prev_detail:
+        _log(f"warm: {name}: {detail or 'resumed'}")
+
+
+def _phase_snapshot() -> tuple[str, float, Optional[str]]:
+    with _phase_lock:
+        return _phase["name"], time.monotonic() - _phase["since"], _phase["detail"]
+
+
+def _health_payload() -> dict:
+    """The /health body. The first four keys are the contract every existing caller reads and stay
+    exactly as they were; the phase keys are additive."""
+    idle = time.monotonic() - _last_activity[0]
+    name, elapsed, detail = _phase_snapshot()
+    return {
+        "ready": _ready.is_set() and _load_error[0] is None,
+        "model": MODEL,
+        "idle_s": round(idle, 1),
+        "error": _load_error[0],
+        "phase": name,
+        "phase_s": round(elapsed, 1),
+        "phase_detail": detail,
+    }
+
+
+def _hf_hub_cache_dir(environ=None) -> str:
+    """The Hugging Face hub cache directory, by huggingface_hub's own precedence (checked against
+    huggingface_hub 1.25.1 constants.py): HF_HUB_CACHE, then the legacy HUGGINGFACE_HUB_CACHE, then
+    $HF_HOME/hub, where HF_HOME defaults to $XDG_CACHE_HOME/huggingface, then ~/.cache/huggingface.
+    Pure: reads only the mapping it is given (os.environ by default) and imports nothing."""
+    env = os.environ if environ is None else environ
+    default_home = os.path.join(os.path.expanduser("~"), ".cache")
+    hf_home = os.path.expandvars(os.path.expanduser(
+        env.get("HF_HOME", os.path.join(env.get("XDG_CACHE_HOME", default_home), "huggingface"))))
+    legacy = env.get("HUGGINGFACE_HUB_CACHE", os.path.join(hf_home, "hub"))
+    return os.path.expandvars(os.path.expanduser(env.get("HF_HUB_CACHE", legacy)))
+
+
+def _app_model_cache_dirs() -> list:
+    """The app's own first-run installer downloads the model with cache_dir=<Application
+    Support>/ViddyDictate/model-cache, which is also the directory this script is installed into. A
+    DMG install therefore has its model there and not in the default hub cache."""
+    here = globals().get("__file__")
+    if not isinstance(here, str) or not os.path.isabs(here):
+        return []                   # loaded from a string (a test harness): no install directory
+    root = os.path.join(os.path.dirname(here), "model-cache")
+    return [root, os.path.join(root, "hub")]
+
+
+def _snapshot_is_complete(snapshot: str) -> bool:
+    """config.json plus one weights file, each a real non-empty file. Following symlinks matters: hub
+    snapshots are symlinks into blobs/, and a dangling one is a download that never finished."""
+    def ok(name: str) -> bool:
+        p = os.path.join(snapshot, name)
+        try:
+            return os.path.isfile(p) and os.path.getsize(p) > 0
+        except OSError:
+            return False
+    return ok(SNAPSHOT_CONFIG) and any(ok(w) for w in SNAPSHOT_WEIGHTS)
+
+
+def _resolve_local_snapshot(repo_id: str, cache_dirs=None, revision: str = "main") -> Optional[str]:
+    """The local snapshot directory for `repo_id`, or None when it is missing or incomplete.
+
+    Follows the hub cache layout: <cache>/models--<org>--<name>/refs/<revision> holds a commit hash,
+    and <cache>/models--<org>--<name>/snapshots/<hash>/ holds the files. PURE: no mlx, no
+    huggingface_hub, no network; only os.path reads, so it is safe to call before deciding whether
+    the network may be touched at all."""
+    if not repo_id or repo_id.startswith(("/", ".", "~")) or ".." in repo_id.split("/"):
+        return None
+    folder = "--".join(["models", *repo_id.split("/")])
+    for cache in (cache_dirs if cache_dirs is not None else [_hf_hub_cache_dir(), *_app_model_cache_dirs()]):
+        repo_dir = os.path.join(cache, folder)
+        try:
+            with open(os.path.join(repo_dir, "refs", revision), "r", encoding="utf-8") as f:
+                commit = f.read().strip()
+        except OSError:
+            continue
+        if not commit or "/" in commit or commit in (".", ".."):
+            continue
+        snapshot = os.path.join(repo_dir, "snapshots", commit)
+        if _snapshot_is_complete(snapshot):
+            return snapshot
+    return None
+
+
+def _describe_source(source: str) -> str:
+    """A log-safe description of where the model loads from. Never a user path."""
+    if source == MODEL and not os.path.isdir(source):
+        return f"hub repo {MODEL}"
+    if os.path.isdir(source) and os.path.basename(os.path.dirname(source)) == "snapshots":
+        where = "the app's model cache" if f"{os.sep}model-cache{os.sep}" in source else "the Hugging Face cache"
+        return f"local snapshot {os.path.basename(source)[:12]} of {MODEL} in {where}"
+    return "a local model directory (VIDDYDICTATE_WHISPER_MODEL)"
+
+
+def _download_snapshot(repo_id: str) -> str:
+    """First install only: fetch the snapshot, and return its local directory.
+
+    huggingface_hub's snapshot_download asks the Hub for repo info with NO timeout before anything
+    else, so a half-up network can hang it indefinitely. Probe reachability first with an explicit
+    timeout and keep retrying (reported as "waiting for the network") until the Hub answers; only
+    then download. The per-file metadata and transfer timeouts are bounded through the env vars
+    huggingface_hub reads at import time, set before it is imported."""
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", HF_ETAG_TIMEOUT_S)
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", HF_DOWNLOAD_TIMEOUT_S)
+    from huggingface_hub import HfApi, snapshot_download
+    attempt = 0
+    while True:
         t0 = time.monotonic()
-        # ~0.5 s of silence — loads + caches the model without needing ffmpeg or a file.
-        mlx_whisper.transcribe(np.zeros(8000, dtype=np.float32), path_or_hf_repo=MODEL)
+        try:
+            HfApi().repo_info(repo_id=repo_id, timeout=NETWORK_PROBE_TIMEOUT_S)
+            break
+        except Exception as e:  # noqa: BLE001 — any failure to reach the Hub is a reason to wait
+            wait = NETWORK_RETRY_S[min(attempt, len(NETWORK_RETRY_S) - 1)]
+            attempt += 1
+            _set_phase("downloading", "waiting for the network")
+            _log(f"warm: the Hugging Face Hub did not answer in {time.monotonic() - t0:.1f}s "
+                 f"({type(e).__name__}); retrying in {wait:.0f}s")
+            _sleep(wait)
+    _set_phase("downloading", None)
+    _log(f"warm: downloading {repo_id} (first use; about 1.5 GB for the default model)")
+    t0 = time.monotonic()
+    path = snapshot_download(repo_id=repo_id)
+    _log(f"warm: download finished in {time.monotonic() - t0:.1f}s")
+    return str(path)
+
+
+def _prepare_model_source() -> str:
+    """Resolve what to load, touching the network only when the model is not on disk."""
+    _set_phase("resolving")
+    t0 = time.monotonic()
+    if os.path.isdir(MODEL):        # VIDDYDICTATE_WHISPER_MODEL may name a local directory already
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        return MODEL
+    local = _resolve_local_snapshot(MODEL)
+    if local is not None:
+        # Belt and braces: even a stray repo-id call inside mlx_whisper now stays off the network.
+        # huggingface_hub reads this when it is IMPORTED, which happens after this point.
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        _log(f"warm: resolved local snapshot in {time.monotonic() - t0:.2f}s")
+        return local
+    _log(f"warm: no complete local snapshot of {MODEL} ({time.monotonic() - t0:.2f}s)")
+    if os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return MODEL                # the user forbade the network; let the loader report the miss
+    _set_phase("downloading")
+    downloaded = _download_snapshot(MODEL)
+    # Load from the directory on disk either way, so the loader never calls snapshot_download again.
+    return _resolve_local_snapshot(MODEL) or downloaded
+
+
+def _prime_model(source: str) -> None:
+    """Load + cache the model through the exact code path a transcribe takes (mlx_whisper.transcribe
+    with the default float16 dtype), so mlx_whisper's ModelHolder is primed for `source`."""
+    import numpy as np
+    import mlx_whisper
+    # ~0.5 s of silence — loads + caches the model without needing ffmpeg or a file.
+    mlx_whisper.transcribe(np.zeros(8000, dtype=np.float32), path_or_hf_repo=source)
+
+
+def _warmup() -> None:
+    """Load the model once so the first real transcribe is fast, offline-first."""
+    try:
+        t0 = time.monotonic()
+        source = _prepare_model_source()
+        _set_phase("loading")
+        _log(f"warm: loading from {_describe_source(source)}")
+        _prime_model(source)
+        _model_source[0] = source
         _log(f"model warm ({MODEL}) in {time.monotonic() - t0:.1f}s")
+        _set_phase("ready")
         _ready.set()
     except Exception as e:  # noqa: BLE001 — surface any load failure to /health callers
         _load_error[0] = str(e)
+        _set_phase("error")
         _log(f"WARMUP FAILED: {e}")
         _ready.set()  # unblock waiters; /transcribe will report the error
 
@@ -295,7 +509,7 @@ def _transcribe(audio_path: str, cond_prev=None, clean=None,
     import mlx_whisper
     audio_duration = _wav_duration_seconds(audio_path)
     kwargs = {
-        "path_or_hf_repo": MODEL,
+        "path_or_hf_repo": _model_source[0],   # the string the warm primed; see _model_source
         "condition_on_previous_text": COND_PREV if cond_prev is None else cond_prev,
         "no_speech_threshold": NOSPEECH_THOLD,
         "logprob_threshold": LOGPROB_THOLD,
@@ -343,13 +557,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.startswith("/health"):
-            idle = time.monotonic() - _last_activity[0]
-            self._send(200, {
-                "ready": _ready.is_set() and _load_error[0] is None,
-                "model": MODEL,
-                "idle_s": round(idle, 1),
-                "error": _load_error[0],
-            })
+            self._send(200, _health_payload())
         else:
             self._send(404, {"error": "not found"})
 
