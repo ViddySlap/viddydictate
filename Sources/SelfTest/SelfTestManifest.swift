@@ -398,6 +398,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localBackendCodecSelftest: .init(tier: .deterministic) { _ in
         LocalBackendCodecFixtureSelfTest.run() ? 0 : 1
     },
+    // Scripted: every request goes to an in-memory Ollama through the injected transport, and the install
+    // probe is scripted too. No socket, no Ollama, no filesystem, no preferences.
+    .ollamaBackendSelftest: .init(tier: .deterministic) { _ in
+        OllamaBackendScriptedSelfTest.run() ? 0 : 1
+    },
+    // Loads and unloads a real model in the real Ollama (only one that was not resident, never a foreign
+    // one), so it belongs in services. Abstains when Ollama is absent, stopped, or has no usable model.
+    .ollamaLive: .init(tier: .services) { _ in
+        OllamaLiveBackendGate.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

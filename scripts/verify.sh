@@ -393,6 +393,9 @@ tier_deterministic() {
         run_gate deterministic "Ollama chat translator fixture selftest (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --ollama-transport-selftest || true
+        run_gate deterministic "Ollama backend scripted-transport selftest (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --ollama-backend-selftest || true
         run_gate deterministic "typed provider/route/bundle migration selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --model-routing-selftest || true
@@ -693,6 +696,12 @@ tier_services() {
                 "${service_env[@]}" "$service_app" --per-take-arm-service || true
             run_service_gate "LM Studio available-model discovery" normal \
                 "${service_env[@]}" "$service_app" --lmstudio-model-catalog-live || true
+            # Loads the smallest usable model that was NOT already resident (keep_alive 20 s, num_ctx 4096),
+            # checks /api/ps, unloads it, and requires every foreign resident model to survive. Abstains
+            # when Ollama is absent, stopped, or has no usable model. The scratch HOME hides only
+            # ~/Applications/Ollama.app; /Applications and the Homebrew CLI are still detected.
+            run_service_gate "Ollama live backend (catalog, keep_alive load, unload, foreign models kept)" normal \
+                "${service_env[@]}" "$service_app" --ollama-live || true
             # Read-only: it never passes --unload-all, so it cannot change what the machine is holding.
             run_service_gate "Setup tab resident-models readout (real lms ps)" normal \
                 "${service_env[@]}" "$service_app" --local-models-readout-live || true

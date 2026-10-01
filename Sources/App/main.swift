@@ -106,6 +106,12 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S1: the local-backend identity types, the bundle's tolerant localBackend field (a 1.1.0
     // models-power.json round-trips byte-identical) and the LM Studio adapter, with built-in negative controls.
     case localBackendCodecSelftest = "--local-backend-codec-selftest"
+    // Ollama lane S2b: the native-HTTP OllamaBackend over a scripted transport (catalog + show cache,
+    // resident reuse, keep_alive load/unload, /api/chat), with built-in negative controls.
+    case ollamaBackendSelftest = "--ollama-backend-selftest"
+    // Ollama lane S2b (G9): the same backend against the real Ollama on this Mac. Services tier; abstains
+    // when Ollama is absent or not answering.
+    case ollamaLive = "--ollama-live"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
