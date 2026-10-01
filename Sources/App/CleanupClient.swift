@@ -236,7 +236,7 @@ enum CleanupClient {
                         completion: @escaping (Result) -> Void) {
         // LM Studio readiness: the caller's own check, else the transport's (`ModelManager.shared
         // .ensureReady(model)` in production, exactly the call this default always made).
-        let readiness = readiness ?? { transport.prepareLMStudio($0, nil) }
+        let readiness = readiness ?? { transport.prepareLMStudio($0, nil).result }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(.badOutput("empty input")); return }
         // Make the model resident BEFORE the timed request: a cold load happens here, on a background
@@ -253,7 +253,7 @@ enum CleanupClient {
                     Log.write("cleanup: \(model) could not be made resident in Ollama")
                     completion(failureResult(for: readinessResult, loadFailureMessage: "model not loaded")
                                ?? .unavailable("model not loaded"))
-                case .response(let data, let response, let error):
+                case .response(let data, let response, let error, _):
                     finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
                                   completion: completion)
                 }

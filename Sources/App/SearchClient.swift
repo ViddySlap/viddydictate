@@ -150,7 +150,7 @@ enum SearchClient {
             case .notReady(let readiness):
                 let failure = CleanupClient.failureResult(for: readiness, loadFailureMessage: "model not loaded")
                 return ChatOutcome(content: "", toolCalls: [], failure: failure ?? .unavailable("model not loaded"))
-            case .response(let data, let response, let error):
+            case .response(let data, let response, let error, _):
                 return chatOutcome(data: data, response: response, error: error)
             }
         }

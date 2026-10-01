@@ -40,14 +40,16 @@ struct LocalChatTransport {
     /// LM Studio: send the client's request and call back on an arbitrary queue.
     let sendLMStudio: (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
     /// LM Studio's readiness (`ModelManager.ensureReady` by id, with an optional TTL override), the call
-    /// every LM Studio client made before Ollama existed.
-    let prepareLMStudio: (_ model: String, _ ttlOverrideSeconds: Int?) -> ModelManager.ReadinessResult
+    /// every LM Studio client made before Ollama existed, and whether that call cold-loaded the model.
+    let prepareLMStudio: (_ model: String, _ ttlOverrideSeconds: Int?)
+        -> (result: ModelManager.ReadinessResult, coldLoaded: Bool)
     /// LM Studio's unload, for the vision helper that unloads straight after its one call.
     let unloadLMStudio: (String) -> Void
-    /// Make an Ollama model ready at `(contextTokens, ttlSeconds)`: the readiness, and the `num_ctx` the chat
-    /// must carry (a reused instance's own, larger context, so the chat does not force a reload).
+    /// Make an Ollama model ready at `(contextTokens, ttlSeconds)`: the readiness, the `num_ctx` the chat
+    /// must carry (a reused instance's own, larger context, so the chat does not force a reload), and whether
+    /// this call cold-loaded it.
     let prepareOllama: (_ ref: LocalModelRef, _ contextTokens: Int, _ ttlSeconds: Int)
-        -> (result: ModelManager.ReadinessResult, contextTokens: Int)
+        -> (result: ModelManager.ReadinessResult, contextTokens: Int, coldLoaded: Bool)
     /// One native `/api/chat`, synchronous, its result shaped for `CleanupClient`'s classifiers.
     let chatOllama: (_ openAIBody: [String: Any], _ keepAliveSeconds: Int, _ contextTokens: Int,
                      _ think: Bool, _ timeout: TimeInterval) -> (Data?, HTTPURLResponse?, Error?)
@@ -65,12 +67,17 @@ struct LocalChatTransport {
             sendLMStudio: { request, completion in
                 URLSession.shared.dataTask(with: request, completionHandler: completion).resume()
             },
-            prepareLMStudio: { model, ttl in ModelManager.shared.ensureReady(model, ttlOverrideSeconds: ttl) },
+            prepareLMStudio: { model, ttl in
+                // Exactly `ensureReady(model, ttlOverrideSeconds: ttl)`, which is this call minus `coldLoaded`.
+                let prepared = ModelManager.shared.ensureReadyForChat(
+                    LocalModelRef(backend: .lmStudio, modelID: model), ttlOverrideSeconds: ttl)
+                return (prepared.result, prepared.coldLoaded)
+            },
             unloadLMStudio: { ModelResidency.unload($0) },
             prepareOllama: { ref, contextTokens, ttlSeconds in
                 let prepared = ModelManager.shared.ensureReadyForChat(
                     ref, contextTokens: contextTokens, ttlOverrideSeconds: ttlSeconds)
-                return (prepared.result, prepared.contextTokens ?? contextTokens)
+                return (prepared.result, prepared.contextTokens ?? contextTokens, prepared.coldLoaded)
             },
             chatOllama: { body, keepAlive, contextTokens, think, timeout in
                 OllamaBackend.shared.chat(openAIBody: body, keepAliveSeconds: keepAlive,
@@ -83,10 +90,11 @@ struct LocalChatTransport {
     }
 
     /// What one Ollama call came to: refused before any chat (the readiness, for the caller's own wording),
-    /// or the chat's transport result for the caller's existing classifier.
+    /// or the chat's transport result for the caller's existing classifier, with whether the readiness step
+    /// cold-loaded the model for this call.
     enum OllamaOutcome {
         case notReady(ModelManager.ReadinessResult)
-        case response(Data?, URLResponse?, Error?)
+        case response(Data?, URLResponse?, Error?, coldLoaded: Bool)
     }
 
     /// The Ollama half every Local client shares. Synchronous: call it OFF the main thread. The cold load
@@ -103,7 +111,7 @@ struct LocalChatTransport {
         beginRequest(ref)
         defer { endRequest(ref) }
         let (data, response, error) = chatOllama(body, keepAlive, prepared.contextTokens, profile.think, timeout)
-        return .response(data, response, error)
+        return .response(data, response, error, coldLoaded: prepared.coldLoaded)
     }
 }
 

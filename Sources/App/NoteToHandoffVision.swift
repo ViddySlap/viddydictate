@@ -142,11 +142,15 @@ enum NoteToHandoffLocalVisionClient {
     typealias Descriptions = [Int: String]
     typealias Readiness = (String, Int) -> ModelManager.ReadinessResult
 
-    /// The helper on whichever app holds it. LM Studio is `describe(model:)` below, unchanged. Ollama gets the
-    /// same request body through `transport.ollamaChat` with the vision profile (8k, `think: false`, the
-    /// images as bare base64 via the translator), then unloads straight after, as the LM Studio helper does.
-    /// Its `keep_alive` is the helper's own five minutes (ADR 0006), the same window LM Studio loads it with:
-    /// a crash/failure backstop, not normal residency.
+    /// The helper on whichever app holds it. LM Studio is `describe(model:)` below. Ollama gets the same
+    /// request body through `transport.ollamaChat` with the vision profile (8k, `think: false`, the images as
+    /// bare base64 via the translator). Its `keep_alive` is the helper's own five minutes (ADR 0006), the same
+    /// window LM Studio loads it with: a crash/failure backstop, not normal residency.
+    ///
+    /// On both apps the helper is unloaded straight after its one call ONLY when this pass cold-loaded it.
+    /// A helper that was already resident stays: on Ollama, gemma4:e4b is both the email/synthesis Staff
+    /// pick and the smallest vision model, and unloading it would make the next email pay a cold reload.
+    /// "Was it resident" is `ModelManager`'s own answer from the readiness step (`coldLoaded`), no new probe.
     static func describe(
         ref: LocalModelRef,
         frames: [NoteToHandoffFrame],
@@ -170,13 +174,13 @@ enum NoteToHandoffLocalVisionClient {
                 Log.write("handoff vision: \(ref.modelID) in Ollama not ready (\(readiness)); "
                           + "using filename-only fallback")
                 completion(nil)
-            case .response(let data, let response, let error):
+            case .response(let data, let response, let error, let coldLoaded):
                 var descriptions: Descriptions?
                 if case .content(let content) = CleanupClient.classifyChatResponse(
                     data: data, response: response, error: error, logPrefix: "handoff vision", elapsed: 0) {
                     descriptions = parseDescriptions(content)
                 }
-                transport.unloadOllama(ref)
+                if coldLoaded { transport.unloadOllama(ref) }
                 completion(descriptions)
             }
         }
@@ -190,11 +194,14 @@ enum NoteToHandoffLocalVisionClient {
         completion: @escaping (Descriptions?) -> Void
     ) {
         // The caller's own check, else the transport's (`ModelManager.shared.ensureReady(model,
-        // ttlOverrideSeconds:)` in production, exactly the call this default always made).
-        let readiness = readiness ?? { transport.prepareLMStudio($0, $1) }
+        // ttlOverrideSeconds:)` in production, exactly the call this default always made). A caller-supplied
+        // check cannot say whether it loaded the helper, so its pass unloads as it always did.
+        let prepare: (String, Int) -> (result: ModelManager.ReadinessResult, coldLoaded: Bool) =
+            readiness.map { check in { (check($0, $1), true) } } ?? { transport.prepareLMStudio($0, $1) }
         guard !frames.isEmpty else { completion([:]); return }
         DispatchQueue.global(qos: .userInitiated).async {
-            switch readiness(model, idleTTLSeconds) {
+            let prepared = prepare(model, idleTTLSeconds)
+            switch prepared.result {
             case .ready:
                 break
             case .capacityRefused(.overBudget):
@@ -216,8 +223,9 @@ enum NoteToHandoffLocalVisionClient {
 
             func finish(_ descriptions: Descriptions?) {
                 // This helper is a third model beside the route's real model. Unload immediately after its
-                // one description call; the 5-minute TTL is a crash/failure backstop, not normal residency.
-                transport.unloadLMStudio(model)
+                // one description call when this pass loaded it; the 5-minute TTL is a crash/failure backstop,
+                // not normal residency. A helper another mode already had warm is left where it was.
+                if prepared.coldLoaded { transport.unloadLMStudio(model) }
                 completion(descriptions)
             }
 

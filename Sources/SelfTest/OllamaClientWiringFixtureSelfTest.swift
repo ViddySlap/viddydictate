@@ -15,13 +15,17 @@ import Foundation
 /// model; the Ollama model reports `thinking`, so `think` is on the wire for every surface and a wrong value
 /// is visible; Ollama's tool call carries an OBJECT argument, LM Studio's a string.
 ///
-/// Negative controls: the contract is re-run against three broken clients, and the gate FAILS unless the
+/// Negative controls: the contract is re-run against four broken clients, and the gate FAILS unless the
 /// assertion aimed at each one reports it:
 /// (a) clients that ignore the resolved app (always LM Studio);
 /// (b) search retrieval at 8192 instead of 16384;
-/// (c) cleanup with `think: true`.
+/// (c) cleanup with `think: true`;
+/// (d) a vision pass that unloads its helper unconditionally, even one another mode already had warm.
 enum OllamaClientWiringFixtureSelfTest {
     private static let modelID = "shared-id-on-both:7b"
+    /// The Ollama vision helper the warm/cold checks use: like gemma4:e4b, a model that can see and that
+    /// another mode (email, synthesis) may already hold warm.
+    private static let visionHelperID = "gemma4-fixture:e4b"
     private static let keepAlive = 437
     private static let reasoningCanary = "REASONING-CANARY-stays-out-of-the-text"
     private static let ollamaReply = "Ollama fixture reply."
@@ -39,6 +43,8 @@ enum OllamaClientWiringFixtureSelfTest {
     private static let retrievalContextCheck =
         "search retrieval: every turn carries num_ctx 16384 and think false"
     private static let cleanupThinkCheck = "cleanup: the chat carries num_ctx 8192, think false, keep_alive 437"
+    private static let warmHelperCheck =
+        "vision: an (Ollama, gemma4-fixture) helper already resident before the pass is NOT unloaded after it"
 
     static func run() -> Bool {
         Settings.registerDefaults()
@@ -73,6 +79,10 @@ enum OllamaClientWiringFixtureSelfTest {
         var translated: [Data] = []
         var resident: [String: Int] = [:]
         var webSearches: [String] = []
+        /// Whether LM Studio's readiness reports a cold load (the scripted answer to "was it resident").
+        var lmColdLoad = true
+        /// The mutant seam: readiness that cannot tell a warm model from a cold one, so every pass unloads.
+        var alwaysCold = false
 
         private lazy var backend = OllamaBackend(
             transport: OllamaBackend.Transport(send: { request, _ in self.serve(request) },
@@ -93,12 +103,12 @@ enum OllamaClientWiringFixtureSelfTest {
                         HTTPURLResponse(url: $0, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)
                     }, nil)
                 },
-                prepareLMStudio: { _, _ in .ready },
+                prepareLMStudio: { _, _ in (.ready, self.alwaysCold || self.lmColdLoad) },
                 unloadLMStudio: { self.lmUnloads.append($0) },
                 prepareOllama: { ref, context, ttl in
                     let prepared = self.manager.ensureReadyForChat(
                         ref, contextTokens: context, ttlOverrideSeconds: ttl, dependencies: self.capacity)
-                    return (prepared.result, prepared.contextTokens ?? context)
+                    return (prepared.result, prepared.contextTokens ?? context, self.alwaysCold || prepared.coldLoaded)
                 },
                 chatOllama: { body, keepAlive, context, think, timeout in
                     let result = self.backend.chat(openAIBody: body, keepAliveSeconds: keepAlive,
@@ -152,8 +162,11 @@ enum OllamaClientWiringFixtureSelfTest {
             let fixture = OllamaClientWiringFixtureSelfTest.self
             switch path {
             case "/api/tags":
-                return "{\"models\":[{\"name\":\"\(fixture.modelID)\",\"model\":\"\(fixture.modelID)\","
-                    + "\"size\":4200000000,\"capabilities\":[\"completion\",\"tools\",\"thinking\",\"vision\"]}]}"
+                let rows = [fixture.modelID, fixture.visionHelperID].map { name in
+                    "{\"name\":\"\(name)\",\"model\":\"\(name)\",\"size\":4200000000,"
+                        + "\"capabilities\":[\"completion\",\"tools\",\"thinking\",\"vision\"]}"
+                }
+                return "{\"models\":[\(rows.joined(separator: ","))]}"
             case "/api/show":
                 return "{\"capabilities\":[\"completion\",\"tools\",\"thinking\",\"vision\"],\"model_info\":{"
                     + "\"general.architecture\":\"fixturearch\",\"fixturearch.block_count\":24,"
@@ -207,6 +220,8 @@ enum OllamaClientWiringFixtureSelfTest {
         var rebundle: (LLMProviderBundle) -> LLMProviderBundle = { $0 }
         var cleanupSurface: OllamaSurfaceProfile = .cleanup
         var retrievalProfile: OllamaSurfaceProfile = .searchRetrieval
+        /// The vision pass cannot tell a warm helper from one it loaded, so it unloads every time.
+        var unloadsUnconditionally = false
     }
 
     private static let ollamaBundle = LLMProviderBundle.local(ref: LocalModelRef(backend: .ollama, modelID: modelID))
@@ -438,7 +453,27 @@ enum OllamaClientWiringFixtureSelfTest {
                                 && int(mac.generates.last?["keep_alive"]) == 0 && mac.resident[modelID] == nil,
                             "described=\(String(describing: described))")
 
+            // Warm and cold, with the gemma-like helper: only a helper this pass loaded is unloaded.
+            let helper = LocalModelRef(backend: .ollama, modelID: visionHelperID)
+            let warm = ScriptedMac()
+            warm.alwaysCold = subject.unloadsUnconditionally
+            warm.resident[visionHelperID] = 8192
+            let warmDescribed = describe(helper, warm)
+            reporter.record(warmHelperCheck,
+                            warmDescribed == [0: "ollama fixture description"] && warm.chats.count == 1
+                                && warm.generates.isEmpty && warm.resident[visionHelperID] == 8192,
+                            "generates=\(warm.generates.map { int($0["keep_alive"]) ?? -1 })")
+            let cold = ScriptedMac()
+            cold.alwaysCold = subject.unloadsUnconditionally
+            let coldDescribed = describe(helper, cold)
+            reporter.record("vision: an (Ollama, gemma4-fixture) helper the pass cold-loaded IS unloaded after it",
+                            coldDescribed == [0: "ollama fixture description"]
+                                && cold.generates.map { int($0["keep_alive"]) } == [300, 0]
+                                && cold.resident[visionHelperID] == nil,
+                            "generates=\(cold.generates.map { int($0["keep_alive"]) ?? -1 })")
+
             let lmMac = ScriptedMac()
+            lmMac.alwaysCold = subject.unloadsUnconditionally
             let lmDescribed = describe(subject.rebundle(lmStudioBundle).localRef, lmMac)
             let expected = NoteToHandoffLocalVisionClient.requestBody(model: modelID, frames: [frame])
                 .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
@@ -448,6 +483,13 @@ enum OllamaClientWiringFixtureSelfTest {
                                 && lmMac.lmRequests.first?.url == Settings.cleanupEndpoint
                                 && expected.map { same(lmMac.lmBodies.first, $0) } == true
                                 && lmDescribed == [0: "lm fixture description"] && lmMac.lmUnloads == [modelID])
+            let lmWarm = ScriptedMac()
+            lmWarm.alwaysCold = subject.unloadsUnconditionally
+            lmWarm.lmColdLoad = false
+            let lmWarmDescribed = describe(subject.rebundle(lmStudioBundle).localRef, lmWarm)
+            reporter.record("vision: an (LM Studio, X) helper that was already resident is NOT unloaded after the pass",
+                            lmWarmDescribed == [0: "lm fixture description"] && lmWarm.lmUnloads.isEmpty,
+                            "unloads=\(lmWarm.lmUnloads)")
         }
     }
 
@@ -558,6 +600,13 @@ enum OllamaClientWiringFixtureSelfTest {
         thinkingCleanup.cleanupSurface = OllamaSurfaceProfile(contextTokens: 8192, think: true)
         requireCaught(reporter, mutant: "cleanup with think true", by: cleanupThinkCheck) {
             checkContract(thinkingCleanup, $0)
+        }
+
+        // (d) The vision helper unloaded whether or not this pass loaded it.
+        var unconditional = Subject()
+        unconditional.unloadsUnconditionally = true
+        requireCaught(reporter, mutant: "vision pass that unloads its helper unconditionally", by: warmHelperCheck) {
+            checkContract(unconditional, $0)
         }
     }
 

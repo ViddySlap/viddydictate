@@ -376,6 +376,8 @@ enum LocalCapacityBackendsFixtureSelfTest {
                             reloaded.result == .ready && reloaded.contextTokens == 8192
                                 && world.ollamaLoads.count == 1 && world.ollamaResident[snug] == 8192,
                             "result=\(reloaded.result) ctx=\(reloaded.contextTokens ?? -1)")
+            reporter.record("readiness says which call cold-loaded: the reused instance did not, the reload did",
+                            !reused.coldLoaded && reloaded.coldLoaded)
         }
     }
 

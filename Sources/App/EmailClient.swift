@@ -46,7 +46,7 @@ enum EmailClient {
                       completion: @escaping (CleanupClient.Result) -> Void) {
         // LM Studio readiness: the caller's own check, else the transport's (`ModelManager.shared
         // .ensureReady(model)` in production, exactly the call this default always made).
-        let readiness = readiness ?? { transport.prepareLMStudio($0, nil) }
+        let readiness = readiness ?? { transport.prepareLMStudio($0, nil).result }
         // Make the model resident BEFORE the timed request, on a background queue under the caller's
         // thinking spinner: the email model (gemma) may have been TTL-evicted by LM Studio, so the cold
         // load happens here instead of eating the request timeout. ensureReady loads it with its
@@ -63,7 +63,7 @@ enum EmailClient {
                     Log.write("email: \(model) could not be made resident in Ollama")
                     completion(CleanupClient.failureResult(for: readinessResult, loadFailureMessage: "model not loaded")
                                ?? .unavailable("model not loaded"))
-                case .response(let data, let response, let error):
+                case .response(let data, let response, let error, _):
                     finish(selection, data: data, response: response, error: error, startedAt: t0,
                            completion: completion)
                 }

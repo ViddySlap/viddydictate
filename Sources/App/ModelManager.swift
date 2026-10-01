@@ -245,12 +245,16 @@ final class ModelManager {
     /// `ensureReady`, also answering the `num_ctx` the imminent Ollama chat must carry: the resident
     /// instance's own context when it was reused (sending a different one would make Ollama reload it), else
     /// the one it was just loaded with. Nil for LM Studio, whose requests carry no context.
+    ///
+    /// `coldLoaded` is true only when THIS call loaded the model (the policy found it absent, or an Ollama
+    /// instance too small for the context, and loaded it). A caller that loads a helper only for itself (the
+    /// Note to Handoff vision pass) unloads it afterwards only then, so a model another mode had warm stays.
     func ensureReadyForChat(
         _ ref: LocalModelRef,
         contextTokens: Int? = nil,
         ttlOverrideSeconds: Int? = nil,
         dependencies: CapacityDependencies = .live
-    ) -> (result: ReadinessResult, contextTokens: Int?) {
+    ) -> (result: ReadinessResult, contextTokens: Int?, coldLoaded: Bool) {
         policyLock.lock()
         defer { policyLock.unlock() }
 
@@ -259,9 +263,9 @@ final class ModelManager {
         switch prepareCapacity(for: canonical, contextTokens: wanted, dependencies: dependencies) {
         case .alreadyResident(let resident):
             stampUse(canonical)
-            return (.ready, canonical.backend == .ollama ? (resident ?? wanted) : nil)
+            return (.ready, canonical.backend == .ollama ? (resident ?? wanted) : nil, false)
         case .refused(let reason):
-            return (.capacityRefused(reason), nil)
+            return (.capacityRefused(reason), nil, false)
         case .loadAllowed:
             break
         }
@@ -276,10 +280,10 @@ final class ModelManager {
             loaded = dependencies.ollama?.ensureLoaded(ref, ttl, wanted ?? Self.ollamaDefaultContextTokens)
                 ?? false
         }
-        guard loaded else { return (.loadFailed, nil) }
+        guard loaded else { return (.loadFailed, nil, false) }
         ownedModels.insert(canonical)
         stampUse(canonical)
-        return (.ready, wanted)
+        return (.ready, wanted, true)
     }
 
     /// `capacityPrecheck` for a model in either app; `contextTokens` as in `ensureReady`.
