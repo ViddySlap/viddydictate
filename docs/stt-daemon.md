@@ -12,6 +12,29 @@ The daemon **source** is vendored at the repository root, so a clone is self-suf
 into the Hugging Face cache on the daemon's first transcribe. Until that finishes `/health`
 answers with `"ready": false` and `/transcribe` returns 503.
 
+## Warm-up is offline-first
+
+The daemon is on demand: it exits after 30 idle minutes, so it cold-starts often. Every cold start
+loads the model from its **local snapshot directory** (the Hugging Face cache, by huggingface_hub's
+own `HF_HUB_CACHE` / `HF_HOME` precedence, then the app installer's `model-cache` beside the
+daemon), with `HF_HUB_OFFLINE=1` set before huggingface_hub is imported. It never hands mlx-whisper
+the repo id once the model is on disk: that makes mlx-whisper call `snapshot_download`, which asks
+huggingface.co for repo info with **no timeout** before it looks at the cache. On a user's Mac,
+right after a wake from sleep, that one request held a warm for 306.9 s while the model sat complete
+on disk, and the app could only retry silently.
+
+Only a model that is not on disk goes to the network. The daemon then probes the Hub with an
+explicit 10 s timeout, retrying with backoff, before calling `snapshot_download`, and bounds the
+per-file metadata and transfer timeouts through `HF_HUB_ETAG_TIMEOUT` / `HF_HUB_DOWNLOAD_TIMEOUT`
+(a user's own values win).
+
+`/health` keeps `ready`, `model`, `idle_s` and `error` exactly as before, and adds `phase`
+(`starting`, `resolving`, `downloading`, `loading`, `ready` or `error`), `phase_s` (seconds in that
+phase) and `phase_detail` (`"waiting for the network"` while a first download cannot reach the Hub).
+The app shows these on the HUD while a take waits for the engine, and in Preflight's speech-to-text
+row. `scripts/test-whisperd-offline-warm.py` pins all of it under a socket guard, with mutants of the
+daemon that must be caught.
+
 **The daemon decodes audio itself and needs no external tools.** mlx-whisper shells out to `ffmpeg`
 only when it is handed a file PATH; the daemon hands it a decoded float32 array instead, so that
 branch is never reached. The app sends 16 kHz mono audio (`AudioRecorder.resampleForModel`), which
