@@ -147,6 +147,16 @@ enum StaffPicks {
         return out
     }
 
+    /// Where a D2 crossing should land first, for `bundle` as STORED: an untouched route crossing into another
+    /// app takes that app's staff pick for the route (when installed and fitting) before its largest model,
+    /// so email stays on the email model whichever app runs it. A customized route gets nil everywhere and
+    /// keeps the plain D2 rule. Feeds `LLMAvailabilityRouting.resolve(crossAppStaffPick:)`.
+    static func crossAppStaffPick(for bundle: LLMProviderBundle,
+                                  route: LLMRouteID) -> (LocalBackendID) -> LocalModelRef? {
+        guard followsPreferredApp(bundle, route: route) else { return { _ in nil } }
+        return { LLMProviderDefaults.testedLocalBundle(for: route, on: $0)?.localRef }
+    }
+
     /// The preset badge: "STAFF PICK <model>" or "CUSTOM <model>".
     static func badge(bundle: LLMProviderBundle, route: LLMRouteID) -> String {
         "\(isStaffPick(bundle, route: route) ? badgeWord : customBadgeWord) \(bundle.modelID)"

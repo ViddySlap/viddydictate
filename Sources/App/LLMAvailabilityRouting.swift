@@ -222,13 +222,20 @@ enum LLMAvailabilityRouting {
     /// with its app. `localCapacity` carries the machine's wired/budget facts and per-model sizes so a Local
     /// substitution cannot hand a local app a model this Mac cannot hold. The provider map and catalog are
     /// only read for a provider the ladder reaches.
+    ///
+    /// `crossAppStaffPick` names, per app, the model a D2 crossing INTO that app should try first: the
+    /// route's staff pick there, for a route still on its staff pick (`StaffPicks.crossAppStaffPick`). It is
+    /// taken when installed and fitting; otherwise the crossing takes that app's largest fitting model as
+    /// before. The default (nil everywhere) is the plain D2 rule, which a customized route keeps.
     static func resolve(pin: LLMProviderBundle,
                         bundle: (LLMProvider) -> LLMProviderBundle?,
                         availability: (LLMProvider) -> LLMProviderAvailabilityState,
                         localModels: [LMStudioModelOption]? = nil,
                         localCapacity: LLMLocalCapacityFacts? = .conservativeDefault,
                         localFailure: LLMLocalRouteFailure? = nil,
-                        failedProviders: [LLMProvider: String] = [:]) -> LLMRouteResolution {
+                        failedProviders: [LLMProvider: String] = [:],
+                        crossAppStaffPick: (LocalBackendID) -> LocalModelRef? = { _ in nil })
+        -> LLMRouteResolution {
         let pinState = availability(pin.provider)
 
         /// Resolve the configured Local arm against the measured installed catalog, preferring the
@@ -291,8 +298,14 @@ enum LLMAvailabilityRouting {
             } else {
                 cause = .nothingFits
             }
+            /// The route's staff pick in `other` when it is installed there and runs, else nil.
+            func staffPick(in other: LocalBackendID) -> LMStudioModelOption? {
+                guard let pick = crossAppStaffPick(other), pick.backend == other,
+                      !excluded(pick), fits(pick) else { return nil }
+                return localModels.first { $0.ref == pick }
+            }
             for other in LocalBackendID.allCases where other != pinnedRef.backend {
-                guard let replacement = largestFitting(in: other) else { continue }
+                guard let replacement = staffPick(in: other) ?? largestFitting(in: other) else { continue }
                 let crossing = LocalBackendCrossing(from: pinnedRef.backend, to: other, cause: cause)
                 return (
                     .local(ref: replacement.ref),

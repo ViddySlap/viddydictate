@@ -20,7 +20,9 @@ import Foundation
 /// (1) no follow: resolution reads the stored LM Studio staff pick as a pin (the pre-S3d store);
 /// (2) customized routes follow too, overriding the user's (app, model);
 /// (3) a backend that accepts a non-loopback `OLLAMA_HOST` (the pre-S3d behaviour);
-/// (4) opening an LM-Studio-only store writes the effective app into every untouched route.
+/// (4) opening an LM-Studio-only store writes the effective app into every untouched route;
+/// (5) an untouched route that has to cross apps (D2) takes the other app's LARGEST fitting model instead
+///     of that app's staff pick for the route.
 ///
 /// The `OLLAMA_HOST` half runs the real `LLMProviderDetection.observeLocal` over the real `OllamaBackend`
 /// on a scripted transport that RECORDS every request and would answer any of them, so "no request reached
@@ -168,6 +170,8 @@ enum StaffPickFollowsAppFixtureSelfTest {
         "a customized Local route keeps its exact (app, model) when the Preferred app changes"
     private static let fileIdenticalCheck =
         "LM Studio only: the stored file is byte-identical after load, resolution and save"
+    private static let crossToPickCheck =
+        "Preferred Ollama on an LM-Studio-only Mac: email crosses to LM Studio's staff pick google/gemma-4-e4b"
     private static let remoteRefusedCheck =
         "OLLAMA_HOST=192.168.1.50:11434: Ollama is unavailable with the on-this-Mac reason, and the transport "
         + "received ZERO requests"
@@ -246,6 +250,7 @@ enum StaffPickFollowsAppFixtureSelfTest {
         checkCustomized(policy, root: root, reporter)
         checkGlobalControl(policy, root: root, reporter)
         checkLMStudioOnly(policy, root: root, reporter)
+        checkCrossToStaffPick(policy, root: root, reporter)
         checkOllamaHost(policy, reporter)
     }
 
@@ -461,6 +466,68 @@ enum StaffPickFollowsAppFixtureSelfTest {
                         !String(decoding: onDisk, as: UTF8.self).contains("localBackend"))
     }
 
+    // MARK: - Crossing apps lands on the other app's staff pick (untouched routes only)
+
+    /// The local bundle that runs, pinned or degraded, with the crossing when there was one.
+    private static func ran(_ resolution: LLMRouteResolution) -> (ref: LocalModelRef, crossing: LocalBackendCrossing?)? {
+        switch resolution {
+        case .pinned(let bundle) where bundle.provider == .local: return (bundle.localRef, nil)
+        case .degraded(let bundle, .local, _, let offer) where bundle.provider == .local:
+            return (bundle.localRef, offer?.crossing)
+        default: return nil
+        }
+    }
+
+    private static func checkCrossToStaffPick(_ policy: Policy, root: URL, _ reporter: SelfTestReporter) {
+        // Preferred explicitly Ollama, but only LM Studio is installed, with both of its staff picks.
+        let preference = PreferenceBox()
+        preference.explicit = .ollama
+        let lmOnly = policy.open(root.appendingPathComponent("cross-lm-\(UUID().uuidString).json"),
+                                 ModelsPowerSettingsStore.atomicWriter, preference)
+        lmOnly.setLocalAvailabilityState(.available, models: lmStudioModels, installedBackends: [.lmStudio])
+        let email = policy.resolve(lmOnly, .email)
+        let toLM = LocalBackendCrossing(from: .ollama, to: .lmStudio, cause: .pinnedAppNotRunning)
+        var named = false
+        if case .degraded(_, .local, let reason, let offer) = email {
+            named = reason == "ran on LM Studio, Ollama wasn't running"
+                && offer?.message.contains("Ollama") == true && offer?.message.contains("LM Studio") == true
+        }
+        reporter.record(crossToPickCheck,
+                        ran(email)?.ref == ref(.lmStudio, lmGemma) && ran(email)?.crossing == toLM && named,
+                        email.logToken)
+        let cleanup = policy.resolve(lmOnly, .cleanupL1)
+        reporter.record("...and cleanup L1 crosses to LM Studio's \(lmCoder)",
+                        ran(cleanup)?.ref == ref(.lmStudio, lmCoder) && ran(cleanup)?.crossing == toLM,
+                        cleanup.logToken)
+
+        // The mirror: Preferred explicitly LM Studio on an Ollama-only Mac.
+        let mirror = PreferenceBox()
+        mirror.explicit = .lmStudio
+        let ollamaOnly = policy.open(root.appendingPathComponent("cross-ollama-\(UUID().uuidString).json"),
+                                     ModelsPowerSettingsStore.atomicWriter, mirror)
+        ollamaOnly.setLocalAvailabilityState(.available, models: ollamaModels, installedBackends: [.ollama])
+        let toOllama = LocalBackendCrossing(from: .lmStudio, to: .ollama, cause: .pinnedAppNotRunning)
+        let mirrorEmail = policy.resolve(ollamaOnly, .email)
+        let mirrorCleanup = policy.resolve(ollamaOnly, .cleanupL1)
+        reporter.record("Preferred LM Studio on an Ollama-only Mac: email crosses to gemma4:e4b, cleanup to qwen3-coder:30b",
+                        ran(mirrorEmail)?.ref == ref(.ollama, ollamaGemma) && ran(mirrorEmail)?.crossing == toOllama
+                            && ran(mirrorCleanup)?.ref == ref(.ollama, ollamaCoder),
+                        "\(mirrorEmail.logToken) / \(mirrorCleanup.logToken)")
+
+        // A customized route crossing apps keeps plain D2: the other app's largest fitting model.
+        do {
+            try lmOnly.setSelectedBundle(.local(ref: ref(.ollama, ollamaCustom)), for: .email)
+            try ollamaOnly.setSelectedBundle(.local(lmCustom), for: .email)
+        } catch { reporter.record("customized crossing routes are stored", false, "\(error)") }
+        let customToLM = policy.resolve(lmOnly, .email)
+        let customToOllama = policy.resolve(ollamaOnly, .email)
+        reporter.record("a customized route crossing apps still takes the largest fit (\(lmCoder); qwen3-coder:30b)",
+                        ran(customToLM)?.ref == ref(.lmStudio, lmCoder) && ran(customToLM)?.crossing != nil
+                            && ran(customToOllama)?.ref == ref(.ollama, ollamaCoder)
+                            && ran(customToOllama)?.crossing != nil,
+                        "\(customToLM.logToken) / \(customToOllama.logToken)")
+    }
+
     // MARK: - OLLAMA_HOST: Local means on this Mac
 
     private static func checkOllamaHost(_ policy: Policy, _ reporter: SelfTestReporter) {
@@ -607,6 +674,18 @@ enum StaffPickFollowsAppFixtureSelfTest {
         acceptsRemote.ollama = { environment, script in AcceptsRemoteHost(environment: environment, script: script) }
         requireCaught(reporter, mutant: "Ollama backend that accepts a non-loopback OLLAMA_HOST", by: remoteRefusedCheck) {
             checkContract(acceptsRemote, root: root, $0)
+        }
+
+        // (5) Untouched routes follow the Preferred app, but a D2 crossing takes the largest fit, as before.
+        let largestCrossing = Policy(resolve: { store, route in
+            let preferred = store.effectiveLocalBackend()
+            return resolveStored(store, route) {
+                StaffPicks.followingPreferredApp($0, route: route, preferred: preferred)
+            }
+        }, open: realPolicy.open)
+        requireCaught(reporter, mutant: "crossing that takes the largest fit for an untouched route",
+                      by: crossToPickCheck) {
+            checkContract(largestCrossing, root: root, $0)
         }
 
         // (4) Opening the store materializes the effective app into every untouched route.

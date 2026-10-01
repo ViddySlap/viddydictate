@@ -42,7 +42,9 @@ pick, pins that app and model, and the route keeps it whichever app is preferred
 **Fallback crosses apps, never to the cloud.** When a route's model is not installed or does not
 fit in memory, ViddyDictate takes the largest model that fits in the same app. When that app is not
 running, or nothing in it fits, it takes the largest model that fits in the other local app and
-says so, for example "ran on LM Studio, Ollama wasn't running". A Local route never falls back to
+says so, for example "ran on LM Studio, Ollama wasn't running". A route still on its staff pick
+crosses to the other app's staff pick for that route first (email to the other app's email model),
+when it is installed and fits, and only then to the largest model there. A Local route never falls back to
 Claude or Codex: if neither app can run it, the transform is off and your raw dictation still lands.
 
 **Preferred local app.** Settings > Setup has a **Preferred local app** choice: Automatic, LM

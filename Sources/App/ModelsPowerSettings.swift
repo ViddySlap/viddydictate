@@ -391,8 +391,12 @@ final class ModelsPowerSettingsStore {
         // D1: an untouched Local staff pick runs the effective Preferred local app's pick. Decided once per
         // resolution, before D2's fallback, and never written back.
         let preferred = effectiveLocalBackend()
-        let pin = StaffPicks.followingPreferredApp(
-            selectedBundle(for: route, fallback: fallback), route: route, preferred: preferred)
+        let storedPin = selectedBundle(for: route, fallback: fallback)
+        let pin = StaffPicks.followingPreferredApp(storedPin, route: route, preferred: preferred)
+        // The Local arm as stored: the pin itself, or the remembered Local bundle a cloud pin falls back to.
+        let storedLocal = storedPin.provider == .local ? storedPin
+            : (rememberedBundle(for: .local, route: route)
+                ?? LLMProviderDefaults.testedBundle(for: .local, route: route))
         return LLMAvailabilityRouting.resolve(
             pin: pin,
             bundle: { provider in
@@ -406,7 +410,9 @@ final class ModelsPowerSettingsStore {
             localFailure: Self.localCapacityRefusal(
                 in: failedProviders, failed: Self.failedLocalIdentity(
                     ref: failedLocalRef, modelID: failedLocalModelID, pin: pin)),
-            failedProviders: failedProviders)
+            failedProviders: failedProviders,
+            crossAppStaffPick: storedLocal.map { StaffPicks.crossAppStaffPick(for: $0, route: route) }
+                ?? { _ in nil })
     }
 
     /// Resolve `route` as if its Local choice were the pin, whatever provider is actually selected. For a
@@ -421,11 +427,10 @@ final class ModelsPowerSettingsStore {
                            failedLocalModelID: String? = nil,
                            failedLocalRef: LocalModelRef? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
-        let pin = followingPreferredApp(
-            rememberedBundle(for: .local, route: route)
-                ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
-                ?? LLMProviderDefaults.testedBundle(for: .local, route: route)!,
-            route: route)
+        let storedPin = rememberedBundle(for: .local, route: route)
+            ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
+            ?? LLMProviderDefaults.testedBundle(for: .local, route: route)!
+        let pin = followingPreferredApp(storedPin, route: route)
         return LLMAvailabilityRouting.resolve(
             pin: pin,
             bundle: { $0 == .local ? pin : nil },
@@ -435,7 +440,8 @@ final class ModelsPowerSettingsStore {
             localFailure: Self.localCapacityRefusal(
                 in: failedProviders, failed: Self.failedLocalIdentity(
                     ref: failedLocalRef, modelID: failedLocalModelID, pin: pin)),
-            failedProviders: failedProviders)
+            failedProviders: failedProviders,
+            crossAppStaffPick: StaffPicks.crossAppStaffPick(for: storedPin, route: route))
     }
 
     /// Which model a capacity refusal blames: the ref when the caller has one, else the bare id in every app,
