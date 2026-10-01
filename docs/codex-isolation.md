@@ -88,12 +88,28 @@ reap on timeout.
 
 The deny-default profile grants metadata-only access to the exact ancestors of the three dedicated roots,
 plus fixed reads for the CLI's optional `/etc/codex/requirements.toml` probe and the system CA bundle.
-`SSL_CERT_FILE` is pinned to `/etc/ssl/cert.pem`. The only additional native IPC is
+`SSL_CERT_FILE` is pinned to `/etc/ssl/cert.pem`. The mach-lookup allowlist is exactly four services:
+`com.apple.trustd` and `com.apple.trustd.agent` for TLS trust evaluation,
 `com.apple.SystemConfiguration.configd`, which the installed HTTP client consults while constructing its
-proxy matcher; it cannot broaden transport because direct network remains denied and only the runner's
-single loopback proxy port is reachable. The dedicated CLI may create `apply_patch`, `applypatch`, and
+proxy matcher (it cannot broaden transport because direct network remains denied and only the runner's
+single loopback proxy port is reachable), and the libinfo service below. The dedicated CLI may create
+`apply_patch`, `applypatch`, and
 `codex-execve-wrapper` runtime aliases under `codex-home/tmp/arg0`; the authenticated gate accepts only those exact names and
 only when each symlink target is the pinned Codex executable. Any other symlink is red.
+
+**User/group lookups.** The profile allows `mach-lookup` of `com.apple.system.opendirectoryd.libinfo`,
+the IPC behind `getpw*`/`getgr*`. Codex 0.158 `exec` syncs its MDM-managed preferences
+(`CFPreferencesAppSynchronize("com.openai.codex")`) at startup, needs the user record to do it, and
+treats a failed sync as fatal (`failed to initialize in-process app-server client: Failed to synchronize
+managed preferences`). On the Mac (2026-10-01) this one name was measured necessary (every other denied
+operation allowed, libinfo still denied: still fails) and sufficient (libinfo alone: green). It is a
+read-only directory query: no file, network or exec rule comes with it, it returns no password hashes,
+and DNS still fails under it; write and direct-connect probes stay denied. Residual: the contained
+process can enumerate local user and group records (names, uids, home paths, shells). On a Mac bound to
+a network directory (LDAP/AD), opendirectoryd could forward such a lookup off the machine. Apple's own
+base profile (`system.sb`) grants the same lookup. The policy audit pins the mach-lookup form to these
+exact four names (no `global-name-prefix`, no cfprefsd, no second form), and
+`CodexContainmentRunner mach-lookup-policy-selftest` proves each widening is refused.
 
 Run from the repository root after `./build.sh`:
 
