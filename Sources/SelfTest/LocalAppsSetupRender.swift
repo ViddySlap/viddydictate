@@ -133,9 +133,9 @@ enum LocalAppsSetupRenderCases {
                wrong.joined(separator: ","))
         report("[LM Studio only] Unload all is still LM Studio's button, unchanged",
                (SelfTestRenderCapture.find(LocalModelSetup.identifier(.unloadAll), in: harness.view) as? NSButton)?
-                   .title == "Unload all")
+                   .title == "Unload all", "")
         report("[LM Studio only] no row carries a recommendation once an app is installed",
-               tag(.lmStudio, harness) == nil && tag(.ollama, harness) == nil)
+               tag(.lmStudio, harness) == nil && tag(.ollama, harness) == nil, "")
         harness.capture("setup-local-apps-lmstudio-only.png", report: report)
         harness.close()
     }
@@ -177,10 +177,10 @@ enum LocalAppsSetupRenderCases {
         report("[Ollama command line] the row has no Start and no Open control at all",
                SelfTestRenderCapture.find(LocalAppRows.buttonIdentifier(.start, .ollama), in: harness.view) == nil
                    && SelfTestRenderCapture.find(LocalAppRows.buttonIdentifier(.open, .ollama), in: harness.view)
-                       == nil)
+                       == nil, "")
         report("[Ollama command line] it says how the user starts it",
                SelfTestRenderCapture.label(LocalAppRows.identifier(.detail, .ollama), in: harness.view)?
-                   .stringValue == LocalAppRows.commandLineStartCopy)
+                   .stringValue == LocalAppRows.commandLineStartCopy, "")
         harness.capture("setup-local-apps-ollama-cli.png", report: report)
         harness.close()
     }
@@ -215,7 +215,7 @@ enum LocalAppsSetupRenderCases {
         harness.capture("setup-local-apps-preferred-ollama.png", card: LocalAppRows.cardIdentifier,
                         report: report)
         if let after { choose(after, "Automatic (LM Studio)") }
-        report("[preferred] choosing Automatic clears the stored choice", harness.store.preferred == nil)
+        report("[preferred] choosing Automatic clears the stored choice", harness.store.preferred == nil, "")
         harness.close()
     }
 
