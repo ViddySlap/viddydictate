@@ -8,6 +8,11 @@ import Foundation
 /// is missing: a managed sandbox, no Ollama installed, a server that does not answer, no usable model, or
 /// every usable model already resident. Every claim about a server that DID answer is blocking.
 ///
+/// A whole-gate abstain carries `SelfTestAbstain.preconditionMissingMarker`, so verify.sh counts it as SKIP
+/// and its meta-gate covers it. The two load/unload abstains (every usable model resident; the target does
+/// not fit the budget) are partial: the catalog checks ran and print PASS, so they keep the bare `[skip]`
+/// line, which the classifier also counts as SKIP, and must never carry the marker beside that PASS.
+///
 /// It only ever loads and unloads a model that was NOT resident when it started, so it cannot evict a
 /// model another app (or the user) loaded. Other resident models must still be resident after the unload.
 /// The wired-memory reading around the load is printed for the capacity slice's measurement, never asserted.
@@ -20,18 +25,18 @@ enum OllamaLiveBackendGate {
         let environment = ProcessInfo.processInfo.environment
         if environment["CODEX_SANDBOX"]?.isEmpty == false
             || environment["CODEX_PERMISSION_PROFILE"]?.isEmpty == false {
-            print("\(tag) [skip] SKIPPED: managed sandbox denies live Ollama access")
+            print("\(tag) [skip] SKIPPED: managed sandbox denies live Ollama access \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
 
         let backend = OllamaBackend()
         guard let kind = backend.installKind else {
-            print("\(tag) [skip] SKIPPED: Ollama is not installed (no Ollama.app, no ollama CLI)")
+            print("\(tag) [skip] SKIPPED: Ollama is not installed (no Ollama.app, no ollama CLI) \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         guard backend.serverResponds() else {
             print("\(tag) [skip] SKIPPED: Ollama (\(kind.rawValue)) is installed but \(backend.baseURL.absoluteString) "
-                  + "is not answering /api/version")
+                  + "is not answering /api/version \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         print("\(tag) server: \(backend.baseURL.absoluteString) (\(kind.rawValue) install)")
@@ -41,7 +46,7 @@ enum OllamaLiveBackendGate {
             return false
         }
         guard !models.isEmpty else {
-            print("\(tag) [skip] SKIPPED: Ollama reports no usable local chat models")
+            print("\(tag) [skip] SKIPPED: Ollama reports no usable local chat models \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         let names = models.map(\.ref.modelID)

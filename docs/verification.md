@@ -95,8 +95,11 @@ The tier table above predates these gates and does not list them; they run in th
 here. Each deterministic gate and the GUI gate carries built-in negative controls: deliberately
 broken variants (mutants) of the code under test, run inside the gate, each of which the gate must
 catch or it fails. The two services gates use a real Ollama and have no mutants; they abstain with a
-`[skip] ... SKIPPED` line when Ollama, or the model they need, is absent, and never unload a model
-they did not load.
+`[skip] ... SKIPPED: <reason> [precondition-missing]` line when Ollama, or the model they need, is
+absent, which verify.sh counts as SKIP, never PASS, and never unload a model they did not load.
+`--ollama-live`'s two load/unload abstains (every usable model already resident; the target does not
+fit the budget) are partial: its catalog checks ran and print PASS, so that line has no marker and is
+still counted as SKIP.
 
 | Flag | Tier | What it asserts | Negative controls (each must be caught) |
 | --- | --- | --- | --- |

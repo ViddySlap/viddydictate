@@ -10,7 +10,8 @@ import Foundation
 /// is missing: a managed sandbox, no Ollama installed, a server that does not answer, or no `gemma4:e4b`.
 /// It also abstains when `gemma4:e4b` is already resident, because its 20 s window would cut short a
 /// model someone else loaded; and when the capacity guard refuses the load, which is the guard working,
-/// not a transform failing. Every claim about a model it did run is blocking.
+/// not a transform failing. Every claim about a model it did run is blocking. Every abstain carries
+/// `SelfTestAbstain.preconditionMissingMarker`, so verify.sh counts it as SKIP and its meta-gate covers it.
 enum OllamaLiveTransformsGate {
     private static let tag = "[ollama-transforms-live]"
     private static let model = "gemma4:e4b"
@@ -22,16 +23,16 @@ enum OllamaLiveTransformsGate {
         let environment = ProcessInfo.processInfo.environment
         if environment["CODEX_SANDBOX"]?.isEmpty == false
             || environment["CODEX_PERMISSION_PROFILE"]?.isEmpty == false {
-            print("\(tag) [skip] SKIPPED: managed sandbox denies live Ollama access")
+            print("\(tag) [skip] SKIPPED: managed sandbox denies live Ollama access \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         let backend = OllamaBackend.shared
         guard backend.isInstalled() else {
-            print("\(tag) [skip] SKIPPED: Ollama is not installed (no Ollama.app, no ollama CLI)")
+            print("\(tag) [skip] SKIPPED: Ollama is not installed (no Ollama.app, no ollama CLI) \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         guard backend.serverResponds() else {
-            print("\(tag) [skip] SKIPPED: Ollama is installed but \(backend.baseURL.absoluteString) is not answering")
+            print("\(tag) [skip] SKIPPED: Ollama is installed but \(backend.baseURL.absoluteString) is not answering \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         guard let models = backend.installedModels() else {
@@ -40,7 +41,7 @@ enum OllamaLiveTransformsGate {
         }
         let wanted = OllamaBackend.canonicalModelName(model)
         guard models.contains(where: { OllamaBackend.canonicalModelName($0.ref.modelID) == wanted }) else {
-            print("\(tag) [skip] SKIPPED: \(model) is not pulled in Ollama")
+            print("\(tag) [skip] SKIPPED: \(model) is not pulled in Ollama \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         guard let before = backend.residentModels() else {
@@ -49,7 +50,7 @@ enum OllamaLiveTransformsGate {
         }
         if before.contains(where: { OllamaBackend.canonicalModelName($0.ref.modelID) == wanted }) {
             print("\(tag) [skip] SKIPPED: \(model) is already resident; a 20 s window would cut short a model "
-                  + "this gate did not load")
+                  + "this gate did not load \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
 
@@ -64,7 +65,7 @@ enum OllamaLiveTransformsGate {
         }
         if case .unavailable(let reason) = cleanup,
            reason == CleanupClient.overBudgetMessage || reason == CleanupClient.memoryFactsUnavailableMessage {
-            print("\(tag) [skip] SKIPPED: the capacity guard refused \(model) (\(reason))")
+            print("\(tag) [skip] SKIPPED: the capacity guard refused \(model) (\(reason)) \(SelfTestAbstain.preconditionMissingMarker)")
             return true
         }
         passed = check("cleanup", cleanup) && passed
