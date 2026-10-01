@@ -450,7 +450,7 @@ enum FeatureTourRenderCases {
         var problems: [String] = []
         var lowest: (CGFloat, String)?
         for case let field as NSTextField in SelfTestRenderCapture.allViews(in: view)
-        where !field.isHidden && !field.stringValue.isEmpty && field.frame.width > 1 {
+        where !field.isHiddenOrHasHiddenAncestor && !field.stringValue.isEmpty && field.frame.width > 1 {
             let value = SelfTestRenderCapture.textContrast(field)
             let who = "\(SelfTestRenderCapture.owner(of: field)) \"\(field.stringValue.prefix(24))\""
             if value < minimumTextContrast { problems.append("\(who) \(ratio(value))") }
@@ -466,7 +466,7 @@ enum FeatureTourRenderCases {
         -> (problems: [String], summary: String) {
         var problems: [String] = []
         var seen: [String] = []
-        for case let button as NSButton in SelfTestRenderCapture.allViews(in: view) where !button.isHidden {
+        for case let button as NSButton in SelfTestRenderCapture.allViews(in: view) where !button.isHiddenOrHasHiddenAncestor {
             let who = SelfTestRenderCapture.owner(of: button)
             guard !button.title.trimmingCharacters(in: .whitespaces).isEmpty else {
                 problems.append("\(who) has no title")
