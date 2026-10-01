@@ -400,7 +400,14 @@ enum PointOfUseOfferRender {
 
     /// No text field may be shorter than the text it was given. The copy names a real model id and a real
     /// vendor error, and neither has a length this panel gets to assume.
+    ///
+    /// It measures what would be DRAWN, so it first runs the layout pass AppKit runs before any draw. An
+    /// `OfferCell` places its labels in `layout()`, so a page rendered again after the last capture (the
+    /// running page goes failed -> installing -> failed) holds brand-new cells whose labels still have the
+    /// frames `NSTextField(labelWithString: "")` gave them: a few points wide and 16 tall. Measured in that
+    /// state, "Retry" needs 77 pt one letter per line and the check reports a clip no screen can show.
     private static func assertNotClipped(in view: NSView, label: String) {
+        view.layoutSubtreeIfNeeded()
         var clipped: [String] = []
         for candidate in SelfTestRenderCapture.allViews(in: view) {
             guard let field = candidate as? NSTextField, !field.stringValue.isEmpty,

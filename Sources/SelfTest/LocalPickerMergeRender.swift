@@ -114,8 +114,12 @@ enum LocalPickerMergeRenderCases {
             popup = SelfTestRenderCapture.find("model|email", in: view) as? NSPopUpButton
             report("routing grid: after that choice LM Studio's row is the selected one",
                    selectedRef(popup) == lmsShared, popup?.titleOfSelectedItem ?? "<none>")
+            // The routing grid marks the PIN's row "  ·  Custom" (LocalModelPickerItems.routingGrid), and the
+            // choice just made LM Studio's copy the pin, so its full title carries the qualifier, exactly as
+            // Ollama's did above.
             report("routing grid: the tooltip and the preset line follow the choice",
-                   popup?.toolTip == "LM Studio · " + lmsSharedLabel
+                   popup?.toolTip != nil && popup?.toolTip == popup?.titleOfSelectedItem
+                       && popup?.toolTip == "LM Studio · " + lmsSharedLabel + "  ·  Custom"
                        && presetLine(view).hasPrefix("Local preset: LOCAL · LM Studio · \(sharedID)"),
                    "\(popup?.toolTip ?? "nil") / \(presetLine(view))")
             choose(ollamaShared, in: popup)
