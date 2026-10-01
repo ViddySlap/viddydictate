@@ -324,8 +324,14 @@ private enum SandboxPolicy {
         (allow network-outbound (remote tcp "localhost:\(port)"))
 
         ; TLS trust evaluation may use trustd. Auth remains a file inside the dedicated CODEX_HOME.
+        ; opendirectoryd.libinfo serves user/group record lookups (getpw*/getgr*). Codex 0.158 exec syncs
+        ; its MDM-managed preferences (CFPreferencesAppSynchronize com.openai.codex) at startup, needs the
+        ; user record, and treats failure as fatal. Read-only directory query: no file, network or exec
+        ; rule; it returns no password hashes and opens no DNS. Residual: the contained process can
+        ; enumerate local user/group records.
         (allow mach-lookup
             (global-name "com.apple.SystemConfiguration.configd")
+            (global-name "com.apple.system.opendirectoryd.libinfo")
             (global-name "com.apple.trustd")
             (global-name "com.apple.trustd.agent"))
         """
@@ -348,6 +354,7 @@ private enum SandboxPolicy {
             "(subpath \(literal(roots.home)))",
             "(subpath \(literal(roots.cwd)))",
             "(subpath \(literal(roots.temp)))",
+            "(global-name \"com.apple.system.opendirectoryd.libinfo\")",
         ]
         guard required.allSatisfy(policy.contains),
               !policy.contains("(allow network-outbound"),
@@ -355,6 +362,7 @@ private enum SandboxPolicy {
             throw RunnerError.failed(
                 "quarantine containment policy is not deny-network exact")
         }
+        try auditAllowForms(policy, roots: roots, executable: executable, network: false)
         try auditBundleRead(policy, executable: executable)
         for ancestor in try metadataAncestors(
             roots: asPassedRoots, executable: executable) {
@@ -377,6 +385,7 @@ private enum SandboxPolicy {
             "(literal \"/etc/codex/requirements.toml\")",
             "(literal \"/private/etc/codex/requirements.toml\")",
             "(global-name \"com.apple.SystemConfiguration.configd\")",
+            "(global-name \"com.apple.system.opendirectoryd.libinfo\")",
             "(subpath \(literal(roots.home)))",
             "(subpath \(literal(roots.cwd)))",
             "(subpath \(literal(roots.temp)))",
@@ -396,6 +405,7 @@ private enum SandboxPolicy {
         guard networkRules == 1 else { throw RunnerError.failed("containment has ambiguous network rules") }
         let rootLiteralRules = policy.components(separatedBy: "(literal \"/\")").count - 1
         guard rootLiteralRules == 2 else { throw RunnerError.failed("containment root literal is ambiguous") }
+        try auditAllowForms(policy, roots: roots, executable: executable, network: true)
         try auditBundleRead(policy, executable: executable)
         for ancestor in try metadataAncestors(
             roots: asPassedRoots, executable: executable) {
@@ -403,6 +413,87 @@ private enum SandboxPolicy {
                 throw RunnerError.failed("containment is missing exact ancestor metadata")
             }
         }
+    }
+
+    /// The exact mach-lookup allowlist, in policy order. Every name is an exact `global-name`.
+    static let machLookupGlobalNames = [
+        "com.apple.SystemConfiguration.configd",
+        "com.apple.system.opendirectoryd.libinfo",
+        "com.apple.trustd",
+        "com.apple.trustd.agent",
+    ]
+
+    /// Structural audit shared by the network and quarantine policies, so no allowance can widen
+    /// silently: the set of `(allow <operation>` forms is exact and each appears once; the mach-lookup
+    /// form is exactly the four-name allowlist (no `global-name-prefix`, no cfprefsd, no other name);
+    /// the only write form is /dev/null plus the dedicated home and temp; the only exec is one literal.
+    static func auditAllowForms(
+        _ policy: String, roots: Roots, executable: String, network: Bool
+    ) throws {
+        guard let pattern = try? NSRegularExpression(pattern: #"\(allow\s+([^\s()]+)"#) else {
+            throw RunnerError.failed("containment allow-form audit pattern is invalid")
+        }
+        let operations = pattern.matches(
+            in: policy, range: NSRange(policy.startIndex..<policy.endIndex, in: policy)
+        ).compactMap { Range($0.range(at: 1), in: policy).map { String(policy[$0]) } }
+        var expected = [
+            "process-fork", "process-exec", "process-info*", "signal", "sysctl-read",
+            "file-read-metadata", "file-read*", "file-write*", "mach-lookup",
+        ]
+        if network { expected.append("network-outbound") }
+        guard operations.sorted() == expected.sorted() else {
+            throw RunnerError.failed("containment policy allow forms are not the exact operation set")
+        }
+        for forbidden in ["global-name-prefix", "com.apple.cfprefsd"] where policy.contains(forbidden) {
+            throw RunnerError.failed("containment mach-lookup allowance names a forbidden service or prefix")
+        }
+        let machLookup = "(allow mach-lookup "
+            + machLookupGlobalNames.map { "(global-name \(literal($0)))" }.joined(separator: " ") + ")"
+        guard let machForm = form("(allow mach-lookup", in: policy),
+              collapsedWhitespace(machForm) == machLookup else {
+            throw RunnerError.failed("containment mach-lookup allowance is not the exact four-name allowlist")
+        }
+        let write = "(allow file-write* (literal \"/dev/null\") (subpath \(literal(roots.home))) "
+            + "(subpath \(literal(roots.temp))))"
+        guard let writeForm = form("(allow file-write*", in: policy),
+              collapsedWhitespace(writeForm) == collapsedWhitespace(write) else {
+            throw RunnerError.failed("containment write allowance is not exactly /dev/null, home and temp")
+        }
+        guard let execForm = form("(allow process-exec", in: policy),
+              collapsedWhitespace(execForm)
+                == collapsedWhitespace("(allow process-exec (literal \(literal(executable))))") else {
+            throw RunnerError.failed("containment process-exec is not exactly one literal")
+        }
+    }
+
+    private static func collapsedWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).joined(separator: " ")
+    }
+
+    /// The balanced, quote-aware s-expression that starts at the first `marker`.
+    private static func form(_ marker: String, in policy: String) -> String? {
+        guard let start = policy.range(of: marker)?.lowerBound else { return nil }
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        var cursor = start
+        while cursor < policy.endIndex {
+            let character = policy[cursor]
+            if quoted {
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == "\"" { quoted = false }
+            } else if character == "\"" {
+                quoted = true
+            } else if character == "(" {
+                depth += 1
+            } else if character == ")" {
+                depth -= 1
+                if depth == 0 { return String(policy[start...cursor]) }
+            }
+            cursor = policy.index(after: cursor)
+        }
+        return nil
     }
 
     /// A bundle snapshot adds exactly its own root, read-only, to the metadata and read rules: never a
@@ -1863,12 +1954,10 @@ private func runSelftest(arguments: [String]) throws {
         policySHA256(canonicalGoldenNetworkPolicy)
     let canonicalQuarantinePolicySHA256 =
         policySHA256(canonicalGoldenQuarantinePolicy)
-    // Regenerate after deliberate policy review with:
-    // VIDDYDICTATE_PRINT_CANONICAL_POLICY_GOLDEN=1 ./scripts/verify.sh deterministic
     let expectedCanonicalNetworkPolicySHA256 =
-        "4e270fe3ee128e709490267065e4d2b81c76404a93bba49795af6d70396e0cee"
+        CanonicalPolicyGolden.expectedCanonicalNetworkPolicySHA256
     let expectedCanonicalQuarantinePolicySHA256 =
-        "bc8c019351028c7c11da56490df2f5fd9e5474d8dfdcf828c7d78832a6088d75"
+        CanonicalPolicyGolden.expectedCanonicalQuarantinePolicySHA256
     if ProcessInfo.processInfo.environment[
         "VIDDYDICTATE_PRINT_CANONICAL_POLICY_GOLDEN"] == "1" {
         print(
@@ -2161,8 +2250,172 @@ private func runAuthenticatedLoginStatusSelftest() throws {
     print("[codex-login-fixture][PASS] stderr status and exit code pass through only for login")
 }
 
+/// Pinned SHA-256 of the golden-fixture network and quarantine policies (fixture root
+/// `/private/tmp/viddydictate-codex-policy-golden`, proxy port 43117). Shared by `selftest` and
+/// `mach-lookup-policy-selftest`. Regenerate after deliberate policy review with:
+/// VIDDYDICTATE_PRINT_CANONICAL_POLICY_GOLDEN=1 ./scripts/verify.sh deterministic
+private enum CanonicalPolicyGolden {
+    static let expectedCanonicalNetworkPolicySHA256 =
+        "fa247259d221a52f97ddfbbefb78e5156f17119a7fe88b3ae2f060dcc0cd2684"
+    static let expectedCanonicalQuarantinePolicySHA256 =
+        "68d92d7bbe6de955443abade819368132a8a86f3197159a629f0879ec03a0a60"
+}
+
+/// Deterministic gate for the mach-lookup allowlist. Codex 0.158 `exec` syncs its MDM-managed
+/// preferences at startup and needs the user record, so the policy names
+/// `com.apple.system.opendirectoryd.libinfo` (Mac diagnosis 2026-10-01: necessary and sufficient).
+/// This proves the built exec and quarantine policies name exactly the four services and pass their
+/// audits, and that the audits and the pinned golden catch each widening or dropping mutant.
+private func runMachLookupPolicySelftest() throws {
+    let root = "/private/tmp/viddydictate-codex-policy-golden"
+    guard !FileManager.default.fileExists(atPath: root) else {
+        throw RunnerError.failed("fixed canonical policy fixture root already exists")
+    }
+    let fixture = try makeQuarantineRootFixture(root: root)
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let roots = Roots(home: root + "/codex-home", cwd: root + "/codex-cwd", temp: root + "/codex-tmp")
+    let executable = try canonicalExistingPath(fixture.executable)
+    let canonicalCwd = try canonicalExistingPath(roots.cwd)
+    let canonicalRoot = try canonicalExistingPath(root)
+    let network = try SandboxPolicy.build(roots: roots, executable: executable, proxyPort: 43117)
+    let quarantine = try SandboxPolicy.buildQuarantine(roots: roots, executable: executable)
+
+    func networkAuditFailure(_ policy: String) -> String? {
+        do {
+            try SandboxPolicy.audit(policy, roots: roots, executable: executable, proxyPort: 43117)
+            return nil
+        } catch {
+            return (error as? RunnerError)?.description ?? "unexpected audit error"
+        }
+    }
+    func quarantineAuditFailure(_ policy: String) -> String? {
+        do {
+            try SandboxPolicy.auditQuarantine(policy, roots: roots, executable: executable)
+            return nil
+        } catch {
+            return (error as? RunnerError)?.description ?? "unexpected audit error"
+        }
+    }
+    func sha256(_ policy: String) -> String {
+        SHA256.hash(data: Data(policy.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    func globalNames(_ policy: String) -> [String] {
+        guard let pattern = try? NSRegularExpression(pattern: #"\(global-name[^\s()]* "([^"]*)"\)"#) else {
+            return []
+        }
+        return pattern.matches(
+            in: policy, range: NSRange(policy.startIndex..<policy.endIndex, in: policy)
+        ).compactMap { Range($0.range(at: 1), in: policy).map { String(policy[$0]) } }
+    }
+    let networkGolden = CanonicalPolicyGolden.expectedCanonicalNetworkPolicySHA256
+    let quarantineGolden = CanonicalPolicyGolden.expectedCanonicalQuarantinePolicySHA256
+
+    for policy in [network, quarantine] {
+        guard globalNames(policy) == SandboxPolicy.machLookupGlobalNames,
+              policy.components(separatedBy: "(allow mach-lookup").count - 1 == 1 else {
+            throw RunnerError.failed("built policy does not name exactly the four mach-lookup services")
+        }
+    }
+    guard networkAuditFailure(network) == nil, quarantineAuditFailure(quarantine) == nil else {
+        throw RunnerError.failed("built exec or quarantine policy failed its own audit")
+    }
+    guard sha256(network) == networkGolden, sha256(quarantine) == quarantineGolden else {
+        throw RunnerError.failed("built policy does not match the pinned golden hashes")
+    }
+    print("[mach-lookup-policy-selftest][PASS] exec and quarantine policies name exactly configd, "
+        + "opendirectoryd.libinfo, trustd, trustd.agent; both pass their audits and match the golden")
+
+    // (a) Dropping libinfo: both audits fail as a missing required rule, and both hashes move.
+    let libinfoRule = "(global-name \"com.apple.system.opendirectoryd.libinfo\")"
+    func withoutLibinfo(_ policy: String) -> String {
+        policy.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.trimmingCharacters(in: .whitespaces) != libinfoRule }
+            .joined(separator: "\n")
+    }
+    let networkWithout = withoutLibinfo(network)
+    let quarantineWithout = withoutLibinfo(quarantine)
+    guard networkWithout != network, quarantineWithout != quarantine,
+          !networkWithout.contains(libinfoRule), !quarantineWithout.contains(libinfoRule),
+          networkAuditFailure(networkWithout) == "containment policy is missing a required exact rule",
+          quarantineAuditFailure(quarantineWithout)
+            == "quarantine containment policy is not deny-network exact",
+          sha256(networkWithout) != networkGolden,
+          sha256(quarantineWithout) != quarantineGolden else {
+        throw RunnerError.failed("a policy without libinfo was not refused as missing a required rule")
+    }
+    print("[mach-lookup-policy-selftest][PASS] (a) without libinfo both audits fail as a missing "
+        + "required rule and both golden hashes mismatch")
+
+    // (b) Widening the mach-lookup allowance in place or with a second form.
+    let lastName = "(global-name \"com.apple.trustd.agent\"))"
+    func insideMachForm(_ extra: String) -> (String) -> String {
+        { $0.replacingOccurrences(of: lastName, with: "(global-name \"com.apple.trustd.agent\")\n    \(extra))") }
+    }
+    func appended(_ form: String) -> (String) -> String { { $0 + "\n" + form } }
+    let widenings: [(String, (String) -> String)] = [
+        ("global-name-prefix com.apple.", insideMachForm("(global-name-prefix \"com.apple.\")")),
+        ("global-name com.apple.cfprefsd.daemon", insideMachForm("(global-name \"com.apple.cfprefsd.daemon\")")),
+        ("unlisted global-name com.apple.logd", insideMachForm("(global-name \"com.apple.logd\")")),
+        ("libinfo twice", insideMachForm(libinfoRule)),
+        ("second form for com.apple.cfprefsd.agent",
+         appended("(allow mach-lookup (global-name \"com.apple.cfprefsd.agent\"))")),
+        ("second form for an unlisted name",
+         appended("(allow mach-lookup (global-name \"com.apple.system.notification_center\"))")),
+        ("second form with a prefix", appended("(allow mach-lookup (global-name-prefix \"com.apple.\"))")),
+        ("mach-lookup wildcard operation", appended("(allow mach* (global-name \"com.apple.cfprefsd.agent\"))")),
+    ]
+    for (name, mutate) in widenings {
+        let mutatedNetwork = mutate(network)
+        let mutatedQuarantine = mutate(quarantine)
+        guard mutatedNetwork != network, mutatedQuarantine != quarantine,
+              networkAuditFailure(mutatedNetwork) != nil,
+              quarantineAuditFailure(mutatedQuarantine) != nil else {
+            throw RunnerError.failed("mach-lookup widening was accepted: \(name)")
+        }
+    }
+    print("[mach-lookup-policy-selftest][PASS] (b) \(widenings.count) mach-lookup widenings "
+        + "(global-name-prefix, cfprefsd, unlisted name, duplicate, second form, mach*) fail both audits")
+
+    // (c) The write, network and single-exec guarantees still hold beside the new allowance.
+    let networkLine = "(allow network-outbound (remote tcp \"localhost:43117\"))"
+    let execRule = "(allow process-exec (literal \"\(executable)\"))"
+    let writeOpen = "(allow file-write*\n"
+    let containment: [(String, (String) -> String, Bool)] = [
+        ("extra write form outside the roots", appended("(allow file-write* (subpath \"\(canonicalRoot)\"))"), true),
+        ("sterile cwd made writable",
+         { $0.replacingOccurrences(of: writeOpen, with: writeOpen + "    (subpath \"\(canonicalCwd)\")\n") }, true),
+        ("write-data operation", appended("(allow file-write-data (literal \"/etc/hosts\"))"), true),
+        ("file* operation", appended("(allow file* (subpath \"\(canonicalRoot)\"))"), true),
+        ("any-host network rule", appended("(allow network-outbound (remote tcp \"*:443\"))"), true),
+        ("network wildcard operation", appended("(allow network* (remote ip))"), true),
+        ("second destination in the network form",
+         { $0.replacingOccurrences(of: networkLine,
+             with: "(allow network-outbound (remote tcp \"localhost:43117\") (remote tcp \"api.openai.com:443\"))") },
+         false),
+        ("second exec form", appended("(allow process-exec (literal \"/bin/sh\"))"), true),
+        ("exec form widened",
+         { $0.replacingOccurrences(of: execRule,
+             with: "(allow process-exec (literal \"\(executable)\") (subpath \"/bin\"))") }, true),
+        ("allow default", appended("(allow default)"), true),
+    ]
+    for (name, mutate, appliesToQuarantine) in containment {
+        let mutatedNetwork = mutate(network)
+        guard mutatedNetwork != network, networkAuditFailure(mutatedNetwork) != nil else {
+            throw RunnerError.failed("containment widening was accepted: \(name)")
+        }
+        guard appliesToQuarantine else { continue }
+        let mutatedQuarantine = mutate(quarantine)
+        guard mutatedQuarantine != quarantine, quarantineAuditFailure(mutatedQuarantine) != nil else {
+            throw RunnerError.failed("quarantine containment widening was accepted: \(name)")
+        }
+    }
+    print("[mach-lookup-policy-selftest][PASS] (c) \(containment.count) write, network and exec "
+        + "widenings still fail the audits")
+}
+
 private func usage() {
-    fputs("Usage: CodexContainmentRunner preflight|quarantine|audit|selftest|audit-login-selftest|exec ...\n", stderr)
+    fputs("Usage: CodexContainmentRunner preflight|quarantine|audit|selftest|audit-login-selftest|"
+        + "mach-lookup-policy-selftest|exec ...\n", stderr)
 }
 
 do {
@@ -2175,6 +2428,9 @@ do {
     case "selftest": try runSelftest(arguments: arguments); exit(0)
     case "audit-login-selftest":
         try runAuthenticatedLoginStatusSelftest()
+        exit(0)
+    case "mach-lookup-policy-selftest":
+        try runMachLookupPolicySelftest()
         exit(0)
     case "fixture": try runFixture(arguments: arguments); exit(0)
     case "watchdog-fixture": try runWatchdogFixture(arguments: arguments)

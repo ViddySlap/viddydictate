@@ -602,6 +602,9 @@ tier_deterministic() {
         run_gate deterministic "Codex authenticated login runner passthrough fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$CODEX_RUNNER" audit-login-selftest || true
+        run_gate deterministic "Codex containment mach-lookup allowlist and policy-widening mutants selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$CODEX_RUNNER" mach-lookup-policy-selftest || true
         run_gate deterministic "Codex S2 login AUTH-GATE fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$CODEX_AUDIT" --login-gate-selftest || true
