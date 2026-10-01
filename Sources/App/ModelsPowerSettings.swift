@@ -142,6 +142,10 @@ struct CodexBundleCASResult: Equatable {
 final class ModelsPowerSettingsStore {
     static let didChange = Notification.Name("VDModelsPowerSettingsDidChange")
     typealias Writer = (Data, URL) throws -> Void
+    /// The machine's Local capacity facts for a measured catalog. Production reads the live kernel
+    /// (`liveLocalCapacity`); a self-test injects fixed facts so a fit decision cannot depend on
+    /// whatever else happens to be resident on the box running it.
+    typealias LocalCapacityProvider = ([LMStudioModelOption]?) -> LLMLocalCapacityFacts?
 
     static let shared: ModelsPowerSettingsStore = {
         let url = AppPaths.applicationSupportDirectory()
@@ -152,6 +156,7 @@ final class ModelsPowerSettingsStore {
     private let lock = NSLock()
     private let url: URL
     private let writer: Writer
+    private let localCapacity: LocalCapacityProvider
     private var snapshot: ModelsPowerSnapshot
     private var mutationBlockDetail: String?
     private var pendingLegacyCustomRememberedBundles: [LLMProvider: LLMProviderBundle]
@@ -167,9 +172,11 @@ final class ModelsPowerSettingsStore {
     private var localModelOptions: [LMStudioModelOption]?
 
     init(url: URL, legacy: ModelsPowerLegacyState = .empty,
-         writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter) {
+         writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter,
+         localCapacity: @escaping LocalCapacityProvider = ModelsPowerSettingsStore.liveLocalCapacity) {
         self.url = url
         self.writer = writer
+        self.localCapacity = localCapacity
         let fileExists = FileManager.default.fileExists(atPath: url.path)
         pendingLegacyCustomRememberedBundles = fileExists
             ? [:] : legacy.sharedCustomRememberedBundles
@@ -350,7 +357,32 @@ final class ModelsPowerSettingsStore {
             },
             availability: { availabilityState(for: $0) },
             localModels: localModels,
-            localCapacity: Self.liveLocalCapacity(models: localModels),
+            localCapacity: localCapacity(localModels),
+            localFailure: Self.localCapacityRefusal(
+                in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
+            failedProviders: failedProviders)
+    }
+
+    /// Resolve `route` as if its Local choice were the pin, whatever provider is actually selected. For a
+    /// leg that can only ever run on Local (web-search retrieval is an LM Studio tool loop) while its route
+    /// can still be pinned to Claude or Codex by the header's global action. The Local choice is the
+    /// remembered Local bundle, else a Local `fallback`, else the tested Local default; it goes through the
+    /// SAME policy a Local pin gets - configured model if installed and it fits, else the largest installed
+    /// model that fits, the one-step overBudget retry - and B16 keeps a Local pin from ever climbing into
+    /// a cloud provider, so the result is a Local bundle or `.off`. Read-only, like `resolveRoute`.
+    func resolveLocalRoute(_ route: LLMRouteID, fallback: LLMProviderBundle? = nil,
+                           failedProviders: [LLMProvider: String] = [:],
+                           failedLocalModelID: String? = nil) -> LLMRouteResolution {
+        let localModels = availableLocalModelOptions()
+        let pin = rememberedBundle(for: .local, route: route)
+            ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
+            ?? LLMProviderDefaults.testedBundle(for: .local, route: route)!
+        return LLMAvailabilityRouting.resolve(
+            pin: pin,
+            bundle: { $0 == .local ? pin : nil },
+            availability: { availabilityState(for: $0) },
+            localModels: localModels,
+            localCapacity: localCapacity(localModels),
             localFailure: Self.localCapacityRefusal(
                 in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
             failedProviders: failedProviders)
@@ -375,7 +407,7 @@ final class ModelsPowerSettingsStore {
     /// no process spawn). Any of the three being unreadable, or no local catalog measured yet, means
     /// "do not filter" (nil) rather than a facts struct that would refuse everything with fabricated
     /// zeros.
-    private static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
+    static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)

@@ -408,6 +408,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .ollamaLive: .init(tier: .services) { _ in
         OllamaLiveBackendGate.run() ? 0 : 1
     },
+    // Scratch-only: real ModelsPowerSettingsStores under a fresh temporary directory with an injected Local
+    // catalog and availability. No LM Studio, no model, no live preferences; negative controls built in.
+    .searchRetrievalLocalOnlySelftest: .init(tier: .deterministic) { _ in
+        SearchRetrievalLocalOnlyFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

@@ -112,6 +112,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S2b (G9): the same backend against the real Ollama on this Mac. Services tier; abstains
     // when Ollama is absent or not answering.
     case ollamaLive = "--ollama-live"
+    // The Option+L retrieval leg only ever hands LM Studio a Local model id, even after the header's
+    // global provider action pins .searchRetrieval to Claude or Codex. Scratch stores, built-in mutants.
+    case searchRetrievalLocalOnlySelftest = "--search-retrieval-local-only-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

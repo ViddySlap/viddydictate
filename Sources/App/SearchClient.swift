@@ -169,16 +169,27 @@ enum SearchClient {
     /// The Local model id the retrieval leg hands LM Studio — the single measuring point both call
     /// sites below (`agenticLoop`'s `lmChat` and `localAnswerSync`'s residency prep) read instead of
     /// `Settings.searchModel` directly, so "what will retrieval actually ask for" is one testable
-    /// question. Returns the raw configured scalar verbatim today; this seam changes no behavior.
+    /// question. It resolves the `.searchRetrieval` route rather than reading the scalar (7b704b0).
     ///
     /// `store` is an injectable measuring point, not a fix: a future route-resolution change can read
     /// it instead of reaching for the global `Settings.modelsPower` directly, so a self-test can hand
     /// this a `freshStore()` fixture the way `runPreference()`/`runRetry()` already do for
     /// `ModelsPowerSettingsStore.resolveRoute`. Both call sites below call this with no argument, so
     /// they keep resolving against the real, live store; only a test supplies anything else.
+    ///
+    /// Only a LOCAL model is ever handed onward. Retrieval is an LM Studio tool loop with no card of its
+    /// own, but `.searchRetrieval` carries Claude and Codex bundles like every route, and the header's
+    /// "Set every provider-capable route to its tested default" action (`applyGlobalProvider`) pins it to
+    /// them. When the route resolves to anything but Local, the route's Local choice is resolved instead
+    /// (`resolveLocalRoute`), through the same capacity-aware policy a Local pin gets, so a small Mac still
+    /// lands on an installed model that fits. `Settings.searchModel` stays the answer only when there is no
+    /// Local route at all (off), as before. Gated by `--search-retrieval-local-only-selftest`.
     static func retrievalModelID(store: ModelsPowerSettingsStore = Settings.modelsPower) -> String {
-        store.resolveRoute(.searchRetrieval, fallback: .local(Settings.searchModel)).bundle?.modelID
-            ?? Settings.searchModel
+        let fallback = LLMProviderBundle.local(Settings.searchModel)
+        let resolution = store.resolveRoute(.searchRetrieval, fallback: fallback)
+        let local = resolution.bundle?.provider == .local
+            ? resolution : store.resolveLocalRoute(.searchRetrieval, fallback: fallback)
+        return local.bundle?.modelID ?? Settings.searchModel
     }
 
     /// Run the qwen tool-calling loop and return the union of retrieved results (or a failure). Mirrors
