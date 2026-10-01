@@ -579,6 +579,9 @@ tier_deterministic() {
         run_gate deterministic "Codex CLI location, bundle snapshot addressing, and retention" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --codex-cli-location-selftest || true
+        run_gate deterministic "Codex not-found vs could-not-be-sandboxed sentences on every surface" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --codex-boundary-sentence-selftest || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

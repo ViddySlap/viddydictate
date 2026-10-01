@@ -174,15 +174,28 @@ enum CodexProviderRuntime {
         let stderrOverflow: Bool
     }
 
+    /// The two refusals a user can tell apart and act on. `notFound` is raised in exactly one place:
+    /// no `CodexCLILocation` candidate holds an executable. Everything after a candidate exists
+    /// (identity, signature, snapshot, quarantine, containment) is `notSandboxed`, the default, so a
+    /// new refusal can never be mislabelled "not found" by omission.
+    enum BoundaryRefusalKind: Equatable {
+        case notFound
+        case notSandboxed
+    }
+
     struct BoundaryError: Error, CustomStringConvertible {
+        /// Operator cause. Never shown to the user; logged, and printed by the provider smoke.
         let description: String
         // The S1 script predates the production runtime and has a frozen operator-facing error surface.
         // This alternate wording changes presentation only; both callers execute the same failing check.
         let preflightDescription: String?
+        let kind: BoundaryRefusalKind
 
-        init(description: String, preflightDescription: String? = nil) {
+        init(description: String, preflightDescription: String? = nil,
+             kind: BoundaryRefusalKind = .notSandboxed) {
             self.description = description
             self.preflightDescription = preflightDescription
+            self.kind = kind
         }
     }
 
@@ -232,42 +245,70 @@ enum CodexProviderRuntime {
             .appendingPathComponent("Contents/Helpers/CodexContainmentRunner", isDirectory: false).path
     }
 
-    /// ADR 0020. The one user-facing sentence for a boundary refusal. Operator detail goes to the log
-    /// where Ben can read it; this is what a user can actually act on. It is an app-authored literal
-    /// with no provider or transport text in it, which is why CleanupClient allowlists it for verbatim
-    /// display instead of collapsing it to the bare category.
+    /// ADR 0020 as amended (DRAFT, for Ben): exactly two user-facing sentences for a boundary
+    /// refusal, one per `BoundaryRefusalKind`. The single sentence that preceded them said "could not
+    /// be sandboxed" for a CLI that was simply not at its pinned path, and hid a two-week outage behind
+    /// a cause that was false. Operator detail goes to the log and to the provider smoke; these are
+    /// what a user can act on. Both are app-authored literals with no provider or transport text in
+    /// them, which is why CleanupClient allowlists them for verbatim display.
     static let sandboxUnverifiedMessage =
         "Codex could not be sandboxed after a Codex update. Claude and local models still work."
+    static let codexNotFoundMessage =
+        "Codex was not found in ChatGPT.app. Claude and local models still work."
+
+    /// The user-facing sentence for any boundary failure. Only a `.notFound` BoundaryError reads as not
+    /// found; every other error, including an unexpected one, reads as not sandboxed.
+    static func userSentence(forBoundaryRefusal error: Error) -> String {
+        if let boundary = error as? BoundaryError, boundary.kind == .notFound {
+            return codexNotFoundMessage
+        }
+        return sandboxUnverifiedMessage
+    }
+
+    /// The operator-facing cause: what actually refused, for the log and the provider smoke.
+    static func operatorCause(forBoundaryRefusal error: Error) -> String {
+        if let boundary = error as? BoundaryError {
+            return boundary.description
+                + (boundary.preflightDescription.map { " (\($0))" } ?? "")
+        }
+        if let isolation = error as? CodexIsolationError { return isolation.description }
+        return "unexpected boundary error"
+    }
 
     /// Records the operator-facing cause of a boundary refusal and returns the user-facing sentence.
     static func recordedBoundaryRefusal(_ error: Error) -> String {
-        if let boundary = error as? BoundaryError {
-            Log.write("[codex-boundary] refused: \(boundary.description)"
-                      + (boundary.preflightDescription.map { " (\($0))" } ?? ""))
-            return sandboxUnverifiedMessage
-        }
-        if let isolation = error as? CodexIsolationError {
-            Log.write("[codex-boundary] refused: \(isolation.description)")
-            return sandboxUnverifiedMessage
-        }
-        Log.write("[codex-boundary] refused: unexpected boundary error")
-        return sandboxUnverifiedMessage
+        Log.write("[codex-boundary] refused: \(operatorCause(forBoundaryRefusal: error))")
+        return userSentence(forBoundaryRefusal: error)
     }
 
     static let deviceLoginArguments = ["login", "--device-auth"]
 
-    static func connectionState(runnerPath: String = bundledRunnerPath) -> CodexConnectionState {
+    /// The connection state plus, when the boundary refused, the operator cause. `Log.write` only
+    /// enqueues, so a tool that exits right after a refusal loses the log line; tools print this.
+    struct ConnectionReport {
+        let state: CodexConnectionState
+        let operatorCause: String?
+    }
+
+    static func connectionReport(runnerPath: String = bundledRunnerPath) -> ConnectionReport {
         do {
             let paths = try CodexIsolationFoundation.productionPaths()
             try CodexIsolationFoundation.prepareDirectories(paths)
-            return try CodexIsolationFoundation.withExclusiveBoundaryLock(paths: paths) {
+            let state = try CodexIsolationFoundation.withExclusiveBoundaryLock(paths: paths) {
                 let receipt = try prepareAndAuditBoundary(
                     paths: paths, runnerPath: runnerPath)
                 return try rawConnectionState(paths: paths, receipt: receipt)
             }
+            return ConnectionReport(state: state, operatorCause: nil)
         } catch {
-            return .unavailable(recordedBoundaryRefusal(error))
+            return ConnectionReport(
+                state: .unavailable(recordedBoundaryRefusal(error)),
+                operatorCause: operatorCause(forBoundaryRefusal: error))
         }
+    }
+
+    static func connectionState(runnerPath: String = bundledRunnerPath) -> CodexConnectionState {
+        connectionReport(runnerPath: runnerPath).state
     }
 
     /// Prepare the dedicated home before starting the one explicitly user-authorized device-auth flow.
@@ -524,6 +565,24 @@ enum CodexProviderRuntime {
     }
 
 #if SELFTEST
+    /// The raw refusal, so the offline suite can drive the kind-to-sentence mapping through the real
+    /// boundary entry rather than through a hand-built error.
+    static func boundaryPreparationRefusalForTest(
+        paths: CodexIsolationFoundation.Paths,
+        runnerPath: String,
+        isExecutableFile: (String) -> Bool
+    ) -> Error? {
+        do {
+            _ = try prepareAndAuditBoundary(
+                paths: paths,
+                runnerPath: runnerPath,
+                isExecutableFile: isExecutableFile)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     static func boundaryPreparationErrorForTest(
         paths: CodexIsolationFoundation.Paths,
         runnerPath: String,
@@ -675,7 +734,8 @@ enum CodexProviderRuntime {
             if case .notFound(let paths) = resolution { checked = paths }
             throw BoundaryError(
                 description: CodexCLILocation.notFoundDescription(checked: checked),
-                preflightDescription: "Codex CLI not found at any supported ChatGPT.app location")
+                preflightDescription: "Codex CLI not found at any supported ChatGPT.app location",
+                kind: .notFound)
         }
         guard runnerPath.hasPrefix("/"), isExecutableFile(runnerPath) else {
             throw BoundaryError(description: "Codex containment helper is unavailable")

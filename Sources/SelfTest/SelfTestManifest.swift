@@ -393,6 +393,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .codexCLILocationSelftest: .init(tier: .deterministic) { _ in
         CodexCLILocationSelfTest.run() ? 0 : 1
     },
+    // Pure: refusals driven through the real boundary entry with an injected probe over fake layouts,
+    // plus the pure HUD allowlist and Preflight evaluation. No Codex, no /Applications, no provider.
+    .codexBoundarySentenceSelftest: .init(tier: .deterministic) { _ in
+        CodexBoundarySentenceSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

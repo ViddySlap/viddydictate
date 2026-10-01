@@ -289,20 +289,27 @@ enum LLMProviderDetection {
                             = CodexProviderRuntime.connectionState()) -> [LLMProvider: Presence] {
         let claude = observeClaude()
 
-        let codexInstalled = FileManager.default.isExecutableFile(
-            atPath: CodexIsolationFoundation.codexBinary)
-        // The boundary audit is only meaningful when the vendor binary it audits exists; without it the
-        // honest answer is "not installed" rather than whatever the audit failed with.
-        let codexAvailability: LLMProviderAvailabilityState = codexInstalled
-            ? availability(from: codexState())
-            : .unavailable("the codex CLI is not installed")
-
+        let codexInstalled = CodexCLILocation.resolve().candidate != nil
         let local = observeLocal()
         return [
             .claude: claude,
-            .codex: Presence(installed: codexInstalled, state: codexAvailability),
+            .codex: codexPresence(cliFound: codexInstalled, state: codexInstalled ? codexState() : nil),
             .local: local.presence,
         ]
+    }
+
+    /// The Setup/Preflight row's two Codex failures stay distinct: no CLI at any supported location is
+    /// "not installed" (install ChatGPT.app), while a CLI the boundary could not sandbox is "installed
+    /// but not usable" with the sandbox sentence. The boundary audit is only meaningful when the vendor
+    /// binary exists, and a boundary that itself reports not found (the CLI vanished mid-check) wins.
+    static func codexPresence(cliFound: Bool, state: CodexConnectionState?) -> Presence {
+        guard cliFound, let state else {
+            return Presence(installed: false, state: .unavailable("the codex CLI is not installed"))
+        }
+        if case .unavailable(let reason) = state, reason == CodexProviderRuntime.codexNotFoundMessage {
+            return Presence(installed: false, state: .unavailable(reason))
+        }
+        return Presence(installed: true, state: availability(from: state))
     }
 
     /// The single live owner for Claude connection state. Callers may pass an already-resolved
