@@ -33,7 +33,7 @@ final class StickySkillsSettingsView: NSView {
             CodexModelCatalogDiskCache.loadLastKnownGood()
         },
         localCatalogLoader: @escaping () -> [LMStudioModelOption]? = {
-            ModelResidency.availableModels()
+            LLMProviderDetection.observeLocal().models
         }
     ) {
         W = width
@@ -300,16 +300,19 @@ final class StickySkillsSettingsView: NSView {
                             x: CGFloat, y: CGFloat, width: CGFloat) -> NSPopUpButton {
         let popup = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25),
                                   pullsDown: false)
+        popup.identifier = NSUserInterfaceItemIdentifier("sticky-skill-model|\(skill.id)")
+        popup.target = self
+        popup.action = #selector(modelChanged(_:))
+        if selected.provider == .local {
+            addLocalModelItems(to: popup, skill: skill, selected: selected)
+            return popup
+        }
         var choices: [(id: String, label: String)] = []
         func append(_ id: String, _ label: String) {
             guard !id.isEmpty, !choices.contains(where: { $0.id == id }) else { return }
             choices.append((id, label))
         }
-        if selected.provider == .local {
-            for option in LMStudioModelCatalog.pickerOptions(discovered: localCatalog) {
-                append(option.modelID, option.label)
-            }
-        } else if selected.provider == .codex {
+        if selected.provider == .codex {
             for option in CodexPickerCatalog.visibleOptions(codexCatalogCache?.catalog) {
                 append(option.model, option.label)
             }
@@ -318,10 +321,8 @@ final class StickySkillsSettingsView: NSView {
             for: selected.provider, route: skill.routeID) {
             append(tested.modelID, compactModelName(tested.modelID) + " - Shipped default")
         }
-        if selected.provider != .local {
-            for option in ModeModelCatalog.options where option.provider == selected.provider {
-                append(option.modelID, ModeModelCatalog.displayName(option))
-            }
+        for option in ModeModelCatalog.options where option.provider == selected.provider {
+            append(option.modelID, ModeModelCatalog.displayName(option))
         }
         append(selected.modelID, compactModelName(selected.modelID) + " - Current")
         for choice in choices {
@@ -331,10 +332,16 @@ final class StickySkillsSettingsView: NSView {
         if let item = popup.itemArray.first(where: {
             ($0.representedObject as? String) == selected.modelID
         }) { popup.select(item) }
-        popup.identifier = NSUserInterfaceItemIdentifier("sticky-skill-model|\(skill.id)")
-        popup.target = self
-        popup.action = #selector(modelChanged(_:))
         return popup
+    }
+
+    /// The Local picker: every running local app's models from the merged catalog, named by app only when
+    /// both apps are in the list (`LocalModelPickerItems`). On one app every title is the pre-Ollama one.
+    private func addLocalModelItems(to popup: NSPopUpButton, skill: StickySkill,
+                                    selected: LLMProviderBundle) {
+        LocalModelPickerItems.populate(popup, with: LocalModelPickerItems.stickySkill(
+            catalog: localCatalog, pinned: selected,
+            tested: LLMProviderDefaults.testedBundle(for: .local, route: skill.routeID)))
     }
 
     private func effortPopup(skill: StickySkill, selected: LLMProviderBundle,
@@ -423,7 +430,13 @@ final class StickySkillsSettingsView: NSView {
               let model = sender.selectedItem?.representedObject as? String,
               !model.isEmpty else { return }
         let current = settingsStore.selectedBundle(for: skill.routeID)
-        let candidate = CodexPickerCatalog.applyingModelSelection(model, to: current)
+        // A Local row names its app as well as its id (see `LocalModelPickerItems`).
+        let candidate: LLMProviderBundle
+        if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
+            candidate = LocalModelPickerItems.applying(ref, to: current)
+        } else {
+            candidate = CodexPickerCatalog.applyingModelSelection(model, to: current)
+        }
         do {
             try settingsStore.setSelectedBundle(candidate, for: skill.routeID)
             status("Saved \(skill.name) model.")

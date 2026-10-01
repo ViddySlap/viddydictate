@@ -81,7 +81,7 @@ final class ModelsPowerSettingsView: NSView {
             CodexModelCatalogDiskCache.loadLastKnownGood()
         },
         localCatalogLoader: @escaping () -> [LMStudioModelOption]? = {
-            ModelResidency.availableModels()
+            LLMProviderDetection.observeLocal().models
         }
     ) {
         self.W = width
@@ -126,8 +126,9 @@ final class ModelsPowerSettingsView: NSView {
 
     /// Refreshes installed Local models each time Settings opens. The CLI work is never performed on
     /// the AppKit thread; the existing fallback remains visible until discovery completes. No result
-    /// is persisted, so a shared LM Studio install changing underneath the app is re-measured rather
-    /// than served from a stale cache.
+    /// is persisted, so a shared LM Studio or Ollama install changing underneath the app is re-measured
+    /// rather than served from a stale cache. The loader is the merged, app-tagged catalog
+    /// (`LLMProviderDetection.observeLocal`), which starts no app.
     func refreshAvailableLocalModels() {
         guard !localCatalogRefreshInFlight else { return }
         localCatalogRefreshInFlight = true
@@ -578,31 +579,29 @@ final class ModelsPowerSettingsView: NSView {
     private func modelPopup(route: LLMRouteID, selected: LLMProviderBundle,
                             x: CGFloat, y: CGFloat, width: CGFloat) -> NSPopUpButton {
         let p = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25), pullsDown: false)
-        var choices: [(model: String, label: String)] = []
+        p.identifier = NSUserInterfaceItemIdentifier("model|\(route.rawValue)")
+        p.target = self
+        p.action = #selector(modelChanged(_:))
         if selected.provider == .local {
-            for option in LMStudioModelCatalog.pickerOptions(discovered: localCatalog) {
-                if !choices.contains(where: { $0.model == option.modelID }) {
-                    choices.append((option.modelID, option.label))
-                }
-            }
-        } else if selected.provider == .codex {
+            addLocalModelItems(to: p, route: route, selected: selected)
+            return p
+        }
+        var choices: [(model: String, label: String)] = []
+        if selected.provider == .codex {
             for option in CodexPickerCatalog.visibleOptions(codexCatalogCache?.catalog) {
                 if !choices.contains(where: { $0.model == option.model }) {
                     choices.append((option.model, option.label))
                 }
             }
         }
-        if selected.provider != .local,
-           let tested = LLMProviderDefaults.testedBundle(for: selected.provider, route: route) {
+        if let tested = LLMProviderDefaults.testedBundle(for: selected.provider, route: route) {
             if !choices.contains(where: { $0.model == tested.modelID }) {
                 choices.append((tested.modelID, compactModelName(tested.modelID)))
             }
         }
-        if selected.provider != .local {
-            for candidate in ModeModelCatalog.options where candidate.provider == selected.provider {
-                if !choices.contains(where: { $0.model == candidate.modelID }) {
-                    choices.append((candidate.modelID, compactModelName(candidate.modelID)))
-                }
+        for candidate in ModeModelCatalog.options where candidate.provider == selected.provider {
+            if !choices.contains(where: { $0.model == candidate.modelID }) {
+                choices.append((candidate.modelID, compactModelName(candidate.modelID)))
             }
         }
         if !selected.modelID.isEmpty,
@@ -629,10 +628,15 @@ final class ModelsPowerSettingsView: NSView {
                 p.select(item)
             }
         }
-        p.identifier = NSUserInterfaceItemIdentifier("model|\(route.rawValue)")
-        p.target = self
-        p.action = #selector(modelChanged(_:))
         return p
+    }
+
+    /// The Local picker: every running local app's models from the merged catalog, named by app only when
+    /// both apps are in the list (`LocalModelPickerItems`). On one app every title is the pre-Ollama one.
+    private func addLocalModelItems(to p: NSPopUpButton, route: LLMRouteID, selected: LLMProviderBundle) {
+        LocalModelPickerItems.populate(p, with: LocalModelPickerItems.routingGrid(
+            catalog: localCatalog, pinned: selected,
+            tested: LLMProviderDefaults.testedBundle(for: .local, route: route)))
     }
 
     private func effortPopup(route: LLMRouteID, selected: LLMProviderBundle,
@@ -817,8 +821,15 @@ final class ModelsPowerSettingsView: NSView {
     @objc private func modelChanged(_ sender: NSPopUpButton) {
         guard let route = Self.routeFrom(sender.identifier, prefix: "model|"),
               let id = sender.selectedItem?.representedObject as? String, !id.isEmpty else { return }
-        let bundle = CodexPickerCatalog.applyingModelSelection(
-            id, to: settingsStore.selectedBundle(for: route))
+        let current = settingsStore.selectedBundle(for: route)
+        // A Local row names its app as well as its id; the id alone cannot tell LM Studio's copy of a model
+        // from Ollama's.
+        let bundle: LLMProviderBundle
+        if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
+            bundle = LocalModelPickerItems.applying(ref, to: current)
+        } else {
+            bundle = CodexPickerCatalog.applyingModelSelection(id, to: current)
+        }
         do {
             try settingsStore.setSelectedBundle(bundle, for: route)
             status("Saved \(Self.displayName(for: route)) model \(compactModelName(id)).")

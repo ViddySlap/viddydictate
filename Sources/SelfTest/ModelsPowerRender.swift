@@ -9,7 +9,9 @@ import Cocoa
 ///   - `prompt-row-default.png`    — no override: Reset prompt is present but disabled.
 ///   - `prompt-row-customized.png` — an override in place: the row reads Customized, Reset is enabled.
 ///   - `prompt-row-reset.png`      — after clicking Reset: back to Tested default, model/effort untouched.
-/// plus `prompt-editor-customized.png` / `prompt-editor-restored.png` for the sheet's Restore control.
+/// plus `prompt-editor-customized.png` / `prompt-editor-restored.png` for the sheet's Restore control, and
+/// `local-picker-one-app.png` / `local-picker-two-apps.png` for the Local picker over one and both local apps
+/// (`LocalPickerMergeRenderCases`, which also prints each menu as `[menu]` lines).
 /// It asserts by pixel metric that every capture is non-blank, so a silently empty render cannot pass as
 /// a screenshot, and by store state that the click did the product thing.
 enum ModelsPowerRender {
@@ -97,6 +99,8 @@ enum ModelsPowerRender {
 
         captureProvenanceRow(routing: routing, view: view, outDir: outDir)
         captureCustomModeWorkstation(outDir: outDir)
+        // Ollama lane S3b: the Local picker over a one-app and a two-app catalog, menus dumped as [menu] lines.
+        LocalPickerMergeRenderCases.runRoutingGrid(outDir: outDir) { name, ok, detail in check(name, ok, detail) }
 
         view.removeFromSuperview()
         print("[models-power-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")

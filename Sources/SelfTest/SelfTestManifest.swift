@@ -423,6 +423,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localPresenceSelftest: .init(tier: .deterministic) { _ in
         LocalPresenceFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure: the picker rows the routing grid and the Sticky Skill cards build, against the pre-Ollama picker
+    // logic on the same inputs. No view, no store, no LM Studio, no Ollama. The AppKit half is photographed
+    // by --models-power-render and --sticky-skills-render.
+    .localPickerMergeSelftest: .init(tier: .deterministic) { _ in
+        LocalPickerMergeFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

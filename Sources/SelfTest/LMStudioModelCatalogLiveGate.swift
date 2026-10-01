@@ -1,6 +1,7 @@
 import Foundation
 
-/// Live S4 gate. It exercises the same `ModelResidency.availableModels` entry point Settings uses.
+/// Live S4 gate. It exercises the `lms ls` catalog read behind Settings' Local picker: `ModelResidency`'s
+/// parse, which Settings now reaches through `LMStudioBackend` in `LLMProviderDetection.observeLocal`.
 /// A managed Codex seatbelt cannot reach the shared LM Studio server, so that environment abstains
 /// explicitly and unsandboxed release verification runs the real assertion.
 enum LMStudioModelCatalogLiveGate {

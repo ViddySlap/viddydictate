@@ -23,7 +23,9 @@ import Cocoa
 ///   - `stickyskills-tab-two-skills.png`    - two collapsed cards, the ordinary steady state.
 ///   - `stickyskills-tab-both-expanded.png` - both cards' Advanced open: the worst case for height.
 ///   - `stickyskills-tab-after-remove.png`  - Remove clicked: back to the built-in alone.
-/// plus per-card captures of the built-in and of a user skill collapsed and expanded.
+/// plus per-card captures of the built-in and of a user skill collapsed and expanded, and
+/// `stickyskills-local-picker-one-app.png` / `stickyskills-local-picker-two-apps.png` for the Local picker over
+/// one and both local apps (`LocalPickerMergeRenderCases`, which also prints each menu as `[menu]` lines).
 ///
 /// Every capture is asserted non-blank by pixel metric AND re-read from disk and asserted to be exactly the
 /// captured surface's own size, so neither an empty frame nor a truncated write can pass as a screenshot.
@@ -236,6 +238,8 @@ enum StickySkillsTabRender {
 
         captureMissingBackingRecord(root: root, outDir: outDir)
         reportFit(measurements, available: available.height)
+        // Ollama lane S3b: the Local picker over a one-app and a two-app catalog, menus dumped as [menu] lines.
+        LocalPickerMergeRenderCases.runStickySkill(outDir: outDir) { name, ok, detail in check(name, ok, detail) }
 
         print("[sticky-skills-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)") -> \(outDir)")
         return failures == 0

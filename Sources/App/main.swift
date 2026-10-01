@@ -121,6 +121,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S3a (G6): the merged .local presence over scripted LM Studio and Ollama backends, the
     // pinned-app start (recorded, never launched), and the Preferred-local-app truth table. Built-in mutants.
     case localPresenceSelftest = "--local-presence-selftest"
+    // Ollama lane S3b: the Local model dropdown over the merged catalog, as data. One app keeps the
+    // pre-Ollama titles byte for byte; both apps are grouped and named; picks are (app, id). Built-in mutants.
+    case localPickerMergeSelftest = "--local-picker-merge-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
