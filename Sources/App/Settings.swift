@@ -99,6 +99,12 @@ enum Settings {
         // in through Settings is done, and a user who later signs out is told by the re-runnable Setup tab
         // rather than nagged at launch.
         static let providerOnboardingSatisfied = "providerOnboardingSatisfied"
+        // Feature Tour (spec D6). `featureTourSeen` is set the moment the tour first shows by itself, or on the
+        // first launch of an existing install (an upgrade gets nothing automatic). `featureTourLaunchClassified`
+        // records that the first launch which knew about the tour has decided fresh-or-existing, so a fresh
+        // install that relaunches before its tour appeared is still owed it. See `FeatureTourFirstShow`.
+        static let featureTourSeen = "featureTourSeen"
+        static let featureTourLaunchClassified = "featureTourLaunchClassified"
         // Sticky notes (Option+N): save-as destination and soft-delete retention.
         static let stickyNotesSaveDirectory = "stickyNotesSaveDirectory"
         static let stickyNotesRetention = "stickyNotesRetention"
@@ -181,6 +187,8 @@ enum Settings {
         static let keepFullHistory = false   // L4: opt-in and off by default
         static let retainDictationAudio = true
         static let providerOnboardingSatisfied = false   // a fresh install has never had a provider
+        static let featureTourSeen = false               // a fresh install has not seen the tour
+        static let featureTourLaunchClassified = false   // nor has any launch classified it yet
         static let stickyNotesRetention = StickyNotesRetention.oneDay
         static let stickyNotesCheatSheetButton = true   // the "i" cheat-sheet button exists by default
         static let inputDeviceUID = ""     // default: follow the macOS system default input device
@@ -246,6 +254,8 @@ enum Settings {
             K.keepFullHistory: Defaults.keepFullHistory,
             K.retainDictationAudio: Defaults.retainDictationAudio,
             K.providerOnboardingSatisfied: Defaults.providerOnboardingSatisfied,
+            K.featureTourSeen: Defaults.featureTourSeen,
+            K.featureTourLaunchClassified: Defaults.featureTourLaunchClassified,
             K.stickyNotesSaveDirectory: defaultStickyNotesSaveDirectory.path,
             K.stickyNotesRetention: Defaults.stickyNotesRetention.rawValue,
             K.stickyNotesCheatSheetButton: Defaults.stickyNotesCheatSheetButton,
@@ -580,6 +590,19 @@ enum Settings {
     static var providerOnboardingSatisfied: Bool {
         get { d.bool(forKey: K.providerOnboardingSatisfied) }
         set { d.set(newValue, forKey: K.providerOnboardingSatisfied) }
+    }
+
+    /// Whether the Feature Tour has opened by itself, or never will (an existing install). Read at launch only;
+    /// the menu bar item opens the tour whatever this says.
+    static var featureTourSeen: Bool {
+        get { d.bool(forKey: K.featureTourSeen) }
+        set { d.set(newValue, forKey: K.featureTourSeen) }
+    }
+
+    /// Whether a launch has already decided this install is fresh or existing for the tour (`FeatureTourFirstShow`).
+    static var featureTourLaunchClassified: Bool {
+        get { d.bool(forKey: K.featureTourLaunchClassified) }
+        set { d.set(newValue, forKey: K.featureTourLaunchClassified) }
     }
 
     // MARK: sticky notes (Option+N)

@@ -154,6 +154,13 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S5 (services): a real cleanup and email through gemma4:e4b on the live Ollama, then the
     // model unloading on its own after a 20 s window. Named so neither it nor --ollama-live contains the other.
     case ollamaTransformsLive = "--ollama-transforms-live"
+    // Ollama lane S7 (G7): the Feature Tour as data. Every built-in hotkey slot taught by some page, chords read
+    // from a remapped map, the first-show rule (fresh shows once, an upgrade is marked seen, the menu always opens
+    // it), the copy, page 6, and the practice box's relaunch state. Pure; built-in mutants.
+    case featureTourSelftest = "--feature-tour-selftest"
+    // Ollama lane S7 (G8): every tour page rendered offscreen from stubbed facts, non-blank, unclipped, with its
+    // footer and its live rows, plus pages 1 and 6 at the largest UI size. GUI tier.
+    case featureTourRender = "--feature-tour-render"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -466,6 +466,9 @@ tier_deterministic() {
         run_gate deterministic "first-run setup LM Studio/Ollama/Skip choice, Ollama plan, first-launch rule (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --first-run-setup-selftest || true
+        run_gate deterministic "Feature Tour covers every built-in hotkey, live chords, first-show rule (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --feature-tour-selftest || true
         run_gate deterministic "first-run progress bytes, speed, no-ETA pin, and permission anchors" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --install-progress-selftest || true
@@ -806,6 +809,7 @@ tier_gui() {
         run_gui_gate "first-run component picker offscreen render" "${gui_env[@]}" "$TEST_APP" --component-picker-render "$SCRATCH/component-picker-render" || true
         run_gui_gate "point-of-use install offer offscreen render" "${gui_env[@]}" "$TEST_APP" --point-of-use-render "$SCRATCH/point-of-use-render" || true
         run_gui_gate "first-run progress and permissions offscreen render" "${gui_env[@]}" "$TEST_APP" --install-progress-render "$SCRATCH/install-progress-render" || true
+        run_gui_gate "Feature Tour pages offscreen render" "${gui_env[@]}" "$TEST_APP" --feature-tour-render "$SCRATCH/feature-tour-render" || true
         run_gui_gate "Models & Power settings UI probe" "${gui_env[@]}" "$TEST_APP" --models-power-ui-probe || true
         run_gui_gate "Models & Power prompt-override offscreen render" "${gui_env[@]}" "$TEST_APP" --models-power-render "$SCRATCH/models-power-render" || true
         run_gui_gate "consolidated Hotkeys tab offscreen render" "${gui_env[@]}" "$TEST_APP" --hotkeys-tab-render "$SCRATCH/hotkeys-tab-render" || true

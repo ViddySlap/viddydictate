@@ -470,6 +470,19 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .ollamaTransformsLive: .init(tier: .services) { _ in
         OllamaLiveTransformsGate.run() ? 0 : 1
     },
+    // Pure page data, the pure first-show rule fed by FirstRunSetupLaunchRule over hand-built snapshots, and a
+    // read of AppDelegate.swift for the menu item and launch order. No window, no Settings write. The AppKit half
+    // is --feature-tour-render.
+    .featureTourSelftest: .init(tier: .deterministic) { _ in
+        FeatureTourFixtureSelfTest.run() ? 0 : 1
+    },
+    .featureTourRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--feature-tour-render"), i + 1 < arguments.count else {
+            print("[feature-tour-render] FAIL: an output directory is required")
+            return 2
+        }
+        return FeatureTourRenderCases.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

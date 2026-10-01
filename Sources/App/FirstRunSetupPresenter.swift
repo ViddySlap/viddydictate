@@ -41,10 +41,7 @@ final class FirstRunSetupPresenter {
     /// `next` straight away otherwise. `next` is the hand-off to whatever follows setup, so a Mac that skips the
     /// window loses nothing that came after it.
     func presentOnLaunchIfNeeded(then next: @escaping () -> Void) {
-        let facts = FirstRunSetupLaunchRule.Facts(
-            snapshot: coordinator.snapshot,
-            earlierCoreOnDisk: FirstRunSetupLaunchRule.coreEnvironmentOnDisk(
-                applicationSupport: AppPaths.applicationSupportDirectory()))
+        let facts = launchFacts()
         guard FirstRunSetupLaunchRule.shouldPresent(facts) else {
             Log.write("first-run setup: not shown - core installed="
                 + "\(facts.snapshot.mandatoryCoreComplete) earlier-core-on-disk=\(facts.earlierCoreOnDisk)")
@@ -55,6 +52,18 @@ final class FirstRunSetupPresenter {
         _ = coordinator.presentSetup()
         Log.write("first-run setup: shown at launch")
         present(then: next)
+    }
+
+    /// Whether this launch will show the window, by the same rule and the same facts `presentOnLaunchIfNeeded`
+    /// reads. The Feature Tour asks it once, before anything is shown, to tell a fresh install from an existing one
+    /// (`FeatureTourFirstShow`): S8's upgrader detection, not a second one.
+    var launchShowsWindow: Bool { FirstRunSetupLaunchRule.shouldPresent(launchFacts()) }
+
+    private func launchFacts() -> FirstRunSetupLaunchRule.Facts {
+        FirstRunSetupLaunchRule.Facts(
+            snapshot: coordinator.snapshot,
+            earlierCoreOnDisk: FirstRunSetupLaunchRule.coreEnvironmentOnDisk(
+                applicationSupport: AppPaths.applicationSupportDirectory()))
     }
 
     /// The Setup tab's button. Brings an open window forward rather than opening a second.

@@ -395,8 +395,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var onboardingWC: ProviderOnboardingWindowController = {
         let controller = ProviderOnboardingWindowController()
         controller.onMeasured = { [weak self] plan in self?.recordOnboardingOutcome(plan) }
+        controller.onClose = { [weak self] in self?.onboardingClosed() }
         return controller
     }()
+    /// What follows first-run onboarding on the launch path (the Feature Tour's first show). Run once, when the
+    /// window the launch opened closes, and cleared, so a later point-of-use "Set up Claude" never sets it off.
+    private var afterLaunchOnboarding: (() -> Void)?
+    /// The Feature Tour (spec section 7). Opened at page 1 from the menu bar, and once by itself on a fresh
+    /// install's first launch (D6). It reads this launch's tap state for the practice box (D9).
+    private lazy var featureTourWC: FeatureTourWindowController = {
+        let controller = FeatureTourWindowController(hotkeysLive: { [weak self] in self?.hotkeyTapLive ?? false })
+        controller.onOpenSettings = { [weak self] tab in self?.settingsWC.show(tab: tab) }
+        return controller
+    }()
+    /// True once this launch's global key tap is installed (`startController`). False means the hotkeys are not
+    /// live in this process: the grants are missing, or they landed after launch and macOS wants a relaunch.
+    private var hotkeyTapLive = false
     private var batteryAdvisoryTimer: Timer?
     /// Safety net only (ADR 0017): it prevents no deadlock and repairs no bug. Its whole job is
     /// that the NEXT unknown hang exits non-zero, so the existing KeepAlive relaunches and
@@ -544,13 +558,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async {
             _ = DaemonInstaller.installForCurrentUser()
         }
+        // D6: decide fresh-or-existing for the Feature Tour BEFORE any window, by whether the first-run setup
+        // window is about to show. Written down now, so a fresh install that relaunches before its tour appeared
+        // is still owed it, and an upgrade is marked seen and gets nothing automatic.
+        recordFeatureTourLaunch(setupWindowShows: FirstRunSetupPresenter.shared.launchShowsWindow)
         // D8: the first-run setup window comes first, on a launch whose core is not installed
         // (`FirstRunSetupLaunchRule`). Provider sign-in follows once it closes, or at once when it is not shown.
+        // The Feature Tour comes last, once onboarding has closed or was never needed, so no two of these windows
+        // are ever on screen at once and the tour's provider page reads after the provider question is settled.
         FirstRunSetupPresenter.shared.presentOnLaunchIfNeeded { [weak self] in
-            self?.presentFirstRunOnboardingIfNeeded()
-            // TODO(S7): the feature tour's first show is handed off here, after setup and provider onboarding.
+            self?.presentFirstRunOnboardingIfNeeded { [weak self] in
+                self?.presentFeatureTourIfOwed()
+            }
         }
     }
+
+    private var featureTourState: FeatureTourFirstShow.State {
+        get { FeatureTourFirstShow.State(classified: Settings.featureTourLaunchClassified,
+                                         seen: Settings.featureTourSeen) }
+        set {
+            Settings.featureTourLaunchClassified = newValue.classified
+            Settings.featureTourSeen = newValue.seen
+        }
+    }
+
+    private func recordFeatureTourLaunch(setupWindowShows: Bool) {
+        let before = featureTourState
+        let after = FeatureTourFirstShow.classify(before, setupWindowShowsThisLaunch: setupWindowShows)
+        guard after != before else { return }
+        featureTourState = after
+        Log.write("feature tour: install classified \(after.seen ? "existing - marked seen" : "fresh - tour owed")")
+    }
+
+    /// D6's one automatic show, at the end of the launch hand-offs. Marked seen as it opens.
+    private func presentFeatureTourIfOwed() {
+        guard FeatureTourFirstShow.shouldShow(.launch, featureTourState) else { return }
+        featureTourState = FeatureTourFirstShow.shown(featureTourState)
+        Log.write("feature tour: first show")
+        featureTourWC.show(page: 0)
+    }
+
+    /// The menu bar item. Opens at page 1 whatever `featureTourSeen` says.
+    @objc private func openFeatureTour() { featureTourWC.show(page: 0) }
 
     /// First-run provider onboarding (Public V1 spec W4, item P9).
     ///
@@ -560,8 +609,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the re-runnable Setup tab owns reporting, and this owns only the one-time sign-in.
     ///
     /// It never blocks (W5): the window is ordinary and closable, and the app is fully running behind it.
-    private func presentFirstRunOnboardingIfNeeded() {
-        guard !Settings.providerOnboardingSatisfied else { return }
+    ///
+    /// `next` runs once onboarding is over for this launch: straight away when it is not shown, or when the window
+    /// it opened closes.
+    private func presentFirstRunOnboardingIfNeeded(then next: @escaping () -> Void) {
+        guard !Settings.providerOnboardingSatisfied else {
+            next()
+            return
+        }
         Preflight.observe { observation in
             let plan = ProviderOnboarding.plan(providers: observation.providers)
             DispatchQueue.main.async { [weak self] in
@@ -573,11 +628,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard ProviderOnboarding.shouldPresentFirstRun(
                     hasEverBeenSatisfied: Settings.providerOnboardingSatisfied, plan: plan) else {
                     Log.write("first-run onboarding: not shown - \(plan.logToken)")
+                    next()
                     return
                 }
+                self.afterLaunchOnboarding = next
                 self.onboardingWC.show()
             }
         }
+    }
+
+    private func onboardingClosed() {
+        let next = afterLaunchOnboarding
+        afterLaunchOnboarding = nil
+        next?()
     }
 
     private func recordOnboardingOutcome(_ plan: ProviderOnboarding.Plan) {
@@ -693,6 +756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Check for ViddyDictate Updates...",
                                 action: #selector(checkAppUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: FeatureTour.menuTitle, action: #selector(openFeatureTour), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Sticky Notes", action: #selector(openNotes), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ViddyDictate", action: #selector(quit), keyEquivalent: "q"))
@@ -753,6 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startController() {
         if controller.startMonitoring() {
+            hotkeyTapLive = true
             statusLabel.title = "Dictation: \(controller.readyHint)"
             Log.write("monitoring started — tap live")
         } else {

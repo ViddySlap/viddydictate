@@ -19,6 +19,9 @@ final class ProviderOnboardingWindowController: NSObject, NSWindowDelegate {
     /// Called with the plan each time a measurement lands, so the caller can persist "a provider was ready at
     /// least once" without this type owning that fact.
     var onMeasured: ((ProviderOnboarding.Plan) -> Void)?
+    /// Called whenever the window closes. The launch path uses it to hand off to the Feature Tour, so the two
+    /// windows never stack; any other caller may ignore it.
+    var onClose: (() -> Void)?
 
     private let observer: Observer
     private let signIn = ProviderSignInPresenter()
@@ -189,6 +192,7 @@ final class ProviderOnboardingWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         CodexConnectionController.shared.cancelDeviceLogin()
+        onClose?()
     }
 }
 
