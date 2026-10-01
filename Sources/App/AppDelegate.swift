@@ -905,6 +905,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hydrateLocalAvailability() {
         DispatchQueue.global(qos: .utility).async {
             let measured = LLMProviderDetection.observeLocal()
+            LocalResidentSetCache.primeLive(models: measured.models)
             DispatchQueue.main.async {
                 Settings.modelsPower.setLocalAvailabilityState(
                     measured.presence.state, models: measured.models)

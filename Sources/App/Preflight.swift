@@ -394,6 +394,7 @@ extension Preflight {
                 // preflight pass. The catalog is runtime-only; no model inventory enters durable settings.
                 Settings.modelsPower.setLocalAvailabilityState(
                     local.state, models: local.availableLocalModels)
+                LocalResidentSetCache.primeLive(models: local.availableLocalModels)
             }
             let helperInstalled = WebSearchBackend.isInstalled
             let keySource = SecretStore.resolveSource(.geminiAPIKey)

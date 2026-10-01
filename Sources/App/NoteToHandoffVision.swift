@@ -175,7 +175,8 @@ enum NoteToHandoffLocalVisionClient {
             func finish(_ descriptions: Descriptions?) {
                 // This helper is a third model beside the route's real model. Unload immediately after its
                 // one description call; the 5-minute TTL is a crash/failure backstop, not normal residency.
-                ModelResidency.unload(model)
+                // Through ModelManager, so routing stops counting the helper as resident (`RecentLocalLoads`).
+                ModelManager.shared.unload(model)
                 completion(descriptions)
             }
 

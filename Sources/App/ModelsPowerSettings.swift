@@ -383,24 +383,41 @@ final class ModelsPowerSettingsStore {
     /// "do not filter" (nil) rather than a facts struct that would refuse everything with fabricated
     /// zeros.
     ///
-    /// The resident set comes from `LocalResidentSetCache`, read against the same wired reading: a model
-    /// already resident costs nothing new, exactly as `ModelManager` decides. It is read only after the
-    /// kernel facts, so a Mac whose capacity is unreadable never asks LM Studio, and it never blocks
-    /// resolution: a slow or failed read is an empty set, the old arithmetic.
+    /// The resident set is `routingResidentModelIDs`, against the same wired reading: a model already
+    /// resident costs nothing new, exactly as `ModelManager` decides. It is read only after the kernel facts,
+    /// so a Mac whose capacity is unreadable never asks LM Studio, and it never blocks resolution: a slow or
+    /// failed live read adds nothing, which can only refuse more.
     static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
-        liveLocalCapacity(models: models, residents: .shared)
+        liveLocalCapacity(models: models, residents: .shared, recentLoads: ModelManager.shared.recentLoads)
     }
 
-    /// `liveLocalCapacity` over an explicit resident-set cache, so a gate can drive the whole live path with
-    /// an injected reader.
+    /// `liveLocalCapacity` over an explicit resident-set cache and load record, so a gate can drive the whole
+    /// live path with an injected reader and its own `ModelManager`.
     static func liveLocalCapacity(models: [LMStudioModelOption]?,
-                                  residents: LocalResidentSetCache) -> LLMLocalCapacityFacts? {
+                                  residents: LocalResidentSetCache,
+                                  recentLoads: RecentLocalLoads) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
         else { return nil }
         return capacityFacts(models: models, wiredBytes: wired, budgetBytes: budget,
-                             residentModelIDs: residents.residentModelIDs(wiredBytes: wired))
+                             residentModelIDs: routingResidentModelIDs(wiredBytes: wired, residents: residents,
+                                                                       recentLoads: recentLoads))
+    }
+
+    /// What routing treats as resident: what `ModelManager` itself made ready and has used inside the idle
+    /// window (`RecentLocalLoads`: a lock, no I/O, so it answers on the main thread too), together with the
+    /// live read of what LM Studio holds (`LocalResidentSetCache`, when it has a usable answer; it adds the
+    /// models another app or an earlier run loaded).
+    ///
+    /// The record is the half that cannot miss after ViddyDictate's own load: the live read is skipped on
+    /// the main thread and unusable while the wired reading still moves with that load, and on its own it
+    /// let the next resolution charge the model again (the Mac, 2026-10-01). An entry that outlived the model
+    /// is safe: routing only picks, and `ModelManager` re-checks the live resident set and the budget before
+    /// any load, refusing past the budget (see `RecentLocalLoads`).
+    static func routingResidentModelIDs(wiredBytes: UInt64, residents: LocalResidentSetCache,
+                                        recentLoads: RecentLocalLoads) -> Set<String> {
+        recentLoads.residentModelIDs().union(residents.residentModelIDs(wiredBytes: wiredBytes))
     }
 
     /// The pure half of `liveLocalCapacity`, so a gate can check the arithmetic without the kernel.

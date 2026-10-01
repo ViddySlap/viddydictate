@@ -14,6 +14,7 @@ import Foundation
 ///
 /// No "is it loaded" cache: `ensureReady` re-checks `lms ps` every call (~0.16s), so it self-corrects
 /// if a model was evicted (its own TTL, an LM Studio restart, memory pressure) with no stale state.
+/// `recentLoads` is a record kept FOR route resolution; nothing here ever decides from it.
 final class ModelManager {
     enum CapacityRefusal: Equatable {
         /// A required live fact (resident snapshot, installed size, wired reading, or wire budget)
@@ -98,13 +99,22 @@ final class ModelManager {
     /// never adopted, even when its identifier is one ViddyDictate commonly uses.
     private var ownedModels = Set<String>()
 
+    /// What this process just made ready, for route resolution's fit check (see `RecentLocalLoads`). Every
+    /// successful readiness records into it, a reuse included, and every unload ViddyDictate itself performs
+    /// (the eviction pass, `unload`, `unloadAll`) removes from it. Lock only, so routing can read it on the
+    /// main thread.
+    let recentLoads: RecentLocalLoads
+
     private enum CapacityPreparation {
         case alreadyResident
         case loadAllowed
         case refused(CapacityRefusal)
     }
 
-    init() {}
+    /// `clock` ages `recentLoads`; a gate passes its own.
+    init(clock: @escaping () -> Date = Date.init) {
+        self.recentLoads = RecentLocalLoads(clock: clock)
+    }
 
     /// The idle TTL handed to LM Studio at load time. One persisted setting governs every model role.
     func ttl(for _: String) -> Int {
@@ -155,8 +165,11 @@ final class ModelManager {
         policyLock.lock()
         defer { policyLock.unlock() }
 
+        let ttl = ttlOverrideSeconds ?? ttl(for: model)
         switch prepareCapacity(for: model, dependencies: dependencies) {
         case .alreadyResident:
+            // A use: LM Studio's idle clock restarts, so routing's does too.
+            recentLoads.recordUse(model, ttlSeconds: ttl)
             return .ready
         case .refused(let reason):
             return .capacityRefused(reason)
@@ -164,10 +177,28 @@ final class ModelManager {
             break
         }
 
-        let loaded = dependencies.ensureLoaded(model, ttlOverrideSeconds ?? ttl(for: model))
+        let loaded = dependencies.ensureLoaded(model, ttl)
         guard loaded else { return .loadFailed }
         ownedModels.insert(model)
+        recentLoads.recordUse(model, ttlSeconds: ttl)
         return .ready
+    }
+
+    // MARK: - ViddyDictate's own unloads
+
+    /// Unload one model ViddyDictate loaded for itself (the handoff vision helper after its one call).
+    /// Routing stops treating it as resident first, so a resolution racing the unload can only charge it,
+    /// never exempt it.
+    func unload(_ model: String, dependencies: CapacityDependencies = .live) {
+        recentLoads.forget(model)
+        dependencies.unload(model)
+    }
+
+    /// The Setup tab's Unload all (`lms unload --all`). Every routing record goes, whoever loaded the model.
+    /// `unloadAll` is LM Studio's own command; a gate passes a scripted one.
+    func unloadAll(unloadAll: () -> Void = { ModelResidency.unloadAll() }) {
+        recentLoads.forgetAll()
+        unloadAll()
     }
 
     /// Shared capacity preparation for the early Option+G check and the authoritative load path.
@@ -185,6 +216,9 @@ final class ModelManager {
         // Drop ownership as soon as a previously owned instance is observed absent (for example,
         // after its LM Studio TTL fires). A later foreign load with that identifier is not adopted.
         ownedModels.formIntersection(residents.map(\.identifier))
+        // The same proof ends routing's record: a model LM Studio no longer holds (its TTL fired early, the
+        // user unloaded it in LM Studio) stops counting as resident at the first read that shows it.
+        recentLoads.retainOnly(Set(residents.map(\.identifier)))
 
         // A resident request allocates nothing new. Do not re-load it (LM Studio would create :2),
         // and do not claim ownership if another caller made it resident.
@@ -229,6 +263,7 @@ final class ModelManager {
                 // Even a failed/no-op unload cannot justify a later, broader attempt. Forgetting the
                 // claim makes the safety boundary tighter; the live recheck below decides capacity.
                 ownedModels.remove(candidate.identifier)
+                recentLoads.forget(candidate.identifier)
             }
 
             // Let the wired reading catch up with the unload before the recheck reads it. Bounded, and
@@ -293,5 +328,87 @@ final class ModelManager {
                      budgetBytes: UInt64) -> Bool {
         let (total, overflow) = wiredBytes.addingReportingOverflow(incomingBytes)
         return !overflow && total <= budgetBytes
+    }
+}
+
+/// ViddyDictate's own record of the LM Studio models it just made ready, by model id: the source route
+/// resolution's fit check can read with no I/O at all.
+///
+/// Routing must not charge a resident model twice: live wired memory already holds it. Its other source,
+/// `LocalResidentSetCache`, is a live read (`lms ps`) that a main-thread resolution never waits for, and that
+/// cannot be reused right after a load because the wired reading moved by the model's size. The dictation
+/// cleanup, Option+P and Option+M resolve on the main thread, and so does `--websearch-selftest`, so after a
+/// load they all saw an empty set and charged the model again: on the Mac (2026-10-01) Option+L answered
+/// once, then stepped retrieval down to a 4B model and reported that nothing fits. This record is fed by
+/// `ModelManager` itself, so it is right there whatever thread asks.
+///
+/// - Every successful `ensureReady` records `(model id, lastUse, ttl)`, `ttl` being the idle window it handed
+///   LM Studio (the configured one, or a caller's override). A reuse of a resident model records too: the
+///   use restarts LM Studio's idle clock.
+/// - A model counts as resident while `now - lastUse < ttl`. LM Studio starts its idle clock when a request
+///   ENDS, after the `lastUse` stamped before it, so this window closes no later than LM Studio's own.
+/// - ViddyDictate's own unloads remove it (`ModelManager.unload`, `unloadAll`, the eviction pass), and so
+///   does any `ModelManager` read of `lms ps` that shows it absent.
+///
+/// A stale entry is SAFE. If LM Studio evicted the model early (memory pressure, a restart) or the user
+/// unloaded it by hand, routing may pick that model on the strength of this record, but routing only picks:
+/// `ModelManager.prepareCapacity` is still the authority for every load, reads LM Studio's live resident set,
+/// finds the model absent, budgets it as a cold load against live wired memory, runs its one eviction pass,
+/// and refuses with `.overBudget` when it still does not fit. Nothing is ever loaded past the budget on this
+/// record's say-so. The refusal is the existing `CleanupClient.overBudgetMessage`: the dictation cleanup
+/// takes its one over-budget step-down retry to the next model that fits; other routes surface the refusal.
+/// The same read drops the entry (`retainOnly`), so the next resolution is right again.
+final class RecentLocalLoads {
+    struct Entry: Equatable {
+        let lastUse: Date
+        let ttlSeconds: TimeInterval
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private let clock: () -> Date
+
+    init(clock: @escaping () -> Date = Date.init) {
+        self.clock = clock
+    }
+
+    /// `modelID` was just made ready (or reused) with `ttlSeconds` of idle window. A window of 0 or less
+    /// records nothing: no idle window is known, so routing is not told the model will stay.
+    func recordUse(_ modelID: String, ttlSeconds: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ttlSeconds > 0 else {
+            entries[modelID] = nil
+            return
+        }
+        entries[modelID] = Entry(lastUse: clock(), ttlSeconds: TimeInterval(ttlSeconds))
+    }
+
+    func forget(_ modelID: String) {
+        lock.lock()
+        entries[modelID] = nil
+        lock.unlock()
+    }
+
+    func forgetAll() {
+        lock.lock()
+        entries = [:]
+        lock.unlock()
+    }
+
+    /// A read of `lms ps` listed exactly `present`: anything else on record is gone.
+    func retainOnly(_ present: Set<String>) {
+        lock.lock()
+        entries = entries.filter { present.contains($0.key) }
+        lock.unlock()
+    }
+
+    /// The model ids still inside their idle window. Expired entries are dropped as they are seen.
+    func residentModelIDs() -> Set<String> {
+        let now = clock()
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.filter { now.timeIntervalSince($0.value.lastUse) < $0.value.ttlSeconds }
+        return Set(entries.keys)
     }
 }

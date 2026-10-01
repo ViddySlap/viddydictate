@@ -89,7 +89,8 @@ final class LocalModelsSectionView: NSView {
                         },
                         unloadAll: { completion in
                             DispatchQueue.global(qos: .utility).async {
-                                ModelResidency.unloadAll()
+                                // `lms unload --all`, and routing forgets ViddyDictate's recent loads.
+                                ModelManager.shared.unloadAll()
                                 DispatchQueue.main.async { completion() }
                             }
                         },
