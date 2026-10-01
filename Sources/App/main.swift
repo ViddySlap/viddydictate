@@ -166,6 +166,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // resolution and models-power.json are 1.1.0's byte for byte; an OLLAMA_HOST on another machine is never
     // used or sent anything. Scratch stores and a recording Ollama transport; built-in mutants.
     case staffPickFollowsAppSelftest = "--staff-pick-follows-app-selftest"
+    // A slow speech-engine warm must be visible: what the HUD and Preflight say from the daemon's
+    // /health phase fields, with an ignore-phase mutant that must be caught. Deterministic and pure.
+    case daemonWarmingHUDSelftest = "--daemon-warming-hud-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

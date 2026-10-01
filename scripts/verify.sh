@@ -627,6 +627,9 @@ tier_deterministic() {
         run_gate deterministic "daemon-install absent arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --daemon-install-selftest --only absent || true
+        run_gate deterministic "daemon warming HUD phase fixture selftest (ignore-phase mutant caught)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --daemon-warming-hud-selftest || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

@@ -489,6 +489,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .staffPickFollowsAppSelftest: .init(tier: .deterministic) { _ in
         StaffPickFollowsAppFixtureSelfTest.run() ? 0 : 1
     },
+    // Warm-up visibility: fixed /health bodies through the production parser and HUD presenter, plus
+    // two mutant presenters (ignore phase; always "starting") that must be caught. No daemon, no HUD.
+    .daemonWarmingHUDSelftest: .init(tier: .deterministic) { _ in
+        DaemonWarmingHUDFixtureSelfTest.run()
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in
