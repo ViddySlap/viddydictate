@@ -48,17 +48,20 @@ enum InstallProgress {
         case .pythonRuntime: return .packageCache
         case .transcriptionEngine, .webSearch: return .packageCache
         case .voiceModel: return .modelCache
-        case .lmStudio, .gemma, .qwen: return .vendor
+        case .lmStudio, .gemma, .qwen, .ollama, .ollamaGemma, .ollamaQwen: return .vendor
         }
     }
 
     /// Which picker rows one installer descriptor is responsible for, in the order the engine does the
-    /// work: the venv and its wheels first, then the model artifacts.
+    /// work: the venv and its wheels first, then the model artifacts. A local app or model descriptor is its
+    /// one picker row, so the revived first-run window's LM Studio and Ollama rows follow the queue's phases
+    /// (D8) instead of waiting forever for a phase nobody supplies.
     static func rows(forDescriptor id: String) -> [ComponentPicker.RowID] {
         switch id {
         case BootstrapInstallPlan.sttDaemon.id: return [.transcriptionEngine, .voiceModel]
         case BootstrapInstallPlan.webSearch.id: return [.webSearch]
-        default: return []
+        default:
+            return ComponentPicker.RowID.allCases.filter { descriptorID(for: $0) == id && $0.localApp != nil }
         }
     }
 
@@ -66,7 +69,11 @@ enum InstallProgress {
         switch row {
         case .transcriptionEngine, .voiceModel: return BootstrapInstallPlan.sttDaemon.id
         case .webSearch: return BootstrapInstallPlan.webSearch.id
-        case .pythonRuntime, .lmStudio, .gemma, .qwen: return nil
+        case .pythonRuntime: return nil
+        case .lmStudio: return BootstrapInstallPlan.lmStudio.id
+        case .ollama: return BootstrapInstallPlan.ollama.id
+        case .gemma, .qwen, .ollamaGemma, .ollamaQwen:
+            return row.localModel.map(BootstrapInstallPlan.componentID(for:))
         }
     }
 
@@ -91,9 +98,13 @@ enum InstallProgress {
         let bytesExpected: UInt64?
         /// B10: the vendor's real text, never "Setup failed. Please try again."
         let failureMessage: String?
+        /// What a running local step last reported (`BootstrapInstallCoordinator.activity(for:)`): an Ollama
+        /// pull's real bytes, or the wait for Ollama's macOS prompt. nil for every other row.
+        let activity: InstallerLocalActivity?
 
         init(id: ComponentPicker.RowID, phase: Phase, bytesCompleted: UInt64 = 0,
-             bytesExpected: UInt64? = nil, failureMessage: String? = nil) {
+             bytesExpected: UInt64? = nil, failureMessage: String? = nil,
+             activity: InstallerLocalActivity? = nil) {
             self.id = id
             self.title = ComponentPicker.title(id)
             self.phase = phase
@@ -101,6 +112,7 @@ enum InstallProgress {
             if let bytesExpected { self.bytesCompleted = min(bytesCompleted, bytesExpected) }
             else { self.bytesCompleted = bytesCompleted }
             self.failureMessage = failureMessage
+            self.activity = activity
         }
 
         /// B8: a component is usable the moment its own row lands, which is why this is a per-row
@@ -119,7 +131,22 @@ enum InstallProgress {
     /// number nobody measured - the same rule the picker follows when it says "plus LM Studio" instead
     /// of guessing.
     static func statusText(_ row: Row) -> String {
-        statusText(phase: row.phase, bytesCompleted: row.bytesCompleted, bytesExpected: row.bytesExpected)
+        if row.phase == .running {
+            switch row.activity {
+            case .awaitingApproval(let backend)?:
+                return awaitingApprovalText(backend)
+            case .bytes(let reading)?:
+                return statusText(phase: .running, bytesCompleted: reading.completed,
+                                  bytesExpected: reading.expected ?? row.bytesExpected)
+            case nil:
+                // A vendor's own installer (`lms get`, the DMG) reports no bytes. A measured size would read
+                // "0 MB of 6.9 GB" for the whole fetch, so it says what is true instead.
+                if source(for: row.id) == .vendor, row.bytesExpected != nil, row.bytesCompleted == 0 {
+                    return "installing"
+                }
+            }
+        }
+        return statusText(phase: row.phase, bytesCompleted: row.bytesCompleted, bytesExpected: row.bytesExpected)
     }
 
     /// The same words for a row that is not one of the picker's: B7's shape does not depend on where the
@@ -152,8 +179,8 @@ enum InstallProgress {
     /// from what the running step reported: real bytes from a streamed pull, or the approval wait.
     ///
     /// The point-of-use panel's running page and the Setup tab's local app rows read
-    /// `BootstrapInstallCoordinator.activity(for:)` and render through this.
-    /// TODO(S8): the revived first-run window's Ollama rows render through this too.
+    /// `BootstrapInstallCoordinator.activity(for:)` and render through this. The first-run window's rows carry
+    /// the same activity on `Row.activity` and say the same words through `statusText(_:)`.
     static func statusText(for record: BootstrapComponentRecord, activity: InstallerLocalActivity?) -> String {
         switch record.phase {
         case .pending: return waitingText
@@ -392,6 +419,7 @@ struct InstallProgressState: Equatable {
     private var phases: [ComponentPicker.RowID: InstallProgress.Phase] = [:]
     private var bytes: [ComponentPicker.RowID: UInt64] = [:]
     private var failures: [ComponentPicker.RowID: String] = [:]
+    private var activities: [ComponentPicker.RowID: InstallerLocalActivity] = [:]
     private var baselines: [String: [InstallProgress.ByteSource: UInt64]] = [:]
     private var meter = InstallSpeedMeter()
     private let sizes: ComponentPicker.SizeCatalog
@@ -409,6 +437,13 @@ struct InstallProgressState: Equatable {
         }) {
             order.append(id)
         }
+        // D8's Ollama choice, in the same shape: the app, then its models in the picker's order.
+        if plan.ollama { order.append(.ollama) }
+        for id in [ComponentPicker.RowID.ollamaGemma, .ollamaQwen] where plan.ollamaModels.contains(where: {
+            $0 == id.localModel?.modelID
+        }) {
+            order.append(id)
+        }
         self.order = order
         // B3: the runtime is already on disk inside the .app, so it is done before the queue starts.
         // Saying "waiting" about a thing that shipped would be the picker's Python disclosure undone.
@@ -420,8 +455,12 @@ struct InstallProgressState: Equatable {
     ///
     /// `time` is a monotonic timestamp; the caller owns the clock so the gate can drive minutes of
     /// download in microseconds.
+    ///
+    /// `activity` is what each running descriptor last reported (`BootstrapInstallCoordinator.activity(for:)`):
+    /// an Ollama pull's real bytes, or the approval wait. It is asked only about a row that is installing.
     mutating func apply(snapshot: BootstrapSnapshot, sampler: InstallByteSampling,
-                        at time: TimeInterval) {
+                        at time: TimeInterval,
+                        activity: (String) -> InstallerLocalActivity? = { _ in nil }) {
         let sample: [InstallProgress.ByteSource: UInt64] = [
             .packageCache: sampler.bytes(at: .packageCache),
             .modelCache: sampler.bytes(at: .modelCache),
@@ -456,6 +495,12 @@ struct InstallProgressState: Equatable {
                     // download restarting from zero, which is the exact thing B10 promises never happens.
                     bytes[row] = source == .modelCache ? now : delta
                 }
+                // A local step reports its own bytes or its wait; the caches above know nothing about it.
+                let reported = activity(record.id)
+                for row in rows where InstallProgress.source(for: row) == .vendor {
+                    activities[row] = reported
+                    if case .bytes(let reading)? = reported { bytes[row] = reading.completed }
+                }
                 // The engine does wheels first, then models, so a byte in the model cache is proof the
                 // wheel step is behind us - including the case where every wheel was already cached and
                 // the honest number for that row is zero.
@@ -477,7 +522,7 @@ struct InstallProgressState: Equatable {
                     }
                 }
             case .installed:
-                for row in rows { phases[row] = .done; failures[row] = nil }
+                for row in rows { phases[row] = .done; failures[row] = nil; activities[row] = nil }
             case .failed:
                 // B10: the row that was actually running takes the failure and shows the real text. A
                 // row that had already landed stays landed - one row failing does not un-install its
@@ -485,6 +530,7 @@ struct InstallProgressState: Equatable {
                 let running = rows.last { phases[$0] == .running } ?? rows.first { phases[$0] != .done }
                 for row in rows where phases[row] != .done {
                     phases[row] = row == running ? .failed : .waiting
+                    activities[row] = nil
                 }
                 if let running { failures[running] = record.failureMessage }
             }
@@ -519,7 +565,7 @@ struct InstallProgressState: Equatable {
         order.map { id in
             InstallProgress.Row(id: id, phase: phases[id] ?? .waiting,
                                 bytesCompleted: bytes[id] ?? 0, bytesExpected: expected(id),
-                                failureMessage: failures[id])
+                                failureMessage: failures[id], activity: activities[id])
         }
     }
 

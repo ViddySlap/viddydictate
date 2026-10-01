@@ -111,15 +111,31 @@ final class InstallProgressView: NSView {
             InstallProgress.identifier(.title, row.id))
         card.addSubview(title)
 
-        let status = SettingsSectionKit.label(InstallProgress.statusText(row),
-                                              x: width - statusColumn - 14, y: y + 1,
-                                              width: statusColumn, size: 11.5, weight: .medium,
-                                              color: statusColor(row))
-        status.alignment = .right
-        status.identifier = NSUserInterfaceItemIdentifier(
-            InstallProgress.identifier(.status, row.id))
-        card.addSubview(status)
+        let statusValue = InstallProgress.statusText(row)
+        let statusFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let statusFits = (statusValue as NSString).size(withAttributes: [.font: statusFont]).width
+            <= statusColumn
+        if statusFits {
+            let status = SettingsSectionKit.label(statusValue,
+                                                  x: width - statusColumn - 14, y: y + 1,
+                                                  width: statusColumn, size: 11.5, weight: .medium,
+                                                  color: statusColor(row))
+            status.alignment = .right
+            status.identifier = NSUserInterfaceItemIdentifier(
+                InstallProgress.identifier(.status, row.id))
+            card.addSubview(status)
+        }
         y += 21
+
+        // A status too long for the column (the wait for Ollama's macOS prompt) goes under the name, whole,
+        // rather than truncated to "waiting for you to appr..." where the user has to act on it.
+        if !statusFits {
+            let field = SettingsSectionKit.wrapped(statusValue, x: 14, y: y, width: width - 28, size: 11.5,
+                                                   weight: .medium, color: .systemOrange)
+            field.identifier = NSUserInterfaceItemIdentifier(InstallProgress.identifier(.status, row.id))
+            card.addSubview(field)
+            y += field.frame.height + 5
+        }
 
         // B10: the failed row shows the vendor's own words. A stranger who reads "Could not resolve
         // huggingface.co" checks their wifi; a stranger who reads "Setup failed" files an issue.

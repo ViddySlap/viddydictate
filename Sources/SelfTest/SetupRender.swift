@@ -112,6 +112,16 @@ enum SetupRender {
         jit = .init(ttlSeconds: 600, enabled: true)
         let button = find(PreflightSurface.recheckIdentifier, in: view) as? NSButton
         check("Check again is offered once a check has finished", button?.isEnabled == true)
+        // D8: the first-run window's re-open button, beside Check again, clicked through its seam (no window).
+        var rerunClicks = 0
+        view.onRunFirstRunSetup = { rerunClicks += 1 }
+        let rerun = find(FirstRunSetupPresenter.rerunIdentifier, in: view) as? NSButton
+        rerun?.performClick(nil)
+        check("Run first-run setup again sits left of Check again, clear of the title, and reaches its seam",
+              rerun?.title == FirstRunSetupPresenter.rerunTitle && rerunClicks == 1
+                && (rerun?.frame.maxX ?? .infinity) <= (button?.frame.minX ?? 0)
+                && (rerun?.frame.width ?? 0) >= (rerun?.fittingSize.width ?? .infinity),
+              "clicks=\(rerunClicks)")
         button?.performClick(nil)
         check("Check again measures the machine again", calls == 2, "calls=\(calls)")
         assertReport(view, Preflight.evaluate(observation), state: "clean")

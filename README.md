@@ -13,7 +13,7 @@ the provider client. An optional Gemini key is stored in the macOS login keychai
 ## Requirements
 
 - An Apple Silicon Mac running macOS 13 Ventura or newer. Intel Macs are not supported.
-- About 2.1 GB of downloads and roughly 15 minutes on first launch, once. See [Install](#install).
+- About 1.7 GB of downloads and roughly 15 minutes on first launch, once. See [Install](#install).
 - For text transforms, either:
   - Claude Code installed and signed in with a supported claude.ai subscription, or
   - ChatGPT.app installed in `/Applications`, followed by ViddyDictate's in-app Codex device login.
@@ -33,24 +33,42 @@ Download `ViddyDictate-<version>.dmg` from
 Applications. It is signed with an Apple Developer ID and notarized by Apple, so it opens without a
 Gatekeeper warning and without right-click-Open.
 
-The first launch shows a component picker rather than a progress bar you cannot argue with. A
-mandatory core of about 2.1 GB — the bundled Python runtime, the speech-to-text environment, the
-`whisper-large-v3-turbo` voice model, and the web-search helper — is not a choice, because
-dictation without the voice model is a different program. Everything beyond that is a tick row that
-tells you its size and what you lose by leaving it off, with defaults chosen from how much RAM your
-Mac has.
+The first launch opens a setup window, **Welcome to ViddyDictate**, rather than a progress bar you
+cannot argue with. It has three parts:
 
-Then it downloads, and while it does:
+- **Required to transcribe.** A mandatory core of about 1.7 GB of downloads — the speech-to-text
+  environment, the `whisper-large-v3-turbo` voice model, and the web-search helper, beside the
+  Python runtime the app already carries — is not a choice, because dictation without the voice
+  model is a different program.
+- **Local models - pick one app.** Cleanup, email, and local web answers can run in a local model
+  app on your Mac. Pick one:
+  - **LM Studio**, the simple install and the recommended one.
+  - **Ollama**, the advanced option, for people who already use it. While it installs, macOS asks
+    for Touch ID or your password because "Ollama is trying to install its command line interface
+    tool". Approve it; only you can, and ViddyDictate never answers it for you.
+  - **Skip for now**, which installs neither. Raw dictation does not need one, and Claude or Codex
+    can run the text modes.
 
-- macOS asks for **Microphone**, **Accessibility**, and **Input Monitoring**. Grant all three; those
-  are, respectively, recording, delivering text into the focused field, and noticing the hotkey.
-  Only you can grant them — no installer or agent can do it for you.
+  You can add the other app later from **Settings > Setup**.
+- **Optional.** The app you picked and its two models, each a tick row that tells you its size and
+  what you lose by leaving it off. A model is ticked only if your Mac has the memory to run it.
+
+Press **Continue** and it downloads. While it does:
+
+- The window asks for **Microphone**, **Accessibility**, and **Input Monitoring**, with a Grant
+  button for each. Grant all three; those are, respectively, recording, delivering text into the
+  focused field, and noticing the hotkey. Only you can grant them — no installer or agent can do it
+  for you.
 - Each component starts working as it lands, rather than at the end.
 - You can close the window. The download continues.
 
 You can also choose **Set up later** and land in a working, reduced app. Nothing goes quietly
 missing: a feature you skipped explains itself and offers to install itself at the moment you reach
-for it.
+for it. Until the core is installed, the setup window comes back at each launch; once it is, the
+window stays away, and **Run first-run setup again…** on the Setup tab brings it back.
+
+When the setup window closes, ViddyDictate helps you sign in to Claude or Codex if neither is ready
+yet.
 
 Measured cold on an empty account: **3m25s to working dictation**, and the rest of the core arrives
 behind it.

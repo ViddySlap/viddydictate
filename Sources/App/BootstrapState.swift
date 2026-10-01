@@ -174,6 +174,64 @@ struct BootstrapSnapshot: Codable, Equatable {
     }
 }
 
+/// When the first-run setup window opens by itself at launch (spec D8, on top of B12).
+///
+/// **The rule:** it opens on a launch where the mandatory core is not installed, and never on a Mac where it
+/// is. That is B12's `shouldPresentSetupOnLaunch`, kept: on a fresh Mac the first launch shows it, and it comes
+/// back on later launches only while dictation still cannot transcribe, because this window is the one place
+/// the core is installed from. Once the core lands it never opens by itself again (the Setup tab re-opens it).
+///
+/// **Upgrading users.** B12 alone reads `bootstrap.json`, and no 1.1.0 code path ever ran the core through the
+/// install queue: a 1.1.0 Mac that dictates got its transcription environment from `install-daemon.sh`, into
+/// the same Application Support folder, and its `bootstrap.json` (when it has one) still says the core is
+/// pending. So a second persisted fact decides for a queue that has never touched the core: the environment an
+/// earlier install left on disk. When the queue HAS run the core rows, its own record is the authority, so a
+/// half-built environment from a failed attempt cannot hide the window.
+enum FirstRunSetupLaunchRule {
+    struct Facts: Equatable {
+        /// `bootstrap.json` as the store read it (a missing file reads as fresh).
+        var snapshot: BootstrapSnapshot
+        /// `coreEnvironmentOnDisk`: an earlier install's speech-to-text environment is in Application Support.
+        var earlierCoreOnDisk: Bool
+    }
+
+    static func shouldPresent(_ facts: Facts) -> Bool {
+        guard facts.snapshot.shouldPresentSetupOnLaunch else { return false }
+        if facts.earlierCoreOnDisk && !queueHasTouchedCore(facts.snapshot) { return false }
+        return true
+    }
+
+    /// Whether the install queue has ever worked on a core row: an attempt counted, or a phase other than
+    /// pending. A 1.1.0 `bootstrap.json` (or none) has neither.
+    static func queueHasTouchedCore(_ snapshot: BootstrapSnapshot) -> Bool {
+        snapshot.mandatoryComponentIDs.contains { id in
+            guard let record = snapshot.component(id) else { return false }
+            return record.attempts > 0 || record.phase != .pending
+        }
+    }
+
+    /// The transcription environment an earlier install left: the venv's interpreter AND the `mlx_whisper`
+    /// package in its site-packages. pip installs `mlx_whisper` last (after its dependencies), so a venv that
+    /// has it finished its package step; an interpreter alone is a venv that was only begun. Files only - no
+    /// process is run and the daemon is not asked anything, so the launch pays one directory listing.
+    static func coreEnvironmentOnDisk(applicationSupport: URL,
+                                      fileManager: FileManager = .default) -> Bool {
+        guard let relative = BootstrapInstallPlan.sttDaemon.virtualEnvironmentRelativePath else { return false }
+        let venv = applicationSupport.appendingPathComponent(relative, isDirectory: true)
+        let python = venv.appendingPathComponent("bin/python", isDirectory: false)
+        guard fileManager.isExecutableFile(atPath: python.path) else { return false }
+        let lib = venv.appendingPathComponent("lib", isDirectory: true)
+        let versions = (try? fileManager.contentsOfDirectory(atPath: lib.path)) ?? []
+        return versions.contains { version in
+            guard version.hasPrefix("python") else { return false }
+            var isDirectory: ObjCBool = false
+            let package = lib.appendingPathComponent(version, isDirectory: true)
+                .appendingPathComponent("site-packages/mlx_whisper", isDirectory: true)
+            return fileManager.fileExists(atPath: package.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+    }
+}
+
 /// Atomic, app-local persistence for the bootstrap state. It stores no transcript, prompt, or provider
 /// response - only component identities, phases, attempts, and bounded-by-the-row failure diagnostics.
 final class BootstrapStateStore {

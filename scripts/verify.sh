@@ -454,6 +454,9 @@ tier_deterministic() {
         run_gate deterministic "first-run component picker sizes, RAM tiers, and running total" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --component-picker-selftest || true
+        run_gate deterministic "first-run setup LM Studio/Ollama/Skip choice, Ollama plan, first-launch rule (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --first-run-setup-selftest || true
         run_gate deterministic "first-run progress bytes, speed, no-ETA pin, and permission anchors" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --install-progress-selftest || true

@@ -99,8 +99,14 @@ final class ComponentPickerView: NSView {
         y = addSection(ComponentPicker.coreHeader, note: ComponentPicker.coreNote,
                        rows: rows.filter { $0.id.isCore }, at: y, width: contentW)
         y += 10
-        y = addSection(ComponentPicker.optionalHeader, note: ComponentPicker.optionalNote,
-                       rows: rows.filter { !$0.id.isCore }, at: y, width: contentW)
+        y = addLocalAppChoice(at: y, width: contentW)
+        // Skip has no optional rows, and a header over nothing reads as something that failed to load.
+        let optional = rows.filter { !$0.id.isCore }
+        if !optional.isEmpty {
+            y += 10
+            y = addSection(ComponentPicker.optionalHeader, note: ComponentPicker.optionalNote,
+                           rows: optional, at: y, width: contentW)
+        }
 
         y = addFooter(rows, at: y + 14, width: contentW)
         frame = NSRect(x: frame.origin.x, y: frame.origin.y, width: W, height: y + 18)
@@ -118,6 +124,86 @@ final class ComponentPickerView: NSView {
         y = subtitle.frame.maxY + 8
         for row in rows { y = addRow(row, at: y, width: width) + 8 }
         return y
+    }
+
+    /// D8's choice, between the core and the rows it decides: LM Studio (simple, recommended), Ollama
+    /// (advanced, with its macOS-prompt warning in its own card) and Skip for now, one card each. The badge sits
+    /// above the name and the warning under the description, as on the point-of-use choice page, so "simple"
+    /// and "advanced" are read before the app's name and the prompt is read by whoever is about to pick it.
+    private func addLocalAppChoice(at originY: CGFloat, width: CGFloat) -> CGFloat {
+        var y = originY
+        let header = SettingsSectionKit.sectionHeader(ComponentPicker.localAppHeader, x: L, y: y, width: width)
+        header.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.localAppHeaderIdentifier)
+        addSubview(header)
+        y = header.frame.maxY + 3
+        let note = SettingsSectionKit.wrapped(ComponentPicker.localAppNote, x: L, y: y, width: width,
+                                              size: 10.5, color: .tertiaryLabelColor)
+        addSubview(note)
+        y = note.frame.maxY + 8
+        for option in ComponentPicker.localAppOptions {
+            y = addChoiceCard(option, at: y, width: width) + 8
+        }
+        return y
+    }
+
+    private func addChoiceCard(_ option: ComponentPicker.LocalAppOption, at originY: CGFloat,
+                               width: CGFloat) -> CGFloat {
+        let chosen = selection.localApp == option.choice
+        let card = SettingsSectionKit.card(frame: NSRect(x: L, y: originY, width: width, height: 0),
+                                           identifier: ComponentPicker.choiceCardIdentifier(option.choice))
+        addSubview(card)
+        let textX = gutter + 14
+        let textW = width - textX - 24
+        var y: CGFloat = 12
+
+        // The gutter carries the same state word a chosen tick row does, so the choice reads without hue.
+        if chosen {
+            let status = SettingsSectionKit.label("SELECTED", x: 14, y: y + 2, width: gutter - 14, size: 10,
+                                                  weight: .semibold, color: .systemGreen)
+            card.addSubview(status)
+        }
+
+        if let badge = option.badge {
+            // Green only on the recommended one: the two apps must never read as equals (D3).
+            let label = SettingsSectionKit.label(badge.uppercased(), x: textX, y: y, width: textW, size: 9,
+                                                 weight: .semibold,
+                                                 color: option.recommended ? .systemGreen : .secondaryLabelColor)
+            label.attributedStringValue = NSAttributedString(string: badge.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .semibold), .kern: 1.2,
+                .foregroundColor: option.recommended ? NSColor.systemGreen : NSColor.secondaryLabelColor,
+            ])
+            label.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.choiceIdentifier(.badge, option.choice))
+            card.addSubview(label)
+            y += 15
+        }
+
+        let radio = NSButton(radioButtonWithTitle: option.title, target: self,
+                             action: #selector(localAppChanged(_:)))
+        radio.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        radio.state = chosen ? .on : .off
+        radio.tag = (ComponentPicker.LocalAppChoice.allCases.firstIndex(of: option.choice) ?? 0) + 1
+        radio.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.choiceIdentifier(.radio, option.choice))
+        radio.frame = NSRect(x: textX - 20, y: y, width: textW + 20, height: 18)
+        card.addSubview(radio)
+        y += 21
+
+        let lines: [(ComponentPicker.ChoicePart, String?, NSColor)] = [
+            (.detail, option.detail, .secondaryLabelColor),
+            // Orange, and always on screen rather than only once chosen: it is what the user must do midway
+            // through the install, so it is read BEFORE the choice, not discovered after it.
+            (.warning, option.warning, .systemOrange),
+        ]
+        for (part, value, color) in lines {
+            guard let value else { continue }
+            let field = SettingsSectionKit.wrapped(value, x: textX, y: y, width: textW, size: 10.5, color: color)
+            field.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.choiceIdentifier(part, option.choice))
+            field.toolTip = value
+            card.addSubview(field)
+            y += field.frame.height + 3
+        }
+
+        card.frame.size.height = y + 10
+        return card.frame.maxY
     }
 
     /// One component, as a card: its state word, its name, what it is, what it costs, what leaving it
@@ -230,6 +316,15 @@ final class ComponentPickerView: NSView {
         addSubview(line)
         y += 14
 
+        // D8: Ollama's macOS prompt, said again where the user commits to the install.
+        if let warning = ComponentPicker.continueWarning(selection: selection, environment: environment) {
+            let field = SettingsSectionKit.wrapped(warning, x: L, y: y, width: width, size: 11,
+                                                   weight: .medium, color: .systemOrange)
+            field.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.continueWarningIdentifier)
+            addSubview(field)
+            y = field.frame.maxY + 8
+        }
+
         // B18's line, in L4's words rather than a second spelling of the same judgement.
         if let note = networkNote(rows) {
             let field = SettingsSectionKit.wrapped(note, x: L, y: y, width: width, size: 11,
@@ -311,11 +406,11 @@ final class ComponentPickerView: NSView {
         return availability == .fits ? .tertiaryLabelColor : .systemOrange
     }
 
-    /// Whether the LM Studio row is on because a model needs it. Its box is then checked and disabled
-    /// rather than silently re-ticking itself under the pointer.
+    /// Whether an app row (LM Studio, or Ollama) is on because a model needs it. Its box is then checked and
+    /// disabled rather than silently re-ticking itself under the pointer.
     private func forcedOn(_ row: ComponentPicker.Row) -> Bool {
-        row.id == .lmStudio && !selection.lmStudio
-            && ComponentPicker.needsLMStudio(selection, environment: environment)
+        row.id.isLocalApp && !selection.isTicked(row.id)
+            && ComponentPicker.needsApp(row.id, selection, environment: environment)
     }
 
     // MARK: - actions
@@ -344,6 +439,21 @@ final class ComponentPickerView: NSView {
         onSelectionChanged?(selection)
     }
 
+    /// D8: picking an app swaps the rows below to that app's, with its models pre-ticked by the same fit check.
+    @objc private func localAppChanged(_ sender: NSButton) {
+        let index = sender.tag - 1
+        guard ComponentPicker.LocalAppChoice.allCases.indices.contains(index) else { return }
+        let choice = ComponentPicker.LocalAppChoice.allCases[index]
+        guard choice != selection.localApp else {
+            rebuild()
+            return
+        }
+        selection = ComponentPicker.selecting(choice, from: selection, facts: facts, environment: environment,
+                                              sizes: sizes)
+        rebuild()
+        onSelectionChanged?(selection)
+    }
+
     @objc private func continueClicked() { onContinue?() }
     @objc private func waitForWiFiClicked() { onWaitForWiFi?() }
     @objc private func setUpLaterClicked() { onSetUpLater?() }
@@ -354,8 +464,8 @@ final class ComponentPickerView: NSView {
 /// It is an ordinary closable window on purpose. B1 says the gate is a picker and not a wall, and B9
 /// says dismissing setup cancels nothing, so nothing here is modal and nothing blocks the app. The
 /// rule that brings it BACK on every launch until the core is installed is B12, which belongs to the
-/// link that owns the degraded state; this type only knows how to show itself and how to report what
-/// the user chose.
+/// link that owns the degraded state (`FirstRunSetupLaunchRule`, run at launch by `FirstRunSetupPresenter`);
+/// this type only knows how to show itself and how to report what the user chose.
 ///
 /// **The flow is B19's, in B19's order.** Continue starts the download and the permissions screen
 /// appears IMMEDIATELY, with the download running underneath it in a strip - not before the grants and
@@ -370,6 +480,12 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// B10's Retry, forwarded to whatever owns the queue. Re-entering the same installer is the whole
     /// point: a retry must not become a second install path.
     var onRetry: ((ComponentPicker.RowID) -> Void)?
+    /// Called once the window closes, however it closed: the host's hand-off to whatever follows setup (provider
+    /// onboarding on first launch). Closing is not cancelling (B9), so this says nothing about the download.
+    var onClose: (() -> Void)?
+    /// What a running row last reported, by descriptor id (`BootstrapInstallCoordinator.activity(for:)`). Read
+    /// on every progress refresh, so an Ollama pull shows its bytes and the approval wait its own words.
+    var activity: (String) -> InstallerLocalActivity? = { _ in nil }
 
     enum Step: Equatable {
         case picker
@@ -414,6 +530,8 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     }
 
     deinit { poll?.invalidate() }
+
+    var isVisible: Bool { window?.isVisible == true }
 
     func show() {
         if window == nil { build() }
@@ -572,7 +690,7 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     func refreshProgress() {
         guard var state = progress else { return }
         if let snapshot = lastSnapshot {
-            state.apply(snapshot: snapshot, sampler: sampler, at: now())
+            state.apply(snapshot: snapshot, sampler: sampler, at: now(), activity: activity)
         }
         progress = state
         permissionsView?.apply(progress: state)
@@ -615,5 +733,6 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         poll = nil
         NotificationCenter.default.removeObserver(
             self, name: NSApplication.didBecomeActiveNotification, object: nil)
+        onClose?()
     }
 }

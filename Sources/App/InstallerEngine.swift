@@ -208,9 +208,8 @@ enum BootstrapInstallPlan {
     /// the app's install in the same queue, or is queued on its own against an app that is installed but
     /// was never opened (LM Studio) or is not running (Ollama).
     ///
-    /// This is the mechanism for Ollama's default models, which are decision D4 and still open: no Ollama
-    /// model is named here. A default added later is one call, listed in `allComponents` so the durable
-    /// state tracks it.
+    /// This is the mechanism for Ollama's models (`ollamaGemma`, `ollamaQwen` below), each listed in
+    /// `allComponents` so the durable state tracks it.
     static func localModel(_ ref: LocalModelRef, title: String? = nil, detail: String,
                            downloadBytes: Int64?) -> InstallerComponentDescriptor {
         InstallerComponentDescriptor(
@@ -246,9 +245,28 @@ enum BootstrapInstallPlan {
         detail: "The local model cleanup and prompt prep prefer",
         downloadBytes: 17_190_793_452)
 
-    /// LM Studio first: a model row cannot run before the CLI that fetches it exists. Ollama is appended,
-    /// so every existing row keeps its place.
-    static let optionalLocalModels = [lmStudio, gemma, qwen, ollama]
+    /// D4's model families on Ollama (agreed 2026-09-30): the cleanup, prompt-prep and search-retrieval model,
+    /// and the email and search-synthesis one, which also reads images and so covers the vision helper. The
+    /// tags are the Ollama library's, confirmed by the lane's Mac probe. How the pickers LABEL a pick
+    /// is a separate, still-open part of D4, and nothing here names one.
+    static let ollamaEmailModelID = "gemma4:e4b"
+    static let ollamaCleanupModelID = "qwen3-coder:30b"
+
+    /// The first-run window's Ollama model rows (D8). Sized from the picker's own catalog, so the queue row and
+    /// the picker row can never quote two numbers for one download.
+    static let ollamaGemma = localModel(
+        LocalModelRef(backend: .ollama, modelID: ollamaEmailModelID),
+        detail: "The local model email mode and web answers run on, in Ollama",
+        downloadBytes: ComponentPicker.SizeCatalog.measured.ollamaGemma.flatMap { Int64(exactly: $0) })
+
+    static let ollamaQwen = localModel(
+        LocalModelRef(backend: .ollama, modelID: ollamaCleanupModelID),
+        detail: "The local model cleanup and prompt prep prefer, in Ollama",
+        downloadBytes: ComponentPicker.SizeCatalog.measured.ollamaQwen.flatMap { Int64(exactly: $0) })
+
+    /// LM Studio first: a model row cannot run before the CLI that fetches it exists. Ollama and then its two
+    /// models are appended, so every existing row keeps its place in `bootstrap.json`.
+    static let optionalLocalModels = [lmStudio, gemma, qwen, ollama, ollamaGemma, ollamaQwen]
 
     /// Every component the app can install, in one list. The durable bootstrap state is keyed off this,
     /// so a surface that installs an optional row records it in the same file the core rows use.

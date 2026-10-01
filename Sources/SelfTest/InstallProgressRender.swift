@@ -18,6 +18,8 @@ import Cocoa
 ///     points in one download.
 ///   - `progress-failed.png` - B10's failed row, carrying the vendor's own error text.
 ///   - `progress-everything.png` - a fully-ticked plan, including the rows LM Studio fetches itself.
+///   - `progress-ollama-approval.png` / `progress-ollama-pull.png` - D8's Ollama plan: the app row waiting on
+///     Ollama's macOS prompt, then a pull showing its real bytes.
 ///   - `permissions-none.png` / `permissions-partial.png` / `permissions-all.png` - B19's three rows
 ///     flipping one at a time, with the download running in the strip underneath.
 enum InstallProgressRender {
@@ -74,6 +76,7 @@ enum InstallProgressRender {
         renderDownload(outDir: outDir)
         renderFailure(outDir: outDir)
         renderEverything(outDir: outDir)
+        renderOllama(outDir: outDir)
         renderPermissions(outDir: outDir)
         driveTheFlow()
 
@@ -208,6 +211,60 @@ enum InstallProgressRender {
               state.rows.map { "\($0.id.rawValue)=\($0.phase.rawValue)/\($0.bytesCompleted)" }
                 .joined(separator: " "))
         capture(view, to: outDir + "/progress-everything.png", name: "a fully-ticked plan")
+    }
+
+    /// D8's Ollama choice on the launch-time list: the rows the window queued, each following the shared queue,
+    /// with what the running row reports (the approval wait, then a pull's real bytes) in its own words.
+    private static func renderOllama(outDir: String) {
+        let plan = ComponentPicker.InstallPlan(
+            components: BootstrapInstallPlan.mandatoryCore, lmStudio: false, models: [],
+            ollama: true, ollamaModels: [BootstrapInstallPlan.ollamaEmailModelID,
+                                         BootstrapInstallPlan.ollamaCleanupModelID])
+        var state = InstallProgressState(plan: plan)
+        let sampler = StubSampler()
+        var queue = BootstrapSnapshot.fresh(descriptors: BootstrapInstallPlan.allComponents)
+        func set(_ id: String, _ phase: BootstrapComponentPhase) {
+            queue.components = queue.components.map { record in
+                var record = record
+                if record.id == id { record.phase = phase }
+                return record
+            }
+        }
+        set(BootstrapInstallPlan.sttDaemon.id, .installed)
+        set(BootstrapInstallPlan.webSearch.id, .installed)
+        set(BootstrapInstallPlan.ollama.id, .installing)
+        state.apply(snapshot: queue, sampler: sampler, at: 0, activity: { id in
+            id == BootstrapInstallPlan.ollama.id ? .awaitingApproval(.ollama) : nil
+        })
+
+        let view = InstallProgressView(width: 620, style: .full)
+        host(view)
+        view.apply(state)
+        assertLayout(view, state: "ollama-approval")
+        check("[ollama] the list carries Ollama and both its models, after the core",
+              Array(state.order.suffix(3)) == [.ollama, .ollamaGemma, .ollamaQwen] && state.order.count == 7,
+              state.order.map(\.rawValue).joined(separator: ","))
+        check("[ollama] the app row waits on the macOS prompt in its own words, not as a failure",
+              status(.ollama, in: view) == InstallProgress.awaitingApprovalText(.ollama),
+              status(.ollama, in: view) ?? "missing")
+        let total = label(InstallProgress.totalIdentifier, in: view)?.stringValue ?? ""
+        check("[ollama] the total names Ollama's unmeasured download", total.hasSuffix("plus Ollama"), total)
+        capture(view, to: outDir + "/progress-ollama-approval.png", name: "Ollama waiting on its macOS prompt")
+
+        set(BootstrapInstallPlan.ollama.id, .installed)
+        set(BootstrapInstallPlan.ollamaGemma.id, .installing)
+        state.apply(snapshot: queue, sampler: sampler, at: 1, activity: { id in
+            id == BootstrapInstallPlan.ollamaGemma.id
+                ? .bytes(InstallerByteProgress(completed: 2_100_000_000, expected: nil)) : nil
+        })
+        view.apply(state)
+        assertLayout(view, state: "ollama-pull")
+        check("[ollama] a pull shows its real bytes against the measured size",
+              status(.ollamaGemma, in: view) == "2.1 GB of 6.6 GB", status(.ollamaGemma, in: view) ?? "missing")
+        check("[ollama] the landed app row reads done, and the next model waiting",
+              status(.ollama, in: view) == InstallProgress.doneText
+                && status(.ollamaQwen, in: view) == InstallProgress.waitingText)
+        capture(view, to: outDir + "/progress-ollama-pull.png", name: "an Ollama pull with real bytes")
     }
 
     // MARK: - B19

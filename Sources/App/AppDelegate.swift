@@ -588,7 +588,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async {
             _ = DaemonInstaller.installForCurrentUser()
         }
-        presentFirstRunOnboardingIfNeeded()
+        // D8: the first-run setup window comes first, on a launch whose core is not installed
+        // (`FirstRunSetupLaunchRule`). Provider sign-in follows once it closes, or at once when it is not shown.
+        FirstRunSetupPresenter.shared.presentOnLaunchIfNeeded { [weak self] in
+            self?.presentFirstRunOnboardingIfNeeded()
+            // TODO(S7): the feature tour's first show is handed off here, after setup and provider onboarding.
+        }
     }
 
     /// First-run provider onboarding (Public V1 spec W4, item P9).

@@ -58,6 +58,11 @@ enum ComponentPicker {
         /// one. A picker that filled this in with a guess would be doing the exact thing O1 forbids,
         /// so the row and the total say "plus LM Studio" instead of quoting a number nobody measured.
         var lmStudio: UInt64?
+        /// D8's Ollama rows. The app's DMG is nil for the same reason LM Studio's is: its size is read from the
+        /// download itself (`OllamaInstaller.resolveOfficialDMG`) and nobody has measured a number to quote.
+        var ollama: UInt64? = nil
+        var ollamaGemma: UInt64? = nil
+        var ollamaQwen: UInt64? = nil
 
         static let measured = SizeCatalog(
             // Re-measured 2026-08-29 after B20's torch cut landed. The with-torch closure was
@@ -69,8 +74,20 @@ enum ComponentPicker {
             webSearch: 14_028_533,
             gemma: 6_861_935_454,
             qwen: 17_190_793_452,
-            lmStudio: nil)
+            lmStudio: nil,
+            ollama: nil,
+            ollamaGemma: ComponentPicker.ollamaGemmaMeasuredBytes,
+            ollamaQwen: ComponentPicker.ollamaQwenLibraryBytes)
     }
+
+    /// `gemma4:e4b` as Ollama stores it: `/api/tags` `size` from the lane's Mac probe, 2026-09-30. MEASURED,
+    /// the same way the LM Studio rows were, from the app that will hold it.
+    static let ollamaGemmaMeasuredBytes: UInt64 = 6_583_656_505
+
+    /// `qwen3-coder:30b`: the Ollama library's published 19 GB, NOT yet a measurement. The one flagged exception
+    /// to O1 in this file, held only until the Mac pull lands; the fit check runs on it exactly as on the rest.
+    // TODO(measured): replace with /api/tags bytes from notes/mac-pull-qwen3coder-20260930.md
+    static let ollamaQwenLibraryBytes: UInt64 = 19_000_000_000
 
     /// The bundled runtime's footprint INSIDE the app, measured from the staged bundle on 2026-08-27.
     /// It is quoted on the disclosure row and is deliberately not part of any download total.
@@ -86,18 +103,51 @@ enum ComponentPicker {
         case lmStudio
         case gemma
         case qwen
+        // D8's Ollama choice, appended so every earlier row keeps its place (and its identifiers).
+        case ollama
+        case ollamaGemma
+        case ollamaQwen
 
         /// B2's core versus B4's tick rows. The split is a property of the row, so a core row cannot
         /// acquire a checkbox by being rendered in the wrong loop.
         var isCore: Bool {
             switch self {
             case .pythonRuntime, .transcriptionEngine, .voiceModel, .webSearch: return true
-            case .lmStudio, .gemma, .qwen: return false
+            case .lmStudio, .gemma, .qwen, .ollama, .ollamaGemma, .ollamaQwen: return false
             }
         }
 
-        /// The LM Studio model this row installs, if it is a model row. `lms get` takes these
-        /// identifiers unchanged; they are the same ones production already routes to.
+        /// The local app a tick row belongs to (D8), or nil for the core.
+        var localApp: LocalBackendID? {
+            switch self {
+            case .lmStudio, .gemma, .qwen: return .lmStudio
+            case .ollama, .ollamaGemma, .ollamaQwen: return .ollama
+            default: return nil
+            }
+        }
+
+        /// Whether this row IS a local app (as opposed to a model that runs in one).
+        var isLocalApp: Bool { self == .lmStudio || self == .ollama }
+
+        /// The model this row installs, in the app that holds it. Every model row has one, on either app, and
+        /// it is what the fit check keys on: a row with a model and a size is always measured against the
+        /// loader, whichever app it lives in.
+        var localModel: LocalModelRef? {
+            switch self {
+            case .gemma, .qwen:
+                return modelID.map { LocalModelRef(backend: .lmStudio, modelID: $0) }
+            case .ollamaGemma:
+                return LocalModelRef(backend: .ollama, modelID: BootstrapInstallPlan.ollamaEmailModelID)
+            case .ollamaQwen:
+                return LocalModelRef(backend: .ollama, modelID: BootstrapInstallPlan.ollamaCleanupModelID)
+            default: return nil
+            }
+        }
+
+        /// The LM Studio model this row installs, if it is an LM Studio model row. `lms get` takes these
+        /// identifiers unchanged; they are the same ones production already routes to. LM Studio only, on
+        /// purpose: routing's `conservativeDefault` sizes models by this id, and an Ollama tag is not an id
+        /// LM Studio routes to. Use `localModel` for either app.
         var modelID: String? {
             switch self {
             case .gemma: return LLMProviderDefaults.localEmailModelID
@@ -243,18 +293,131 @@ enum ComponentPicker {
 
     /// What is already on this Mac. Measured elsewhere and injected, so the picker owns no detection
     /// of its own: `lmStudioInstalled` is `ModelResidency.isInstalled`, and `installedModelIDs` comes
-    /// from the same `lms` catalog the router already reads.
+    /// from the same `lms` catalog the router already reads. The Ollama facts (D8) come from S3a's per-app
+    /// reading of the same observation; `installedModelIDs` stays LM Studio's alone, as in 1.1.0.
     struct Environment: Equatable {
         var lmStudioInstalled: Bool
         var installedModelIDs: Set<String>
+        /// nil when Ollama is not installed; `.app` for the desktop app, `.cli` for a command-line (Homebrew)
+        /// install, which has no app to open and is never started by ViddyDictate.
+        var ollamaInstallKind: OllamaInstallKind?
+        /// The models Ollama lists, by tag. Empty when it lists none OR is not running to ask: a pull of a
+        /// model Ollama already holds is skipped by the installer, so "not listed" can only cost a check.
+        var ollamaModelIDs: Set<String>
 
-        init(lmStudioInstalled: Bool = false, installedModelIDs: Set<String> = []) {
+        init(lmStudioInstalled: Bool = false, installedModelIDs: Set<String> = [],
+             ollamaInstallKind: OllamaInstallKind? = nil, ollamaModelIDs: Set<String> = []) {
             self.lmStudioInstalled = lmStudioInstalled
             self.installedModelIDs = installedModelIDs
+            self.ollamaInstallKind = ollamaInstallKind
+            self.ollamaModelIDs = ollamaModelIDs
+        }
+
+        var ollamaInstalled: Bool { ollamaInstallKind != nil }
+
+        /// Built from a `.local` presence (`LLMProviderDetection.observeLocal`), each app from its OWN reading.
+        /// A presence with no per-app breakdown keeps 1.1.0's single-app reading for LM Studio and says nothing
+        /// about Ollama; nil (unmeasured) is a Mac with neither, which the picker then offers to set up.
+        init(localPresence presence: LLMProviderDetection.Presence?) {
+            let lmStudio = presence?.localReading(.lmStudio)
+            let ollama = presence?.localReading(.ollama)
+            let lmModels = lmStudio.map { $0.models ?? [] }
+                ?? (presence?.localBackendReadings == nil ? presence?.availableLocalModels ?? [] : [])
+            self.init(
+                lmStudioInstalled: lmStudio?.installed
+                    ?? (presence?.localBackendReadings == nil ? presence?.installed ?? false : false),
+                installedModelIDs: Set(lmModels.filter { $0.backend == .lmStudio }.map(\.modelID)),
+                ollamaInstallKind: ollama.flatMap { reading in
+                    reading.installed ? (reading.startable ? .app : .cli) : nil
+                },
+                ollamaModelIDs: Set((ollama?.models ?? []).map(\.modelID)))
         }
     }
 
+    // MARK: - D8: which local app
+
+    /// The first-run window's local models choice (spec D8): **LM Studio, the simple install, first and
+    /// recommended; Ollama, the advanced option, second; or nothing for now.** There is no "both": the second
+    /// app is added later from the Setup tab. The order of `allCases` IS the order on screen.
+    enum LocalAppChoice: String, CaseIterable, Equatable {
+        case lmStudio
+        case ollama
+        case skip
+
+        var backend: LocalBackendID? {
+            switch self {
+            case .lmStudio: return .lmStudio
+            case .ollama: return .ollama
+            case .skip: return nil
+            }
+        }
+    }
+
+    /// One option of the choice, as drawn. The badge and the warning are the words the point-of-use choice
+    /// page and the Setup tab already use (S3c, S6), so the app says "simple" and "advanced" one way.
+    struct LocalAppOption: Equatable {
+        let choice: LocalAppChoice
+        let title: String
+        /// "Simple - recommended" / "Advanced"; nil for Skip, which is not an app.
+        let badge: String?
+        let recommended: Bool
+        let detail: String
+        /// What macOS will ask during the install, said before the user commits to it. Ollama only.
+        let warning: String?
+    }
+
+    /// What Ollama's first launch puts on screen, in the words the Mac probe recorded (survey section 6). Quoted
+    /// so the user recognises the prompt when it appears, behind whatever they went back to.
+    static let ollamaPromptText = "Ollama is trying to install its command line interface tool"
+
+    /// The Ollama option's warning: S6's sentence, then the prompt's own words and the promise that this app
+    /// never answers it for them.
+    static let ollamaWarning = OllamaInstaller.adminPromptWarning
+        + " It reads \"\(ollamaPromptText).\" Only you can approve it; ViddyDictate never answers it for you."
+
+    static let localAppOptions: [LocalAppOption] = [
+        LocalAppOption(
+            choice: .lmStudio, title: LocalBackendID.lmStudio.displayName,
+            badge: LocalAppRows.recommendedTag, recommended: true,
+            detail: "The simple install. ViddyDictate installs LM Studio from its own installer, then the "
+                + "models you tick below.",
+            warning: nil),
+        LocalAppOption(
+            choice: .ollama, title: LocalBackendID.ollama.displayName,
+            badge: LocalAppRows.advancedTag, recommended: false,
+            detail: "The advanced option, for people who already use Ollama. ViddyDictate installs it from "
+                + "Ollama's own download, then pulls the models you tick below.",
+            warning: ollamaWarning),
+        LocalAppOption(
+            choice: .skip, title: "Skip for now", badge: nil, recommended: false,
+            detail: "No local model app and no model. Dictation does not need one, and Claude or Codex can "
+                + "run the text modes. You can set up either app later from Settings > Setup.",
+            warning: nil),
+    ]
+
+    static func localAppOption(_ choice: LocalAppChoice) -> LocalAppOption {
+        localAppOptions.first { $0.choice == choice } ?? localAppOptions[0]
+    }
+
+    /// The choice a fresh window opens on. LM Studio, the recommended one (D3), whatever this Mac can run: the
+    /// model ticks under it then follow the same fit rules as ever, so on a Mac too small for its models the
+    /// result is exactly 1.1.0's picker, with nothing local pre-ticked. The one exception is a Mac that already
+    /// has Ollama and not LM Studio: opening on LM Studio there would steer that user towards both apps, the
+    /// "both" D8 dropped.
+    static func defaultLocalApp(environment: Environment) -> LocalAppChoice {
+        environment.ollamaInstalled && !environment.lmStudioInstalled ? .ollama : .lmStudio
+    }
+
+    /// The rows the screen shows for a choice, core first: the chosen app's three, or none for Skip.
+    static func rowIDs(for choice: LocalAppChoice) -> [RowID] {
+        RowID.allCases.filter { $0.isCore || ($0.localApp != nil && $0.localApp == choice.backend) }
+    }
+
     /// The user's choices. Core rows are absent by construction - there is nothing to store for them.
+    ///
+    /// The LM Studio fields keep 1.1.0's shape for every caller that names them. D8's local app choice and the
+    /// Ollama rows' ticks sit beside them, and a selection that says nothing about them is LM Studio with no
+    /// Ollama row ticked, which is exactly 1.1.0's picker.
     struct Selection: Equatable {
         var lmStudio: Bool
         var gemma: Bool
@@ -262,17 +425,25 @@ enum ComponentPicker {
         var lmStudioChoice: InstallChoice
         var gemmaChoice: InstallChoice
         var qwenChoice: InstallChoice
+        /// D8: which app's rows are on screen and in the plan. Skip shows and installs neither.
+        var localApp: LocalAppChoice
+        var ollamaTicks: Set<RowID>
+        var ollamaChoices: [RowID: InstallChoice]
 
         init(lmStudio: Bool = false, gemma: Bool = false, qwen: Bool = false,
              lmStudioChoice: InstallChoice = .forMe,
              gemmaChoice: InstallChoice = .forMe,
-             qwenChoice: InstallChoice = .forMe) {
+             qwenChoice: InstallChoice = .forMe,
+             localApp: LocalAppChoice = .lmStudio) {
             self.lmStudio = lmStudio
             self.gemma = gemma
             self.qwen = qwen
             self.lmStudioChoice = lmStudioChoice
             self.gemmaChoice = gemmaChoice
             self.qwenChoice = qwenChoice
+            self.localApp = localApp
+            self.ollamaTicks = []
+            self.ollamaChoices = [:]
         }
 
         func isTicked(_ id: RowID) -> Bool {
@@ -280,6 +451,7 @@ enum ComponentPicker {
             case .lmStudio: return lmStudio
             case .gemma: return gemma
             case .qwen: return qwen
+            case .ollama, .ollamaGemma, .ollamaQwen: return ollamaTicks.contains(id)
             default: return false
             }
         }
@@ -289,6 +461,7 @@ enum ComponentPicker {
             case .lmStudio: return lmStudioChoice
             case .gemma: return gemmaChoice
             case .qwen: return qwenChoice
+            case .ollama, .ollamaGemma, .ollamaQwen: return ollamaChoices[id] ?? .forMe
             default: return .forMe
             }
         }
@@ -298,6 +471,8 @@ enum ComponentPicker {
             case .lmStudio: lmStudio = value
             case .gemma: gemma = value
             case .qwen: qwen = value
+            case .ollama, .ollamaGemma, .ollamaQwen:
+                if value { ollamaTicks.insert(id) } else { ollamaTicks.remove(id) }
             default: break
             }
         }
@@ -307,26 +482,40 @@ enum ComponentPicker {
             case .lmStudio: lmStudioChoice = value
             case .gemma: gemmaChoice = value
             case .qwen: qwenChoice = value
+            case .ollama, .ollamaGemma, .ollamaQwen: ollamaChoices[id] = value
             default: break
             }
         }
     }
 
-    /// The pre-ticked state B5 asks for, computed from this machine rather than assumed.
+    /// The pre-ticked state B5 asks for, computed from this machine rather than assumed. The choice opens on
+    /// `defaultLocalApp`, and only that app's models are pre-ticked.
     static func defaultSelection(facts: MachineFacts, environment: Environment,
                                  sizes: SizeCatalog = .measured) -> Selection {
-        var selection = Selection()
-        for id in [RowID.gemma, RowID.qwen] where !isInstalled(id, environment: environment) {
-            selection.setTicked(id, availability(id, facts: facts, sizes: sizes).isPreTicked)
+        selecting(defaultLocalApp(environment: environment), from: Selection(), facts: facts,
+                  environment: environment, sizes: sizes)
+    }
+
+    /// The selection after the user picks `app`. The newly shown app's model rows are pre-ticked by the SAME
+    /// fit check as ever (`availability`, the loader's own 1.15 arithmetic), whichever app they belong to;
+    /// its app row is never pre-ticked, because a ticked model turns it on (`needsApp`).
+    static func selecting(_ app: LocalAppChoice, from selection: Selection, facts: MachineFacts,
+                          environment: Environment, sizes: SizeCatalog = .measured) -> Selection {
+        var next = selection
+        next.localApp = app
+        for id in rowIDs(for: app) where id.localModel != nil && !isInstalled(id, environment: environment) {
+            next.setTicked(id, availability(id, facts: facts, sizes: sizes).isPreTicked)
         }
-        return selection
+        return next
     }
 
     // MARK: - Availability
 
     static func availability(_ id: RowID, facts: MachineFacts,
                              sizes: SizeCatalog = .measured) -> Availability {
-        guard let modelBytes = bytes(for: id, sizes: sizes), id.modelID != nil else { return .fits }
+        // Every model row on either app, keyed on `localModel` rather than LM Studio's `modelID`: an Ollama row
+        // that skipped this check would pre-tick a 19 GB pull on a Mac the loader will refuse it on.
+        guard let modelBytes = bytes(for: id, sizes: sizes), id.localModel != nil else { return .fits }
         guard let budget = facts.budgetBytes,
               let maxBudget = facts.maxBudgetBytes,
               let wired = facts.wiredBytes else { return .memoryUnknown }
@@ -347,10 +536,11 @@ enum ComponentPicker {
 
     // MARK: - Row construction
 
+    /// The rows on screen: the core, then the chosen app's rows (D8). Skip shows the core alone.
     static func rows(selection: Selection, facts: MachineFacts, environment: Environment,
                      sizes: SizeCatalog = .measured) -> [Row] {
-        RowID.allCases.map { row($0, selection: selection, facts: facts,
-                                 environment: environment, sizes: sizes) }
+        rowIDs(for: selection.localApp).map { row($0, selection: selection, facts: facts,
+                                                   environment: environment, sizes: sizes) }
     }
 
     static func row(_ id: RowID, selection: Selection, facts: MachineFacts,
@@ -374,13 +564,31 @@ enum ComponentPicker {
         switch id {
         case .pythonRuntime: return .bundled
         case .transcriptionEngine, .voiceModel, .webSearch: return .included
-        case .lmStudio, .gemma, .qwen:
+        case .lmStudio, .gemma, .qwen, .ollama, .ollamaGemma, .ollamaQwen:
             if isInstalled(id, environment: environment) { return .alreadyInstalled }
             let availability = availability(id, facts: facts, sizes: sizes)
             let ticked = availability.isSelectable
-                && (selection.isTicked(id) || (id == .lmStudio && needsLMStudio(selection,
-                                                                               environment: environment)))
+                && (selection.isTicked(id) || (id.isLocalApp && needsApp(id, selection,
+                                                                         environment: environment)))
             return .optional(ticked: ticked, choice: selection.choice(id), availability: availability)
+        }
+    }
+
+    /// Whether ticked models have forced an app row on: LM Studio's rule (`needsLMStudio`) for LM Studio's
+    /// row, and the same rule over Ollama's own rows for Ollama's.
+    static func needsApp(_ id: RowID, _ selection: Selection, environment: Environment) -> Bool {
+        switch id {
+        case .lmStudio: return needsLMStudio(selection, environment: environment)
+        case .ollama: return needsOllama(selection, environment: environment)
+        default: return false
+        }
+    }
+
+    /// `needsLMStudio` for Ollama: a ticked Ollama model that is not already pulled needs Ollama itself.
+    static func needsOllama(_ selection: Selection, environment: Environment) -> Bool {
+        guard !environment.ollamaInstalled else { return false }
+        return [RowID.ollamaGemma, .ollamaQwen].contains {
+            selection.isTicked($0) && !isInstalled($0, environment: environment)
         }
     }
 
@@ -399,6 +607,12 @@ enum ComponentPicker {
         case .gemma, .qwen:
             guard let modelID = id.modelID else { return false }
             return environment.installedModelIDs.contains(modelID)
+        case .ollama: return environment.ollamaInstalled
+        case .ollamaGemma, .ollamaQwen:
+            // Ollama's implicit `:latest` makes `x` and `x:latest` one model, as the point-of-use check says.
+            guard let ref = id.localModel else { return false }
+            let wanted = OllamaBackend.canonicalModelName(ref.modelID)
+            return environment.ollamaModelIDs.contains { OllamaBackend.canonicalModelName($0) == wanted }
         default: return false
         }
     }
@@ -412,6 +626,9 @@ enum ComponentPicker {
         case .lmStudio: return sizes.lmStudio
         case .gemma: return sizes.gemma
         case .qwen: return sizes.qwen
+        case .ollama: return sizes.ollama
+        case .ollamaGemma: return sizes.ollamaGemma
+        case .ollamaQwen: return sizes.ollamaQwen
         }
     }
 
@@ -493,7 +710,33 @@ enum ComponentPicker {
     struct InstallPlan: Equatable {
         var components: [InstallerComponentDescriptor]
         var lmStudio: Bool
+        /// LM Studio model keys, as in 1.1.0.
         var models: [String]
+        /// D8's Ollama choice: Ollama itself, and the Ollama tags to pull. Defaulted, so a plan that names only
+        /// LM Studio is built exactly as it always was.
+        var ollama: Bool = false
+        var ollamaModels: [String] = []
+
+        /// The local rows, as the installer's OWN descriptors in dependency order: the app (`.app` then
+        /// `.ready`), then each model (`.ready` then `.model`). LM Studio's are the 1.1.0 descriptors; Ollama's
+        /// are S6's `BootstrapInstallPlan.ollama` and the two D4 rows built with `localModel(_:)`. Only a row the
+        /// durable state tracks (`allComponents`) can be queued, so an id nothing knows is dropped, never
+        /// invented.
+        var localComponents: [InstallerComponentDescriptor] {
+            func tracked(_ ref: LocalModelRef) -> InstallerComponentDescriptor? {
+                let id = BootstrapInstallPlan.componentID(for: ref)
+                return BootstrapInstallPlan.allComponents.first { $0.id == id }
+            }
+            var rows: [InstallerComponentDescriptor] = []
+            if lmStudio { rows.append(BootstrapInstallPlan.lmStudio) }
+            rows += models.compactMap { tracked(LocalModelRef(backend: .lmStudio, modelID: $0)) }
+            if ollama { rows.append(BootstrapInstallPlan.ollama) }
+            rows += ollamaModels.compactMap { tracked(LocalModelRef(backend: .ollama, modelID: $0)) }
+            return rows
+        }
+
+        /// Everything the shared install queue is handed, core first (`BootstrapInstallCoordinator.start`).
+        var queue: [InstallerComponentDescriptor] { components + localComponents }
     }
 
     /// The mandatory core is always in the plan (B2), so a caller cannot produce a plan that skips it.
@@ -507,12 +750,25 @@ enum ComponentPicker {
         let rows = rows(selection: selection, facts: facts, environment: environment, sizes: sizes)
         var models: [String] = []
         var lmStudio = false
+        var ollama = false
+        var ollamaModels: [String] = []
+        // `rows` holds only the chosen app's rows, so Skip plans the core alone and one choice can never queue
+        // the other app's rows.
         for row in rows where row.countsTowardTotal && !row.id.isCore {
-            if row.id == .lmStudio { lmStudio = true }
-            if let modelID = row.id.modelID { models.append(modelID) }
+            switch row.id {
+            case .lmStudio: lmStudio = true
+            case .ollama: ollama = true
+            default:
+                guard let ref = row.id.localModel else { continue }
+                switch ref.backend {
+                case .lmStudio: models.append(ref.modelID)
+                case .ollama: ollamaModels.append(ref.modelID)
+                }
+            }
         }
         return InstallPlan(components: BootstrapInstallPlan.mandatoryCore,
-                           lmStudio: lmStudio, models: models)
+                           lmStudio: lmStudio, models: models,
+                           ollama: ollama, ollamaModels: ollamaModels)
     }
 
     // MARK: - Copy (O7: the spec's intent, in the spec's voice)
@@ -541,6 +797,20 @@ enum ComponentPicker {
 
     static let continueTitle = "Continue"
 
+    /// D8's section, between the core and the optional rows.
+    static let localAppHeader = "LOCAL MODELS - PICK ONE APP"
+
+    static let localAppNote =
+        "Cleanup, email and local web answers can run in a local model app on this Mac. Most people only need "
+        + "one; you can add the other later from Settings > Setup."
+
+    /// The Ollama warning again, above Continue, while the choice is Ollama and Ollama is still to be installed:
+    /// the one thing the user must do mid-install is said where they commit to it, not only at the top.
+    static func continueWarning(selection: Selection, environment: Environment) -> String? {
+        guard selection.localApp == .ollama, !environment.ollamaInstalled else { return nil }
+        return ollamaWarning
+    }
+
     static func title(_ id: RowID) -> String {
         switch id {
         case .pythonRuntime: return "Python runtime"
@@ -550,6 +820,9 @@ enum ComponentPicker {
         case .lmStudio: return "LM Studio"
         case .gemma: return "Email model"
         case .qwen: return "Cleanup model"
+        case .ollama: return "Ollama"
+        case .ollamaGemma: return "Email model"
+        case .ollamaQwen: return "Cleanup model"
         }
     }
 
@@ -582,6 +855,18 @@ enum ComponentPicker {
         case .qwen:
             return "\(LLMProviderDefaults.localCleanupModelID), which cleans up dictated text "
                 + "(Option+P and the ? slider)."
+        case .ollama:
+            let base = "The advanced local model app. ViddyDictate talks to it over your own machine."
+            guard !installed else { return base }
+            return "The advanced local model app. ViddyDictate installs it from Ollama's own download and "
+                + "talks to it over your own machine. Its size is read from that download before anything is "
+                + "fetched, so it is not in the total yet."
+        case .ollamaGemma:
+            return "\(BootstrapInstallPlan.ollamaEmailModelID), which writes email from a dictated note "
+                + "(Option+M) and the answers to web searches. It can read images too."
+        case .ollamaQwen:
+            return "\(BootstrapInstallPlan.ollamaCleanupModelID), which cleans up dictated text "
+                + "(Option+P and the ? slider) and runs the web-search lookups."
         }
     }
 
@@ -591,7 +876,7 @@ enum ComponentPicker {
     static func consequence(_ id: RowID) -> String? {
         switch id {
         case .pythonRuntime, .transcriptionEngine, .voiceModel, .webSearch: return nil
-        case .lmStudio:
+        case .lmStudio, .ollama:
             return "Without it: email and cleanup modes have nothing to run on, and say so when you "
                 + "press their keys."
         case .gemma:
@@ -600,6 +885,10 @@ enum ComponentPicker {
         case .qwen:
             return "Without it: cleanup runs on the best local model you have, and offers this one "
                 + "beside the result rather than in front of it."
+        case .ollamaGemma:
+            return "Without it: Option+M runs on the best local model you have."
+        case .ollamaQwen:
+            return "Without it: cleanup runs on the best local model you have."
         }
     }
 
@@ -609,11 +898,16 @@ enum ComponentPicker {
                             sizes: SizeCatalog = .measured) -> String? {
         // The one row that can turn itself on. Its box is checked and locked, which without a reason on
         // screen reads as a control that is broken rather than one that is already decided.
-        if id == .lmStudio, !selection.lmStudio, !isInstalled(id, environment: environment),
-           needsLMStudio(selection, environment: environment) {
+        if id.isLocalApp, !selection.isTicked(id), !isInstalled(id, environment: environment),
+           needsApp(id, selection, environment: environment) {
             return "Required by the models you picked."
         }
-        guard id.modelID != nil, !isInstalled(id, environment: environment) else { return nil }
+        // A command-line Ollama has no app for ViddyDictate to open, so its pulls need the user's own server.
+        if id == .ollama, environment.ollamaInstallKind == .cli {
+            return "Installed as a command-line tool, which ViddyDictate never starts. Start it with ollama "
+                + "serve (or brew services start ollama) so its models can be pulled."
+        }
+        guard id.localModel != nil, !isInstalled(id, environment: environment) else { return nil }
         switch availability(id, facts: facts, sizes: sizes) {
         case .fits:
             return nil
@@ -661,4 +955,23 @@ enum ComponentPicker {
     static let waitForWiFiIdentifier = "component-picker-wait-for-wifi"
     static let setUpLaterIdentifier = "component-picker-set-up-later"
     static let networkNoteIdentifier = "component-picker-network-note"
+
+    // D8's choice. One card per option, each with its radio button, badge, detail and (Ollama) warning.
+    enum ChoicePart: String, CaseIterable {
+        case radio
+        case badge
+        case detail
+        case warning
+    }
+
+    static func choiceIdentifier(_ part: ChoicePart, _ choice: LocalAppChoice) -> String {
+        "component-picker-local-app-\(choice.rawValue)-\(part.rawValue)"
+    }
+
+    static func choiceCardIdentifier(_ choice: LocalAppChoice) -> String {
+        "component-picker-local-app-card-\(choice.rawValue)"
+    }
+
+    static let localAppHeaderIdentifier = "component-picker-local-app-header"
+    static let continueWarningIdentifier = "component-picker-continue-warning"
 }

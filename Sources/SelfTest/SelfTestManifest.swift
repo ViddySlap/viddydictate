@@ -445,6 +445,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localAppsSetupSelftest: .init(tier: .deterministic) { _ in
         LocalAppsSetupFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure picker data and a scratch bootstrap store under a temporary folder. No window, no queue, no live
+    // Application Support, LM Studio or Ollama. The AppKit half is --component-picker-render.
+    .firstRunSetupSelftest: .init(tier: .deterministic) { _ in
+        FirstRunSetupFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

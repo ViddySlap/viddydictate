@@ -254,11 +254,15 @@ enum InstallerLocalStepsFixtureSelfTest {
                             && BootstrapInstallPlan.componentID(for: LocalModelRef(backend: .lmStudio,
                                                                                    modelID: ollamaFixtureModel))
                                 == "model:\(ollamaFixtureModel)")
-        reporter.record("no Ollama default model is named in the shipped plan (D4 is open)",
-                        !BootstrapInstallPlan.allComponents.contains { $0.localSteps.contains {
-                            if case .model(let ref) = $0 { return ref.backend == .ollama }
-                            return false
-                        } })
+        // D4's families are agreed (S8 names them for the first-run window); its pick LABEL is not, and no
+        // label lives in the plan. So the shipped Ollama models are exactly the two families, nothing else.
+        let shippedOllamaModels = BootstrapInstallPlan.allComponents.flatMap { $0.localSteps.compactMap { step -> String? in
+            if case .model(let ref) = step, ref.backend == .ollama { return ref.modelID }
+            return nil
+        } }
+        reporter.record("the shipped Ollama models are D4's two families and nothing else",
+                        shippedOllamaModels == ["gemma4:e4b", "qwen3-coder:30b"],
+                        shippedOllamaModels.joined(separator: ", "))
 
         let performer = RecordingPerformer()
         let engine = InstallerEngine(paths: scratchPaths(scratch), local: performer, sleep: { _ in })
@@ -406,7 +410,9 @@ enum InstallerLocalStepsFixtureSelfTest {
                          "model:qwen3-coder-30b-a3b-instruct-mlx"]
         let all = BootstrapInstallPlan.allComponents.map(\.id)
         reporter.record("every 1.1.0 component id is unchanged and in its place; new rows are appended",
-                        Array(all.prefix(legacyIDs.count)) == legacyIDs && all.dropFirst(legacyIDs.count) == ["ollama"],
+                        Array(all.prefix(legacyIDs.count)) == legacyIDs
+                            && Array(all.dropFirst(legacyIDs.count))
+                                == ["ollama", "ollama-model:gemma4:e4b", "ollama-model:qwen3-coder:30b"],
                         all.joined(separator: ","))
         reporter.record("LM Studio rows keep their titles",
                         BootstrapInstallPlan.lmStudio.title == "LM Studio"

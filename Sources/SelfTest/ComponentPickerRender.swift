@@ -20,6 +20,10 @@ import Cocoa
 ///   - `picker-already-installed.png` - a Mac that already has LM Studio and the email model.
 ///   - `picker-metered.png` - B18's amber line and the Wait for Wi-Fi button beside Continue.
 ///   - `picker-offline.png` - no route at all: said immediately, with Set up later, Continue disabled.
+///   - `picker-ollama-64gb.png` / `picker-ollama-16gb.png` - D8's Ollama choice: Ollama's rows swapped in, its
+///     models pre-ticked by the same fit check (qwen3-coder:30b TOO BIG on 16 GB), and the macOS-prompt warning
+///     in its card and again above Continue.
+///   - `picker-skip.png` - Skip for now: the core alone, no optional rows, the core's total.
 enum ComponentPickerRender {
     private static var failures = 0
 
@@ -82,6 +86,8 @@ enum ComponentPickerRender {
         driveInstallChoice(outDir: outDir)
         driveDetectedMachine(outDir: outDir)
         driveNetwork(outDir: outDir)
+        driveLocalAppChoice(outDir: outDir)
+        driveSkip(outDir: outDir)
 
         print("[component-picker-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
@@ -123,11 +129,21 @@ enum ComponentPickerRender {
         check("[continue] and releases the held queue on its own once the path clears",
               plans.count == 2, "\(plans.count)")
 
+        // D8: the Ollama radio swaps the rows, and Continue hands on Ollama's plan, through the same controller.
+        (find(ComponentPicker.choiceIdentifier(.radio, .ollama), in: view) as? NSButton).map(fire)
+        (find(ComponentPicker.continueIdentifier, in: view) as? NSButton).map(fire)
+        check("[continue] after picking Ollama, Continue hands on Ollama's app and both its models",
+              plans.count == 3 && plans.last?.ollama == true && plans.last?.lmStudio == false
+                && plans.last?.ollamaModels == [BootstrapInstallPlan.ollamaEmailModelID,
+                                                BootstrapInstallPlan.ollamaCleanupModelID]
+                && plans.last?.queue.first(where: { !$0.localSteps.isEmpty })?.localSteps.first == .app(.ollama),
+              plans.last.map { "\($0.queue.map(\.id))" } ?? "none")
+
         // A dead path spends no retries and offers the way out immediately.
         monitor.emit(.unavailable)
         (find(ComponentPicker.continueIdentifier, in: view) as? NSButton).map(fire)
         check("[continue] a dead path hands on nothing rather than failing three times first",
-              plans.count == 2, "\(plans.count)")
+              plans.count == 3, "\(plans.count)")
         check("[continue] and the screen says so where the amber line goes",
               label(ComponentPicker.networkNoteIdentifier, in: view)?.stringValue
                 == NetworkPathCopy.noNetworkMessage)
@@ -287,6 +303,113 @@ enum ComponentPickerRender {
                 == NetworkPathCopy.waitingForWiFiMessage)
     }
 
+    // MARK: - D8: the local app choice
+
+    /// The three-way choice, clicked for real: LM Studio first and recommended, Ollama advanced with its warning
+    /// in plain sight, and the rows below swapping to the picked app's with that app's fit verdicts.
+    private static func driveLocalAppChoice(outDir: String) {
+        let facts64 = mac(64, wiredGB: 5)
+        let view = build(facts: facts64)
+        check("[choice] the window opens on LM Studio, the recommended option",
+              (find(ComponentPicker.choiceIdentifier(.radio, .lmStudio), in: view) as? NSButton)?.state == .on
+                && (find(ComponentPicker.choiceIdentifier(.radio, .ollama), in: view) as? NSButton)?.state == .off)
+        let cards = ComponentPicker.LocalAppChoice.allCases.compactMap {
+            find(ComponentPicker.choiceCardIdentifier($0), in: view)
+        }
+        check("[choice] the three cards read LM Studio, Ollama, Skip for now, top to bottom",
+              cards.count == 3 && zip(cards, cards.dropFirst()).allSatisfy { $0.frame.maxY <= $1.frame.minY }
+                && (find(ComponentPicker.choiceIdentifier(.radio, .lmStudio), in: view) as? NSButton)?.title
+                    == "LM Studio"
+                && (find(ComponentPicker.choiceIdentifier(.radio, .skip), in: view) as? NSButton)?.title
+                    == "Skip for now")
+        check("[choice] the badges say simple and recommended, then advanced, and only one is green",
+              label(ComponentPicker.choiceIdentifier(.badge, .lmStudio), in: view)?.stringValue
+                == "SIMPLE - RECOMMENDED"
+                && label(ComponentPicker.choiceIdentifier(.badge, .ollama), in: view)?.stringValue == "ADVANCED"
+                && find(ComponentPicker.choiceIdentifier(.badge, .skip), in: view) == nil)
+        check("[choice] Ollama's warning is on screen before anything is picked",
+              label(ComponentPicker.choiceIdentifier(.warning, .ollama), in: view)?.stringValue
+                == ComponentPicker.ollamaWarning
+                && find(ComponentPicker.choiceIdentifier(.warning, .lmStudio), in: view) == nil)
+        check("[choice] the choice sits between the core and the optional rows",
+              (find(ComponentPicker.cardIdentifier(.webSearch), in: view)?.frame.maxY ?? .infinity)
+                <= (cards.first?.frame.minY ?? 0)
+                && (cards.last?.frame.maxY ?? .infinity)
+                    <= (find(ComponentPicker.cardIdentifier(.lmStudio), in: view)?.frame.minY ?? 0))
+
+        var changed: [ComponentPicker.Selection] = []
+        view.onSelectionChanged = { changed.append($0) }
+        (find(ComponentPicker.choiceIdentifier(.radio, .ollama), in: view) as? NSButton).map(fire)
+        check("[choice] picking Ollama swaps LM Studio's rows for Ollama's and reports the new selection",
+              find(ComponentPicker.cardIdentifier(.lmStudio), in: view) == nil
+                && find(ComponentPicker.cardIdentifier(.ollamaQwen), in: view) != nil
+                && changed.last?.localApp == .ollama
+                && (find(ComponentPicker.choiceIdentifier(.radio, .ollama), in: view) as? NSButton)?.state == .on)
+        check("[choice] the clicked view is the same screen the 64 GB fixture builds directly",
+              view.rows == build(facts: facts64,
+                                 selection: ComponentPicker.selecting(
+                                    .ollama, from: ComponentPicker.defaultSelection(facts: facts64,
+                                                                                    environment: .init()),
+                                    facts: facts64, environment: .init())).rows)
+
+        let machines: [(String, ComponentPicker.MachineFacts, String, String, String)] = [
+            ("64gb", facts64, "SELECTED", "SELECTED", "SELECTED"),
+            ("16gb", mac(16, wiredGB: 3), "OPTIONAL", "OPTIONAL", "TOO BIG"),
+        ]
+        for (name, facts, appWord, gemmaWord, qwenWord) in machines {
+            let selection = ComponentPicker.selecting(
+                .ollama, from: ComponentPicker.defaultSelection(facts: facts, environment: .init()),
+                facts: facts, environment: .init())
+            let ollama = build(facts: facts, selection: selection)
+            check("[ollama-\(name)] the Ollama rows state this machine's own verdicts",
+                  word(.ollama, in: ollama) == appWord && word(.ollamaGemma, in: ollama) == gemmaWord
+                    && word(.ollamaQwen, in: ollama) == qwenWord,
+                  "\(word(.ollama, in: ollama) ?? "-") \(word(.ollamaGemma, in: ollama) ?? "-") "
+                    + "\(word(.ollamaQwen, in: ollama) ?? "-")")
+            check("[ollama-\(name)] no LM Studio row is on screen",
+                  [ComponentPicker.RowID.lmStudio, .gemma, .qwen].allSatisfy {
+                      find(ComponentPicker.cardIdentifier($0), in: ollama) == nil
+                  })
+            check("[ollama-\(name)] the warning is said again above Continue",
+                  label(ComponentPicker.continueWarningIdentifier, in: ollama)?.stringValue
+                    == ComponentPicker.ollamaWarning
+                    && (label(ComponentPicker.continueWarningIdentifier, in: ollama)?.frame.maxY ?? .infinity)
+                        <= (find(ComponentPicker.continueIdentifier, in: ollama)?.frame.minY ?? 0))
+            let total = label(ComponentPicker.totalIdentifier, in: ollama)?.stringValue ?? ""
+            check("[ollama-\(name)] the total is the picked rows' and names Ollama's unmeasured download",
+                  total == ComponentPicker.totalLine(ollama.rows) && total.hasSuffix(", plus Ollama")
+                    == (name == "64gb"), total)
+            assertLayout(ollama, state: "ollama-\(name)")
+            capture(ollama, to: outDir + "/picker-ollama-\(name).png", name: "Ollama chosen on a \(name) Mac")
+        }
+        check("[ollama-16gb] qwen3-coder:30b cannot be ticked on a Mac the loader would refuse it on",
+              (find(ComponentPicker.identifier(.tick, .ollamaQwen),
+                    in: build(facts: mac(16, wiredGB: 3),
+                              selection: ComponentPicker.selecting(.ollama, from: .init(), facts: mac(16, wiredGB: 3),
+                                                                   environment: .init())))
+                as? NSButton)?.isEnabled == false)
+    }
+
+    private static func driveSkip(outDir: String) {
+        let facts = mac(64, wiredGB: 5)
+        let view = build(facts: facts)
+        (find(ComponentPicker.choiceIdentifier(.radio, .skip), in: view) as? NSButton).map(fire)
+        check("[skip] Skip for now leaves the core alone on screen",
+              view.rows.map(\.id).allSatisfy(\.isCore) && view.rows.count == 4
+                && find(ComponentPicker.cardIdentifier(.lmStudio), in: view) == nil
+                && find(ComponentPicker.cardIdentifier(.ollama), in: view) == nil)
+        check("[skip] the total is the core's",
+              label(ComponentPicker.totalIdentifier, in: view)?.stringValue == "Total download: 1.7 GB",
+              label(ComponentPicker.totalIdentifier, in: view)?.stringValue ?? "missing")
+        check("[skip] no warning above Continue",
+              find(ComponentPicker.continueWarningIdentifier, in: view) == nil)
+        check("[skip] the choice stays on screen so it can be changed back",
+              (find(ComponentPicker.choiceIdentifier(.radio, .skip), in: view) as? NSButton)?.state == .on
+                && find(ComponentPicker.choiceCardIdentifier(.lmStudio), in: view) != nil)
+        assertLayout(view, state: "skip")
+        capture(view, to: outDir + "/picker-skip.png", name: "Skip for now")
+    }
+
     // MARK: - helpers
 
     private static func build(facts: ComponentPicker.MachineFacts,
@@ -321,9 +444,12 @@ enum ComponentPickerRender {
 
     /// Nothing on this surface may be clipped by its own frame. A truncated consequence is one the user
     /// was not actually shown, which is the whole premise of B1's consented reduced state.
-    private static func assertLayout(_ view: NSView, state: String) {
+    private static func assertLayout(_ view: ComponentPickerView, state: String) {
+        // The rows THIS screen shows: the core and the chosen app's rows (D8). A row of the other app is
+        // correctly absent, so it is not counted missing.
+        let shown = view.rows.map(\.id)
         var clipped: [String] = []
-        for id in ComponentPicker.RowID.allCases {
+        for id in shown {
             for part in [ComponentPicker.Part.detail, .consequence, .machineNote] {
                 guard let field = label(ComponentPicker.identifier(part, id), in: view) else { continue }
                 let needed = field.sizeThatFits(
@@ -331,18 +457,35 @@ enum ComponentPickerRender {
                 if field.frame.height + 0.5 < needed { clipped.append("\(id.rawValue).\(part.rawValue)") }
             }
         }
+        for choice in ComponentPicker.LocalAppChoice.allCases {
+            for part in [ComponentPicker.ChoicePart.detail, .warning] {
+                guard let field = label(ComponentPicker.choiceIdentifier(part, choice), in: view) else { continue }
+                let needed = field.sizeThatFits(
+                    NSSize(width: field.frame.width, height: .greatestFiniteMagnitude)).height
+                if field.frame.height + 0.5 < needed { clipped.append("\(choice.rawValue).\(part.rawValue)") }
+            }
+        }
+        if let warning = label(ComponentPicker.continueWarningIdentifier, in: view) {
+            let needed = warning.sizeThatFits(
+                NSSize(width: warning.frame.width, height: .greatestFiniteMagnitude)).height
+            if warning.frame.height + 0.5 < needed { clipped.append("continue-warning") }
+        }
         check("[\(state)] no row's text is clipped by its own frame", clipped.isEmpty,
               clipped.joined(separator: ","))
 
         var overflowing: [String] = []
-        for id in ComponentPicker.RowID.allCases {
-            guard let card = find(ComponentPicker.cardIdentifier(id), in: view) else {
-                overflowing.append("\(id.rawValue) missing")
+        let cardIDs = shown.map { ($0.rawValue, ComponentPicker.cardIdentifier($0)) }
+            + ComponentPicker.LocalAppChoice.allCases.map {
+                ("choice-\($0.rawValue)", ComponentPicker.choiceCardIdentifier($0))
+            }
+        for (name, identifier) in cardIDs {
+            guard let card = find(identifier, in: view) else {
+                overflowing.append("\(name) missing")
                 continue
             }
             for child in card.subviews where child.frame.maxY > card.frame.height + 0.5
                 || child.frame.maxX > card.frame.width + 0.5 {
-                overflowing.append("\(id.rawValue)/\(child.identifier?.rawValue ?? "?")")
+                overflowing.append("\(name)/\(child.identifier?.rawValue ?? "?")")
             }
         }
         check("[\(state)] nothing spills out of the card it belongs to", overflowing.isEmpty,
@@ -375,13 +518,16 @@ enum ComponentPickerRender {
                   "total maxY=\(total.frame.maxY)")
         }
 
-        // Every row the picker knows about has to be on screen. A row that silently stopped rendering
-        // is a component the user was never offered and will never know about.
-        let missing = ComponentPicker.RowID.allCases.filter {
-            find(ComponentPicker.cardIdentifier($0), in: view) == nil
-        }
-        check("[\(state)] every component has a row", missing.isEmpty,
-              missing.map(\.rawValue).joined(separator: ","))
+        // Every row the picker offers for this choice has to be on screen, and so does every option of the
+        // choice. A row that silently stopped rendering is a component the user was never offered.
+        let missing = shown.filter { find(ComponentPicker.cardIdentifier($0), in: view) == nil }.map(\.rawValue)
+            + ComponentPicker.LocalAppChoice.allCases
+                .filter { find(ComponentPicker.choiceCardIdentifier($0), in: view) == nil }
+                .map { "choice-\($0.rawValue)" }
+        let extra = ComponentPicker.RowID.allCases
+            .filter { !shown.contains($0) && find(ComponentPicker.cardIdentifier($0), in: view) != nil }
+        check("[\(state)] every component has a row", missing.isEmpty && extra.isEmpty,
+              (missing + extra.map { "extra \($0.rawValue)" }).joined(separator: ","))
     }
 
     private static func capture(_ view: NSView, to path: String, name: String) {

@@ -31,6 +31,10 @@ final class SetupSettingsView: NSView {
     /// this to `ProviderSignInPresenter`, the same flow the first-run window drives.
     var onConnect: ((LLMProvider) -> Void)?
 
+    /// "Run first-run setup again..." (D8). Injected for the same reason the observer is: a render gate that
+    /// clicks it must not open a window.
+    var onRunFirstRunSetup: () -> Void = { FirstRunSetupPresenter.shared.presentAgain() }
+
     private let W: CGFloat
     private let L: CGFloat = 20
     private let observer: Observer
@@ -129,8 +133,18 @@ final class SetupSettingsView: NSView {
         subviews.forEach { $0.removeFromSuperview() }
         var y: CGFloat = 16
 
-        addSubview(text("Setup", x: L, y: y, width: W - 2 * L - 130,
+        // The title stops short of the two header buttons, so their frames never share space with it.
+        addSubview(text("Setup", x: L, y: y, width: W - 2 * L - 130 - 206,
                         size: 19, weight: .semibold, color: .labelColor))
+
+        // D8: the first-run window, re-opened on demand. Beside Check again, because both re-run setup.
+        let rerun = NSButton(title: FirstRunSetupPresenter.rerunTitle, target: self,
+                             action: #selector(rerunFirstRunSetupClicked))
+        rerun.bezelStyle = .rounded
+        rerun.font = .systemFont(ofSize: 11)
+        rerun.identifier = NSUserInterfaceItemIdentifier(FirstRunSetupPresenter.rerunIdentifier)
+        rerun.frame = NSRect(x: W - L - 116 - 8 - 198, y: y - 4, width: 198, height: 28)
+        addSubview(rerun)
 
         let recheck = NSButton(title: checking ? "Checking..." : "Check again",
                                target: self, action: #selector(recheckClicked))
@@ -258,6 +272,8 @@ final class SetupSettingsView: NSView {
     }
 
     @objc private func recheckClicked() { check() }
+
+    @objc private func rerunFirstRunSetupClicked() { onRunFirstRunSetup() }
 
     // MARK: - DMGU1 (C): app version + manual update check
 

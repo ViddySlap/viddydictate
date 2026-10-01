@@ -135,6 +135,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // one ever recommended), the headline, the Preferred local app, the point-of-use app choice and running
     // page, and the app-named Local preset line, as data. Built-in mutants.
     case localAppsSetupSelftest = "--local-apps-setup-selftest"
+    // Ollama lane S8: the revived first-run setup window as data. D8's LM Studio / Ollama / Skip choice, the
+    // Ollama rows' plan and fit check, Skip's empty plan, the first-launch rule over scratch stores (an upgraded
+    // working install is never shown it), and the LM Studio picker unchanged. Built-in mutants.
+    case firstRunSetupSelftest = "--first-run-setup-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

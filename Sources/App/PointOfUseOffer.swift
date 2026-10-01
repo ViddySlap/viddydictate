@@ -89,9 +89,9 @@ struct PointOfUseFeature: Equatable {
     /// The same feature on Ollama, the advanced option (spec D3): its app, then the model it holds. Only a
     /// feature a local text model serves has one.
     ///
-    /// Ollama's default models are decision D4, still open, so no model row is named and the Ollama choice
-    /// installs the app alone. TODO(D4): append the feature's default Ollama model here, built with
-    /// `BootstrapInstallPlan.localModel(_:detail:downloadBytes:)` and listed in `allComponents`.
+    /// The Ollama choice here still installs the app alone. D4's model families now exist as queue rows
+    /// (`BootstrapInstallPlan.ollamaGemma` / `ollamaQwen`, which the first-run window pulls), but how a feature's
+    /// offer names its Ollama model is not settled. TODO(D4): append the feature's Ollama model row here.
     var ollamaComponents: [InstallerComponentDescriptor] {
         satisfaction == .textProvider ? [BootstrapInstallPlan.ollama] : []
     }
