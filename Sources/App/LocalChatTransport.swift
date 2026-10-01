@@ -6,7 +6,7 @@ import Foundation
 /// D5 (decided 2026-09-30): ViddyDictate always sets `num_ctx` on its own Ollama requests, as fixed constants
 /// with no setting: 8192 for cleanup, email and vision (and the surfaces that share their request shapes),
 /// 16384 for search retrieval, whose tool results need the room. Without it Ollama loads at its default,
-/// which on Ben's 64 GB Mac is 262144 tokens (gemma4:e4b wired +7.31 GB at 8k against +11.25 GB at its
+/// which on the maintainer's 64 GB test Mac is 262144 tokens (gemma4:e4b wired +7.31 GB at 8k against +11.25 GB at its
 /// 131k max). A resident model already loaded with at least this much context is reused as it is.
 ///
 /// `think` is true only where LM Studio already returns the model's reasoning in `reasoning_content` (email

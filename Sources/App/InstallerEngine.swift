@@ -380,7 +380,7 @@ final class FoundationInstallerProcessRunner: InstallerProcessRunning {
 
 /// The engine's seam onto the local-app mechanisms. Production drives `LMStudioInstaller` and
 /// `OllamaInstaller`; the deterministic rail injects a double, so no gate ever attaches a disk image,
-/// writes to `/Applications`, opens an app, or spends a gigabyte of Ben's bandwidth to prove the queue works.
+/// writes to `/Applications`, opens an app, or spends a gigabyte of the tester's bandwidth to prove the queue works.
 ///
 /// `report` carries what a running step is doing that its phase cannot say (`InstallerLocalActivity`):
 /// real bytes from an Ollama pull, or the wait for Ollama's macOS prompt. It is never persisted.

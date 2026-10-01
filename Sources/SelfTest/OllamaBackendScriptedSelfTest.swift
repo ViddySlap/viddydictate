@@ -328,7 +328,7 @@ enum OllamaBackendScriptedSelfTest {
         let nothing = kind([:])
         reporter.record("the desktop app in /Applications or ~/Applications is an app install",
                         appOnly.0 == .app && appOnly.1 && userApp.0 == .app && both.0 == .app)
-        reporter.record("an executable Homebrew or /usr/local CLI with no app is a CLI install (Ben's Mac)",
+        reporter.record("an executable Homebrew or /usr/local CLI with no app is a CLI install (as on the test Mac)",
                         brewCLI.0 == .cli && brewCLI.1 && localCLI.0 == .cli)
         reporter.record("a non-executable ollama file, or nothing at all, is not installed",
                         notExecutable.0 == nil && !notExecutable.1 && nothing.0 == nil && !nothing.1)

@@ -240,7 +240,7 @@ final class OllamaBackend: LocalModelBackend {
 
     /// `GET /api/ps` for WHICH models are loaded, with each one's footprint taken from `/api/tags` `size`.
     ///
-    /// Never ps's own `size`: measured on Ben's Mac it under-reports the wired cost of a loaded model 10-20x
+    /// Never ps's own `size`: measured on a 64 GB test Mac it under-reports the wired cost of a loaded model 10-20x
     /// (0.34 GB for gemma4:e4b, which wired +7.31 GB at 8k; survey section 6). A capacity readout or an
     /// eviction ranking built on it would call a 7 GB model nearly free. The tags size is the weights on
     /// disk, which is what the incoming estimate budgets from too, so the readout and the policy agree.

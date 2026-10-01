@@ -84,7 +84,7 @@ final class ModelManager {
     }
 
     /// Ollama's half of the capacity facts, every one keyed by `LocalModelRef`. Whole-machine accounting is
-    /// unchanged: the budget still compares live WIRED memory (measured on Ben's Mac, Ollama loads are wired,
+    /// unchanged: the budget still compares live WIRED memory (measured on a 64 GB test Mac, Ollama loads are wired,
     /// +7.31 GB for gemma4:e4b at 8k, released within 1 s of `keep_alive: 0`), so this only supplies what the
     /// incoming estimate and the eviction pass need.
     struct OllamaCapacityDependencies {

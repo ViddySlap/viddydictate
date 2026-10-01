@@ -9,7 +9,7 @@ import Foundation
 ///
 /// Distinct values everywhere, so a default cannot pass by accident:
 /// - the gemma-like model is 6.6 GB in `/api/tags` but **0.3 GB** in `/api/ps`, the 10-20x under-report
-///   measured on Ben's Mac, and its budget is set so a ps-based estimate visibly fits, a tags-only estimate
+///   measured on a 64 GB test Mac, and its budget is set so a ps-based estimate visibly fits, a tags-only estimate
 ///   (no KV) also fits, and only tags + KV(num_ctx) refuses;
 /// - `shared-id-on-both:7b` is resident in BOTH apps, owned in one and foreign in the other;
 /// - Ollama's `expires_at` order is the REVERSE of ViddyDictate's own use order;

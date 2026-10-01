@@ -5,8 +5,8 @@ import Foundation
 /// Like LM Studio's, this is a mechanism and not a queue. `InstallerEngine` owns consent, progress, retry and
 /// persistence; each function here performs one bounded operation and throws the real failure.
 ///
-/// **The trust chain, as measured on Ben's Mac (Mac probe B2/B3, 2026-09-30).** `ollama.com/download/Ollama.dmg`
-/// answers 307 to github.com, which answers 302 twice, the second time to a signed
+/// **The trust chain, as measured on the maintainer's test Mac (Mac probe B2/B3, 2026-09-30).**
+/// `ollama.com/download/Ollama.dmg` answers 307 to github.com, which answers 302 twice, the second time to a signed
 /// release-assets.githubusercontent.com URL that answers 200 `application/octet-stream`. So:
 /// - every hop is checked BEFORE it is requested: HTTPS, and a host on `allowedHosts` exactly. LM Studio's
 ///   endpoint never leaves its own domain, so it only checks the final URL; this chain crosses three hosts,
