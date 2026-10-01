@@ -260,6 +260,7 @@ final class FeatureTourPageView: NSView {
         }
         static let practiceNote = "feature-tour-practice-note"
         static let practiceField = "feature-tour-practice-field"
+        static let practiceBox = "feature-tour-practice-box"
         static let openSetting = "feature-tour-open-setting"
         static let back = "feature-tour-back"
         static let next = "feature-tour-next"
@@ -426,6 +427,11 @@ final class FeatureTourPageView: NSView {
         return button
     }
 
+    /// The practice box's edge: the cards' resting phosphor edge, and a brighter one while it has the focus.
+    static func practiceEdgeColor(focused: Bool) -> CGColor {
+        Phosphor.green.withAlphaComponent(focused ? 0.55 : 0.18).cgColor
+    }
+
     /// A phosphor card, an offer cell at rest (`Phosphor.styleCell`, unselected), with its kerned heading;
     /// `fill` lays the contents out from `y` inside it and returns the bottom.
     private func addCard(_ header: String, identifier: String, at originY: CGFloat, width: CGFloat,
@@ -533,18 +539,27 @@ final class FeatureTourPageView: NSView {
             note.identifier = NSUserInterfaceItemIdentifier(ID.practiceNote)
             card.addSubview(note)
 
-            // A selected offer cell's chrome around the box, so it reads as the place the words will land.
-            let box = NSScrollView(frame: NSRect(x: 14, y: note.frame.maxY + 8, width: w, height: 58))
+            // The box wears the cards' own phosphor edge, so it reads as a field and not as empty card, and the
+            // edge brightens while the box has the focus. It sits on a plain layer-backed container: a border on
+            // the scroll view's own layer did not show in the real renders.
+            let edge = NSView(frame: NSRect(x: 14, y: note.frame.maxY + 8, width: w, height: 58))
+            edge.identifier = NSUserInterfaceItemIdentifier(ID.practiceBox)
+            edge.wantsLayer = true
+            edge.layer?.cornerRadius = 6
+            edge.layer?.borderWidth = 1.5
+            Phosphor.styleCell(edge, selected: false)
+            edge.layer?.borderColor = Self.practiceEdgeColor(focused: false)
+            let box = NSScrollView(frame: edge.bounds.insetBy(dx: 2, dy: 2))
             box.borderType = .noBorder
             box.drawsBackground = false
             box.hasVerticalScroller = true
             box.autohidesScrollers = true
-            box.wantsLayer = true
-            box.layer?.cornerRadius = 6
-            box.layer?.borderWidth = 1
-            box.layer?.borderColor = Phosphor.green.withAlphaComponent(ready ? 0.5 : 0.18).cgColor
-            box.layer?.backgroundColor = Phosphor.cellOn.cgColor
-            let text = NSTextView(frame: NSRect(origin: .zero, size: box.contentSize))
+            box.autoresizingMask = [.width, .height]
+            edge.addSubview(box)
+            let text = FeatureTourPracticeTextView(frame: NSRect(origin: .zero, size: box.contentSize))
+            text.onFocusChange = { [weak edge] focused in
+                edge?.layer?.borderColor = Self.practiceEdgeColor(focused: focused)
+            }
             text.isRichText = false
             text.drawsBackground = false
             text.font = Style.font(13)
@@ -559,9 +574,9 @@ final class FeatureTourPageView: NSView {
             text.identifier = NSUserInterfaceItemIdentifier(ID.practiceField)
             text.setAccessibilityPlaceholderValue(FeatureTourPractice.placeholder)
             box.documentView = text
-            card.addSubview(box)
+            card.addSubview(edge)
             practiceField = text
-            return box.frame.maxY
+            return edge.frame.maxY
         }
     }
 
@@ -575,12 +590,14 @@ final class FeatureTourPageView: NSView {
         addSubview(line)
         let y = originY + 15
 
+        let last = index == count - 1
+        // The last page ends the tour with Done, so it shows only Back and Done: Skip tour would say the same thing.
         let skip = Self.button(FeatureTour.skipTitle, selected: false, target: self, action: #selector(skipClicked))
         skip.identifier = NSUserInterfaceItemIdentifier(ID.skip)
         skip.frame.origin = NSPoint(x: L, y: y)
+        skip.isHidden = last
         addSubview(skip)
 
-        let last = index == count - 1
         let next = Self.button(last ? FeatureTour.doneTitle : FeatureTour.nextTitle, selected: true, target: self,
                                action: #selector(nextClicked))
         next.identifier = NSUserInterfaceItemIdentifier(ID.next)
@@ -643,5 +660,22 @@ final class FeatureTourDotsView: NSView {
             (dot == current ? FeatureTourPageView.Style.lit : FeatureTourPageView.Style.dot).setFill()
             NSBezierPath(ovalIn: dotRect(dot)).fill()
         }
+    }
+}
+
+/// The practice box's text view, which tells its edge when it gains or loses the focus.
+final class FeatureTourPracticeTextView: NSTextView {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocusChange?(true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onFocusChange?(false) }
+        return accepted
     }
 }

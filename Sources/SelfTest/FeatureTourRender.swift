@@ -268,10 +268,14 @@ enum FeatureTourRenderCases {
         let backShownRight = index == 0
             ? back?.isHidden == true
             : (back?.isHidden == false && back?.isEnabled == true && back?.title == FeatureTour.backTitle)
-        check("[\(label)] the footer has \(index == 0 ? "no Back" : "Back"), \(last ? "Done" : "Next"), Skip tour "
-              + "and the dots",
+        // The last page shows only Back and Done; every other page shows Skip tour.
+        let skipShownRight = last
+            ? skip?.isHidden == true
+            : (skip?.isHidden == false && skip?.title == FeatureTour.skipTitle)
+        check("[\(label)] the footer has \(index == 0 ? "no Back" : "Back"), \(last ? "Done" : "Next"), "
+              + "\(last ? "no Skip tour" : "Skip tour") and the dots",
               next?.title == (last ? FeatureTour.doneTitle : FeatureTour.nextTitle)
-                && backShownRight && skip?.title == FeatureTour.skipTitle && dots != nil)
+                && backShownRight && skipShownRight && dots != nil)
         if let next {
             let footerParts: Set<String> = [ID.next, ID.back, ID.skip, ID.dots]
             let contentBottom = view.subviews
@@ -350,6 +354,15 @@ enum FeatureTourRenderCases {
     private static func assertPractice(_ view: FeatureTourPageView, note: String, editable: Bool, label: String) {
         let shown = SelfTestRenderCapture.label(ID.practiceNote, in: view)?.stringValue
         let field = SelfTestRenderCapture.find(ID.practiceField, in: view) as? NSTextView
+        // The box has a visible phosphor edge: the cards' own at rest, brighter while focused.
+        let edge = SelfTestRenderCapture.find(ID.practiceBox, in: view)
+        let restingEdge = FeatureTourPageView.practiceEdgeColor(focused: false)
+        let focusedEdge = FeatureTourPageView.practiceEdgeColor(focused: true)
+        check("[\(label)] the practice box has the cards' phosphor edge, brighter when focused",
+              (edge?.layer?.borderWidth ?? 0) >= 1
+                && edge?.layer?.borderColor != nil
+                && (restingEdge.alpha < focusedEdge.alpha)
+                && (edge?.layer?.borderColor.map { $0 == restingEdge || $0 == focusedEdge } ?? false))
         check("[\(label)] the practice box says what to do, and is editable only when the tap is live",
               shown == note && field != nil && field?.isEditable == editable, shown ?? "missing")
     }
