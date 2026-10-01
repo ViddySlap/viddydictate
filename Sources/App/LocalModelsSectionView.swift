@@ -193,7 +193,8 @@ final class LocalModelsSectionView: NSView {
                         // would do nothing. Ollama gets the same per-app semantics below instead.
                         unloadAll: { completion in
                             DispatchQueue.global(qos: .utility).async {
-                                ModelResidency.unloadAll()
+                                // `lms unload --all`, and routing forgets LM Studio's recent loads.
+                                ModelManager.shared.unloadAll(in: .lmStudio)
                                 DispatchQueue.main.async { completion() }
                             }
                         },
@@ -201,7 +202,7 @@ final class LocalModelsSectionView: NSView {
                         apps: .live,
                         unloadAllOllama: { completion in
                             DispatchQueue.global(qos: .utility).async {
-                                OllamaBackend.shared.unloadAll()
+                                ModelManager.shared.unloadAll(in: .ollama)
                                 DispatchQueue.main.async { completion() }
                             }
                         })

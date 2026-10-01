@@ -73,7 +73,8 @@ struct LocalChatTransport {
                     LocalModelRef(backend: .lmStudio, modelID: model), ttlOverrideSeconds: ttl)
                 return (prepared.result, prepared.coldLoaded)
             },
-            unloadLMStudio: { ModelResidency.unload($0) },
+            // Through ModelManager, so routing stops counting the helper as resident (`RecentLocalLoads`).
+            unloadLMStudio: { ModelManager.shared.unload(LocalModelRef(backend: .lmStudio, modelID: $0)) },
             prepareOllama: { ref, contextTokens, ttlSeconds in
                 let prepared = ModelManager.shared.ensureReadyForChat(
                     ref, contextTokens: contextTokens, ttlOverrideSeconds: ttlSeconds)
@@ -83,7 +84,7 @@ struct LocalChatTransport {
                 OllamaBackend.shared.chat(openAIBody: body, keepAliveSeconds: keepAlive,
                                           contextTokens: contextTokens, think: think, timeout: timeout)
             },
-            unloadOllama: { OllamaBackend.shared.unload($0) },
+            unloadOllama: { ModelManager.shared.unload($0) },
             keepAliveSeconds: { keepAliveOverride ?? Settings.modelIdleUnloadSeconds },
             beginRequest: { ModelManager.shared.beginRequest(on: $0) },
             endRequest: { ModelManager.shared.endRequest(on: $0) })

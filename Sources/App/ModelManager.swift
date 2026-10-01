@@ -14,6 +14,7 @@ import Foundation
 ///
 /// No "is it loaded" cache: `ensureReady` re-checks `lms ps` every call (~0.16s), so it self-corrects
 /// if a model was evicted (its own TTL, an LM Studio restart, memory pressure) with no stale state.
+/// `recentLoads` is a record kept FOR route resolution; nothing here ever decides from it.
 final class ModelManager {
     enum CapacityRefusal: Equatable {
         /// A required live fact (resident snapshot, installed size, wired reading, or wire budget)
@@ -155,6 +156,12 @@ final class ModelManager {
     private var ollamaInFlight: [LocalModelRef: Int] = [:]
     private let clock: () -> Date
 
+    /// What this process just made ready, for route resolution's fit check (see `RecentLocalLoads`). Every
+    /// successful readiness records into it, every use refreshes it, and every unload ViddyDictate itself
+    /// performs (the eviction pass, `unload`, `unloadAll`) removes from it. Lock only, so routing can read it
+    /// on the main thread.
+    let recentLoads: RecentLocalLoads
+
     private enum CapacityPreparation {
         /// Resident and usable as it is. `contextLength` is the context it is loaded with, when known.
         case alreadyResident(contextLength: Int?)
@@ -173,9 +180,10 @@ final class ModelManager {
         let contextLength: Int?
     }
 
-    /// `clock` stamps ViddyDictate's own use of an Ollama model; a gate passes a fixed one.
+    /// `clock` stamps ViddyDictate's own use of an Ollama model and ages `recentLoads`; a gate passes a fixed one.
     init(clock: @escaping () -> Date = Date.init) {
         self.clock = clock
+        self.recentLoads = RecentLocalLoads(clock: clock)
     }
 
     /// The idle TTL handed to the local app at load time. One persisted setting governs every model role.
@@ -260,9 +268,12 @@ final class ModelManager {
 
         let canonical = Self.canonical(ref)
         let wanted = canonical.backend == .ollama ? (contextTokens ?? Self.ollamaDefaultContextTokens) : nil
+        let ttl = ttlOverrideSeconds ?? ttl(for: ref.modelID)
         switch prepareCapacity(for: canonical, contextTokens: wanted, dependencies: dependencies) {
         case .alreadyResident(let resident):
             stampUse(canonical)
+            // A use: the local app's idle clock restarts, so routing's does too.
+            recentLoads.recordUse(canonical, ttlSeconds: ttl)
             return (.ready, canonical.backend == .ollama ? (resident ?? wanted) : nil, false)
         case .refused(let reason):
             return (.capacityRefused(reason), nil, false)
@@ -270,7 +281,6 @@ final class ModelManager {
             break
         }
 
-        let ttl = ttlOverrideSeconds ?? ttl(for: ref.modelID)
         let loaded: Bool
         switch ref.backend {
         case .lmStudio:
@@ -283,6 +293,7 @@ final class ModelManager {
         guard loaded else { return (.loadFailed, nil, false) }
         ownedModels.insert(canonical)
         stampUse(canonical)
+        recentLoads.recordUse(canonical, ttlSeconds: ttl)
         return (.ready, wanted, true)
     }
 
@@ -316,6 +327,7 @@ final class ModelManager {
         ollamaInFlight[canonical, default: 0] += 1
         ollamaLastUsed[canonical] = clock()
         usageLock.unlock()
+        recentLoads.touch(canonical)
     }
 
     func endRequest(on ref: LocalModelRef) {
@@ -326,6 +338,36 @@ final class ModelManager {
         ollamaInFlight[canonical] = remaining > 0 ? remaining : nil
         ollamaLastUsed[canonical] = clock()
         usageLock.unlock()
+        recentLoads.touch(canonical)
+    }
+
+    // MARK: - ViddyDictate's own unloads
+
+    /// Unload one model ViddyDictate loaded for itself (the vision helper after its one call). Routing stops
+    /// treating it as resident first, so a resolution racing the unload can only charge it, never exempt it.
+    func unload(_ ref: LocalModelRef, dependencies: CapacityDependencies = .live) {
+        let canonical = Self.canonical(ref)
+        recentLoads.forget(canonical)
+        switch canonical.backend {
+        case .lmStudio: dependencies.unload(ref.modelID)
+        case .ollama: dependencies.ollama?.unload(ref)
+        }
+    }
+
+    /// The Setup tab's Unload all for one app (`lms unload --all`, or `keep_alive: 0` for every model in
+    /// Ollama's `/api/ps`). Every routing record for that app goes, whoever loaded the model. `unloadAll` is
+    /// the app's own command; a gate passes a scripted one.
+    func unloadAll(in backend: LocalBackendID,
+                   unloadAll: (LocalBackendID) -> Void = ModelManager.liveUnloadAll) {
+        recentLoads.forgetAll(in: backend)
+        unloadAll(backend)
+    }
+
+    static func liveUnloadAll(_ backend: LocalBackendID) {
+        switch backend {
+        case .lmStudio: ModelResidency.unloadAll()
+        case .ollama: OllamaBackend.shared.unloadAll()
+        }
     }
 
     private func stampUse(_ ref: LocalModelRef) {
@@ -380,6 +422,9 @@ final class ModelManager {
             guard let snapshot else { continue }
             let present = Set(snapshot.map(\.ref))
             ownedModels = ownedModels.filter { $0.backend != backend || present.contains($0) }
+            // The same proof ends routing's record: a model the app no longer holds (its TTL fired early,
+            // the user unloaded it in LM Studio) stops counting as resident at the first read that shows it.
+            recentLoads.retainOnly(present, in: backend)
         }
         let residents = (lmStudio ?? []) + (ollama ?? [])
 
@@ -436,6 +481,7 @@ final class ModelManager {
                 // Even a failed/no-op unload cannot justify a later, broader attempt. Forgetting the
                 // claim makes the safety boundary tighter; the live recheck below decides capacity.
                 ownedModels.remove(candidate.ref)
+                recentLoads.forget(candidate.ref)
             }
 
             // Let the wired reading catch up with the unload before the recheck reads it. Bounded, and
@@ -576,5 +622,100 @@ final class ModelManager {
                      budgetBytes: UInt64) -> Bool {
         let (total, overflow) = wiredBytes.addingReportingOverflow(incomingBytes)
         return !overflow && total <= budgetBytes
+    }
+}
+
+/// ViddyDictate's own record of the local models it just made ready, the source route resolution's fit check
+/// can read with no I/O at all.
+///
+/// Routing must not charge a resident model twice: live wired memory already holds it (457c1b8). Its other
+/// source, `LocalResidentSetCache`, is a live read (`lms ps`, Ollama's `/api/ps`) that a main-thread
+/// resolution never waits for, and that cannot be reused right after a load because the wired reading moved
+/// by the model's size. The dictation cleanup, Option+P and Option+M resolve on the main thread, and so does
+/// `--websearch-selftest`, so after a load they all saw an empty set and charged the model again: on the
+/// Mac (2026-10-01) Option+L answered once, then stepped retrieval down to a 4B model and reported that
+/// nothing fits. This record is fed by `ModelManager` itself, so it is right there whatever thread asks.
+///
+/// - Every successful `ensureReady` / `ensureReadyForChat` records `(ref, lastUse, ttl)`, `ttl` being the
+///   idle window it handed the local app (the configured one, or a test's override). A reuse of a resident
+///   model records too: the use restarts the app's idle clock.
+/// - Each Ollama request (`beginRequest` / `endRequest`) refreshes `lastUse`.
+/// - A ref counts as resident while `now - lastUse < ttl`. LM Studio and Ollama start their idle clock when a
+///   request ENDS, after the `lastUse` stamped before it, so this window closes no later than the app's own.
+/// - ViddyDictate's own unloads remove the ref (`ModelManager.unload`, `unloadAll(in:)`, the eviction pass),
+///   and so does any `ModelManager` read of an app that shows the ref absent.
+///
+/// A stale entry is SAFE. If LM Studio evicted the model early (memory pressure, a restart) or the user
+/// unloaded it by hand, routing may pick that model on the strength of this record, but routing only picks:
+/// `ModelManager.prepareCapacity` is still the authority for every load, reads the app's live resident set,
+/// finds the model absent, budgets it as a cold load against live wired memory, runs its one eviction pass,
+/// and refuses with `.overBudget` when it still does not fit. Nothing is ever loaded past the budget on this
+/// record's say-so. The refusal is the existing `CleanupClient.overBudgetMessage`: the dictation cleanup
+/// takes its one over-budget step-down retry to the next model that fits; other routes surface the refusal.
+/// The same read drops the entry (`retainOnly`), so the next resolution is right again.
+final class RecentLocalLoads {
+    struct Entry: Equatable {
+        let lastUse: Date
+        let ttlSeconds: TimeInterval
+    }
+
+    private let lock = NSLock()
+    private var entries: [LocalModelRef: Entry] = [:]
+    private let clock: () -> Date
+
+    init(clock: @escaping () -> Date = Date.init) {
+        self.clock = clock
+    }
+
+    /// `ref` was just made ready (or reused) with `ttlSeconds` of idle window. A window of 0 or less records
+    /// nothing: no idle window is known, so routing is not told the model will stay.
+    func recordUse(_ ref: LocalModelRef, ttlSeconds: Int) {
+        let canonical = ModelManager.canonical(ref)
+        lock.lock()
+        defer { lock.unlock() }
+        guard ttlSeconds > 0 else {
+            entries[canonical] = nil
+            return
+        }
+        entries[canonical] = Entry(lastUse: clock(), ttlSeconds: TimeInterval(ttlSeconds))
+    }
+
+    /// A use of a model already on record: its idle clock restarts, with the window it was loaded with.
+    func touch(_ ref: LocalModelRef) {
+        let canonical = ModelManager.canonical(ref)
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[canonical] else { return }
+        entries[canonical] = Entry(lastUse: clock(), ttlSeconds: entry.ttlSeconds)
+    }
+
+    func forget(_ ref: LocalModelRef) {
+        let canonical = ModelManager.canonical(ref)
+        lock.lock()
+        entries[canonical] = nil
+        lock.unlock()
+    }
+
+    func forgetAll(in backend: LocalBackendID) {
+        lock.lock()
+        entries = entries.filter { $0.key.backend != backend }
+        lock.unlock()
+    }
+
+    /// A read of `backend` listed exactly `present` (canonical refs): anything else on record there is gone.
+    func retainOnly(_ present: Set<LocalModelRef>, in backend: LocalBackendID) {
+        lock.lock()
+        entries = entries.filter { $0.key.backend != backend || present.contains($0.key) }
+        lock.unlock()
+    }
+
+    /// The refs of `backends` still inside their idle window. Expired entries are dropped as they are seen.
+    func residentRefs(backends: Set<LocalBackendID>) -> Set<LocalModelRef> {
+        guard !backends.isEmpty else { return [] }
+        let now = clock()
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.filter { now.timeIntervalSince($0.value.lastUse) < $0.value.ttlSeconds }
+        return Set(entries.keys.filter { backends.contains($0.backend) })
     }
 }

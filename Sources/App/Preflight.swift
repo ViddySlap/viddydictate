@@ -395,6 +395,7 @@ extension Preflight {
                 Settings.modelsPower.setLocalAvailabilityState(
                     local.state, models: local.availableLocalModels,
                     installedBackends: local.installedLocalBackends)
+                LocalResidentSetCache.primeLive(models: local.availableLocalModels)
             }
             let helperInstalled = WebSearchBackend.isInstalled
             let keySource = SecretStore.resolveSource(.geminiAPIKey)

@@ -478,25 +478,45 @@ final class ModelsPowerSettingsStore {
     /// `Dictionary(uniqueKeysWithValues:)` if keyed by id, and must never lend one app's size to the other.
     /// The id-keyed closure keeps its old meaning, LM Studio's model, for any caller that reads it directly.
     ///
-    /// The resident set comes from `LocalResidentSetCache`, for the apps the catalog lists, read against the
-    /// same wired reading: a model already resident costs nothing new, exactly as `ModelManager` decides. It
-    /// is read only after the kernel facts, so a Mac whose capacity is unreadable never asks a local app, and
-    /// it never blocks resolution: a slow or failed read is an empty set, the old arithmetic.
+    /// The resident set is `routingResidentRefs`, for the apps the catalog lists, against the same wired
+    /// reading: a model already resident costs nothing new, exactly as `ModelManager` decides. It is read only
+    /// after the kernel facts, so a Mac whose capacity is unreadable never asks a local app, and it never
+    /// blocks resolution: a slow or failed live read adds nothing, which can only refuse more.
     static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
-        liveLocalCapacity(models: models, residents: .shared)
+        liveLocalCapacity(models: models, residents: .shared, recentLoads: ModelManager.shared.recentLoads)
     }
 
-    /// `liveLocalCapacity` over an explicit resident-set cache, so a gate can drive the whole live path with
-    /// an injected reader.
+    /// `liveLocalCapacity` over an explicit resident-set cache and load record, so a gate can drive the whole
+    /// live path with an injected reader and its own `ModelManager`.
     static func liveLocalCapacity(models: [LMStudioModelOption]?,
-                                  residents: LocalResidentSetCache) -> LLMLocalCapacityFacts? {
+                                  residents: LocalResidentSetCache,
+                                  recentLoads: RecentLocalLoads) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
         else { return nil }
         return capacityFacts(
             models: models, wiredBytes: wired, budgetBytes: budget,
-            residentRefs: residents.residentRefs(backends: Set(models.map(\.backend)), wiredBytes: wired))
+            residentRefs: routingResidentRefs(backends: Set(models.map(\.backend)), wiredBytes: wired,
+                                              residents: residents, recentLoads: recentLoads))
+    }
+
+    /// What routing treats as resident: what `ModelManager` itself made ready and has used inside the idle
+    /// window (`RecentLocalLoads`: a lock, no I/O, so it answers on the main thread too), together with the
+    /// live read of what the local apps hold (`LocalResidentSetCache`, when it has a usable answer; it
+    /// adds the models another app or an earlier run loaded).
+    ///
+    /// The record is the half that cannot miss after ViddyDictate's own load: the live read is skipped on
+    /// the main thread and unusable while the wired reading still moves with that load, and on its own it
+    /// let the next resolution charge the model again (the Mac, 2026-10-01). An entry that outlived the model
+    /// is safe: routing only picks, and `ModelManager` re-checks the live resident set and the budget before
+    /// any load, refusing past the budget (see `RecentLocalLoads`).
+    static func routingResidentRefs(backends: Set<LocalBackendID>, wiredBytes: UInt64,
+                                    residents: LocalResidentSetCache,
+                                    recentLoads: RecentLocalLoads) -> Set<LocalModelRef> {
+        guard !backends.isEmpty else { return [] }
+        return recentLoads.residentRefs(backends: backends)
+            .union(residents.residentRefs(backends: backends, wiredBytes: wiredBytes))
     }
 
     /// The pure half of `liveLocalCapacity`, so a gate can check the size keying without the kernel.

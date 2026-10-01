@@ -40,6 +40,9 @@ enum WebSearchSelfTest {
         let measuredLocal = LLMProviderDetection.observeLocal()
         Settings.modelsPower.setLocalAvailabilityState(
             measuredLocal.presence.state, models: measuredLocal.models)
+        // As the app does after measuring: start the resident read now, because this pipeline runs on the
+        // main thread, where route resolution never waits for one.
+        LocalResidentSetCache.primeLive(models: measuredLocal.models)
         print("=== ViddyDictate Web-Search (Option+L / Option+G) — selftest ===")
         print("local availability measured: \(measuredLocal.presence.state)")
         print("retrieval=\(Settings.searchModel)  synth=\(Settings.searchSynthModel)")
