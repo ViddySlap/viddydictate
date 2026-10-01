@@ -39,6 +39,8 @@ The rail creates a disposable home and temp root under `/private/tmp`. Determini
 
 Failures from required service commands are red and named by dependency. The Claude and contained Codex smokes are red if their required CLI/auth/containment path is missing or unavailable. A failed notes HTTP bind is marked `UNVERIFIED` only when the selftest fails at listener startup and an independent loopback bind is also denied by the sandbox; any host-capable route or assertion failure remains red. GUI/AppKit environment-denial messages are likewise reported as `UNVERIFIED`, never silently called green. The conductor/final host must clear unverified gates.
 
+An abstaining service gate is never a PASS. A `normal` gate that cannot run because its apparatus or a precondition is missing exits 0 with a `[skip] ... SKIPPED: <reason>` line (gates print the shared `[precondition-missing]` marker). verify.sh reports it as `[verify][service][SKIP] <label>: <reason>`, counts it, and the tier and full summaries say how many gates were skipped rather than passed. A `required` gate that abstains is red. After the services tier, a meta-gate fails any service gate whose log shows both a PASS line and `[precondition-missing]`. The classifier lives in `scripts/service-gate-classify.sh` and has its own deterministic selftest.
+
 The Codex service gate invokes the shipped `CodexProviderSmoke` helper with
 `--all-shipped-pairs`. It derives the exact distinct pair inventory from canonical source defaults,
 uses fixed synthetic prompt/input/output bytes, runs pairs sequentially through the shipping containment

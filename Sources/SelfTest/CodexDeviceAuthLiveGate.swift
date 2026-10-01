@@ -25,17 +25,17 @@ enum CodexDeviceAuthLiveGate {
     private static let readDeadline: TimeInterval = 25
 
     /// Apparatus is missing rather than the product being wrong: abstain, exit 0, and say so with the
-    /// marker `verify.sh` recognises. A gate that reds on a machine with no network teaches everyone to
-    /// ignore it.
+    /// precondition marker `verify.sh` counts as SKIP. A gate that reds on a machine with no network
+    /// teaches everyone to ignore it; a gate that abstains to PASS hid a two-week Codex outage.
     private static func skip(_ reason: String) -> Bool {
-        print("[skip] [\(label)] SKIPPED \(reason)")
-        return true
+        SelfTestAbstain.skip(label: label, reason: reason)
     }
 
     static func run() -> Bool {
-        let binary = CodexIsolationFoundation.codexBinary
-        guard FileManager.default.isExecutableFile(atPath: binary) else {
-            return skip("vendored Codex CLI is not installed at the expected path")
+        // The same resolution the boundary uses. Device login runs the vendor CLI in place, so the
+        // bundle executable is launched inside its own signed bundle.
+        guard let binary = CodexCLILocation.resolve().candidate?.executable else {
+            return skip("Codex CLI not found at any supported ChatGPT.app location")
         }
 
         let root = FileManager.default.temporaryDirectory

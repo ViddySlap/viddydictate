@@ -46,17 +46,21 @@ enum CodexCatalogLiveGate {
         // to ignore this gate - which is exactly how the drift it guards against hid in the first
         // place. Note `normal` in verify.sh does NOT mean "allowed to fail": run_service_gate
         // records a failure on ANY non-zero exit and only treats `required` as also forbidding a
-        // skip. So abstention has to be an exit-0 SKIPPED marker, not a non-zero exit.
-        let connection = CodexProviderRuntime.connectionState(runnerPath: runner)
-        guard case .connected = connection else {
+        // skip. So abstention has to be an exit-0 SKIPPED marker, not a non-zero exit, and since
+        // 2026-10-01 it also carries the precondition marker, so verify.sh counts it as SKIP and never
+        // as PASS. The operator cause is printed with the user sentence: the sentence alone hid the
+        // 2026-09 outage ("could not be sandboxed" while the CLI was simply missing).
+        let report = CodexProviderRuntime.connectionReport(runnerPath: runner)
+        guard case .connected = report.state else {
             let cause: String
-            switch connection {
+            switch report.state {
             case .connected: cause = "connected"
             case .disconnected: cause = "dedicated Codex home is not logged in"
-            case .unavailable(let reason): cause = reason
+            case .unavailable(let reason):
+                cause = reason + (report.operatorCause.map { " (operator cause: \($0))" } ?? "")
             }
-            print("[skip] [codex-catalog-live] SKIPPED apparatus unavailable: \(cause)")
-            return true
+            return SelfTestAbstain.skip(
+                label: "codex-catalog-live", reason: "apparatus unavailable: \(cause)")
         }
 
         // VDDBG_PATIENT lets a diagnosing run wait far past the production line-read
