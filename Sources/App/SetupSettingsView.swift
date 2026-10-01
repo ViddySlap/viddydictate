@@ -83,6 +83,9 @@ final class SetupSettingsView: NSView {
         // been asked anything new here.
         // `self.` because the initialiser parameter of the same name shadows the property here.
         self.localModels.onHeightChanged = { [weak self] in self?.rebuild() }
+        // An app row's Install landing, or its Start coming back, changes the machine: measure it again, the
+        // same way Check again does, so the rows (and the preflight rows below them) show what is true now.
+        self.localModels.onAppsChanged = { [weak self] in self?.check() }
         check()
     }
 
@@ -104,6 +107,9 @@ final class SetupSettingsView: NSView {
                 let key = GeminiKeySetup.status(observation.webAnswerKeySource)
                 Log.write("setup tab: \(report.logToken) \(plan.logToken) gemini-key=\(key.isStored)")
                 self.content = .report(report, plan, key)
+                // The local app rows read this same observation's `.local` presence (S3a's per-app readings),
+                // so they and the preflight Local row can never disagree, and nothing probes an app twice.
+                self.localModels.showLocalApps(observation.providers[.local])
                 self.rebuild()
             }
         }
@@ -176,10 +182,10 @@ final class SetupSettingsView: NSView {
         addSubview(geminiKey)
         y = geminiKey.frame.maxY + 14
 
-        // The local-model budget and idle timer, then LM Studio's own JIT timeout as a read-only row. Third
-        // among the sections that hold controls, and above the read-only preflight rows, because it is a
-        // setting rather than a check - and because a first-run user needs a provider and a key before the
-        // question of how much memory a local model may hold arises at all.
+        // The local apps, the local-model budget and idle timer, then LM Studio's own JIT timeout as a
+        // read-only row. Third among the sections that hold controls, and above the read-only preflight rows,
+        // because it is a setting rather than a check - and because a first-run user needs a provider and a
+        // key before the question of how much memory a local model may hold arises at all.
         addSubview(sectionHeader(LocalModelSetup.header, y: y))
         y += 18
         localModels.frame.origin = NSPoint(x: 0, y: y)

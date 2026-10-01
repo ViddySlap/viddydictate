@@ -67,16 +67,39 @@ enum LocalModelPickerItems {
     static func routingGrid(catalog: [LMStudioModelOption]?, pinned: LLMProviderBundle,
                             tested: LLMProviderBundle?) -> [Item] {
         let pin = pinned.localRef
-        var options = LMStudioModelCatalog.pickerOptions(discovered: catalog)
-        if !pinned.modelID.isEmpty {
-            options.append(LMStudioModelOption(
-                modelID: pinned.modelID, label: shortName(pinned.modelID), backend: pin.backend))
-        }
+        let options = routingGridOptions(catalog: catalog, pinned: pinned)
         let testedRef = tested?.localRef
         return build(options: options, selected: pin) { ref in
             if ref == testedRef { return "  ·  Shipped default" }
             return ref == pin ? "  ·  Custom" : ""
         }
+    }
+
+    /// The rows the routing grid's Local picker is built from: the catalog (or the shipped fallback list), then
+    /// the pin when it has an id.
+    static func routingGridOptions(catalog: [LMStudioModelOption]?,
+                                   pinned: LLMProviderBundle) -> [LMStudioModelOption] {
+        var options = LMStudioModelCatalog.pickerOptions(discovered: catalog)
+        if !pinned.modelID.isEmpty {
+            options.append(LMStudioModelOption(
+                modelID: pinned.modelID, label: shortName(pinned.modelID), backend: pinned.resolvedLocalBackend))
+        }
+        return options
+    }
+
+    /// The routing grid's "Local preset:" badge, naming the app by the picker's own rule: only when the
+    /// route's Local picker names apps (`labelsApps` over the same rows), "LOCAL <id>" reads
+    /// "LOCAL · Ollama · <id>". With one app, or for any bundle that is not Local or a badge that does not lead
+    /// with the bundle's id, it is returned unchanged, so an LM-Studio-only Mac's line is byte-identical.
+    static func presetBadge(_ badge: String, bundle: LLMProviderBundle,
+                            catalog: [LMStudioModelOption]?) -> String {
+        guard bundle.provider == .local, !bundle.modelID.isEmpty,
+              labelsApps(routingGridOptions(catalog: catalog, pinned: bundle)),
+              let space = badge.firstIndex(of: " "),
+              badge[badge.index(after: space)...].hasPrefix(bundle.modelID) else { return badge }
+        let word = String(badge[..<space])
+        let rest = String(badge[badge.index(after: space)...])
+        return word + appPrefixSeparator + bundle.resolvedLocalBackend.displayName + appPrefixSeparator + rest
     }
 
     /// A Sticky Skill card's Local picker (`StickySkillsSettingsView`): the catalog (or the fallback list),

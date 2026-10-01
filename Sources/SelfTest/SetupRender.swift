@@ -31,6 +31,8 @@ import Security
 ///   - `setup-local-models-jit-ok.png`   - the LM Studio row when there is nothing to do.
 ///   - `setup-local-models-no-facts.png` - the machine whose kernel ceiling is unreadable, where there is no
 ///                                budget to state and the section says so instead of guessing one.
+///   - `setup-local-apps-*.png` - the local app rows and the Preferred local app (Ollama lane S3c), listed in
+///                                `LocalAppsSetupRenderCases`.
 /// The pair is the before/after proof that the surface is re-runnable rather than a first-run snapshot.
 enum SetupRender {
     private static var failures = 0
@@ -77,7 +79,7 @@ enum SetupRender {
             completion(observation)
         }, localModels: .init(store: store.store, facts: { .live }, jit: { jit },
                               residency: residency.reader, unloadAll: residency.unloader,
-                              now: { Self.clock }))
+                              now: { Self.clock }, apps: LocalAppActionsRecorder().actions))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 1200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -135,6 +137,7 @@ enum SetupRender {
         driveGeminiKeySection(outDir: outDir)
         driveLocalModelsWithoutKernelFacts(outDir: outDir)
         driveResidencyPending(outDir: outDir)
+        LocalAppsSetupRenderCases.run(outDir: outDir) { name, ok, detail in check(name, ok, detail) }
         print("[setup-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
     }
@@ -416,7 +419,8 @@ enum SetupRender {
                                                         jit: { nil },
                                                         residency: residency.reader,
                                                         unloadAll: residency.unloader,
-                                                        now: { clock }))
+                                                        now: { clock },
+                                                        apps: LocalAppActionsRecorder().actions))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 2200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -466,7 +470,8 @@ enum SetupRender {
                                                         jit: { nil },
                                                         residency: residency.reader,
                                                         unloadAll: residency.unloader,
-                                                        now: { clock }))
+                                                        now: { clock },
+                                                        apps: LocalAppActionsRecorder().actions))
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 2200),
                             styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
@@ -1116,6 +1121,8 @@ final class LocalResidencyStub {
 final class LocalModelStore {
     var position: Double
     var seconds: Int
+    /// The Preferred local app; nil is Automatic. Never `Settings.preferredLocalBackend`.
+    var preferred: LocalBackendID?
 
     init(position: Double, seconds: Int) {
         self.position = position
@@ -1127,6 +1134,8 @@ final class LocalModelStore {
             budgetPosition: { [self] in position },
             setBudgetPosition: { [self] in position = $0 },
             idleSeconds: { [self] in seconds },
-            setIdleSeconds: { [self] in seconds = $0 })
+            setIdleSeconds: { [self] in seconds = $0 },
+            preferredBackend: { [self] in preferred },
+            setPreferredBackend: { [self] in preferred = $0 })
     }
 }

@@ -389,7 +389,7 @@ enum LMStudioInstaller {
             if clock() - started >= bound {
                 throw InstallerError.operation(
                     "LM Studio's CLI did not appear at \(lmsURL.path) after opening LM Studio. "
-                        + "Open LM Studio once, then choose Try again.")
+                        + "Open LM Studio once, then choose Retry.")
             }
             sleep(pollInterval)
         }

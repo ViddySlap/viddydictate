@@ -151,8 +151,9 @@ enum InstallProgress {
     /// app and model rows, which the picker does not list. Phase from the durable bootstrap record, detail
     /// from what the running step reported: real bytes from a streamed pull, or the approval wait.
     ///
-    /// TODO(S3c/S8): the Ollama rows on the Setup tab, the revived first-run window, and the point-of-use
-    /// panel's running page read `BootstrapInstallCoordinator.activity(for:)` and render through this.
+    /// The point-of-use panel's running page and the Setup tab's local app rows read
+    /// `BootstrapInstallCoordinator.activity(for:)` and render through this.
+    /// TODO(S8): the revived first-run window's Ollama rows render through this too.
     static func statusText(for record: BootstrapComponentRecord, activity: InstallerLocalActivity?) -> String {
         switch record.phase {
         case .pending: return waitingText

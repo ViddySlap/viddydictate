@@ -439,6 +439,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .installerLocalStepsSelftest: .init(tier: .deterministic) { _ in
         InstallerLocalStepsFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure: hand-built S3a presences and bootstrap records into the row builder, the point-of-use policy and
+    // the preset badge. No view, no store, no queue, no LM Studio, no Ollama. The AppKit half is photographed
+    // by --setup-render and --point-of-use-render.
+    .localAppsSetupSelftest: .init(tier: .deterministic) { _ in
+        LocalAppsSetupFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

@@ -59,7 +59,7 @@ enum OllamaInstaller {
         "macOS will ask for Touch ID or your password so Ollama can install its command-line tool; approve it."
     /// The actionable end of an unanswered prompt. The row does not retry this on its own: waiting again
     /// would only ask the same question of a user who is not there.
-    static let approvalTimeoutMessage = "Open Ollama and approve its macOS prompt, then choose Try again."
+    static let approvalTimeoutMessage = "Open Ollama and approve its macOS prompt, then choose Retry."
 
     typealias CommandResult = LMStudioInstaller.CommandResult
     typealias CommandRunner = LMStudioInstaller.CommandRunner
@@ -125,7 +125,7 @@ enum OllamaInstaller {
                 return "Ollama could not download \(model): \(reason)"
             case let .pullStalled(model):
                 return "Ollama's download of \(model) made no progress for "
-                    + "\(Int(OllamaInstaller.pullIdleBound / 60)) minutes. Check the network, then choose Try again."
+                    + "\(Int(OllamaInstaller.pullIdleBound / 60)) minutes. Check the network, then choose Retry."
             case let .pullIncomplete(model):
                 return "Ollama's download of \(model) stopped before it finished"
             case let .operation(reason):
@@ -420,7 +420,7 @@ enum OllamaInstaller {
             if backend.isInstalled() {
                 throw InstallerError.serverNotRunning(
                     "Ollama is installed as a command-line tool, but its server is not running. "
-                        + "Start it with ollama serve, then choose Try again.")
+                        + "Start it with ollama serve, then choose Retry.")
             }
             throw InstallerError.serverNotRunning("Ollama is not installed")
         }

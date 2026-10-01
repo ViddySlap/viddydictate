@@ -578,7 +578,7 @@ enum OllamaInstallerScriptedSelfTest {
             let waited = neverClock.now - started
             reporter.record("an unanswered prompt ends at ten minutes with the actionable message",
                             waited >= 600 && waited < 600 + 2 * OllamaInstaller.approvalPollInterval
-                                && failure.message.contains("Open Ollama and approve its macOS prompt, then choose Try again")
+                                && failure.message.contains("Open Ollama and approve its macOS prompt, then choose Retry")
                                 && neverAnnounced == 1,
                             "waited \(Int(waited)) s: \(failure.message)")
             reporter.record("that timeout is never retried by the engine",

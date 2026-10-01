@@ -131,8 +131,8 @@ struct PointOfUseInstallOffer: Equatable {
     /// installer - the same descriptors, the same engine, a second entry point rather than a second path.
     let components: [InstallerComponentDescriptor]
     let buttons: [PointOfUseButton]
-    /// Set only on a Mac with neither local app: which app "Install now" could install instead. `components`
-    /// and "Install now" stay the recommended LM Studio install; the choice is what a panel offers beside it.
+    /// Set only on a Mac with neither local app: "Install now" then opens this choice instead of installing.
+    /// `components` stays the recommended LM Studio install, which is also the choice's LM Studio option.
     var localAppChoice: PointOfUseLocalAppChoice? = nil
 
     var totalDownloadBytes: Int64? {
@@ -153,7 +153,7 @@ struct PointOfUseChooser: Equatable {
     /// enters the same install offer rather than a second flow.
     let localComponents: [InstallerComponentDescriptor]
     /// Set only on a Mac with neither local app: "Set up local models" then asks WHICH app. `localComponents`
-    /// stays the recommended LM Studio install, which is what the button does until a panel draws the choice.
+    /// stays the recommended LM Studio install, which is also the choice's LM Studio option.
     var localAppChoice: PointOfUseLocalAppChoice? = nil
 }
 
@@ -182,9 +182,9 @@ struct PointOfUseLocalAppOption: Equatable {
 /// Every button here is `.install` or `.skip`, so the `PointOfUseRoute` invariant holds on this page too:
 /// the panel can still only skip, install, or open a provider's sign-in.
 ///
-/// TODO(S3c/S8): `InstallOfferPanel` renders this as the page "Set up local models" (or "Install now") opens
-/// when an offer carries it, and hands the picked app to `PointOfUseOfferPresenter.installLocalApp(_:)`.
-/// Until then the panel installs LM Studio, the recommended option, exactly as before.
+/// `InstallOfferPanel` draws this as its own page, which "Set up local models" (or "Install now") opens when
+/// an offer carries it (`PointOfUsePolicy.installStep`). The picked app goes to
+/// `PointOfUseOfferPresenter.installLocalApp(_:)`. The page opens on LM Studio, its first button.
 struct PointOfUseLocalAppChoice: Equatable {
     let header: String
     let lines: [String]
@@ -201,6 +201,45 @@ struct PointOfUseLocalAppChoice: Equatable {
     func option(_ backend: LocalBackendID) -> PointOfUseLocalAppOption? {
         options.first { $0.backend == backend }
     }
+
+    /// The option a button on this page installs, or nil for Not now.
+    func option(forButton id: String) -> PointOfUseLocalAppOption? {
+        options.first { $0.button.id == id }
+    }
+
+    /// One cell of the choice page: the option's label above its install button's title, and under it what
+    /// the option is, what it downloads, and (Ollama) what macOS will ask. Not now has no label.
+    struct Cell: Equatable {
+        let button: PointOfUseButton
+        /// Drawn above the title, so "simple, recommended" and "advanced" read before the app's name.
+        let badge: String?
+        let detail: String
+    }
+
+    /// The page's cells in button order. Every option's warning is IN its cell rather than in a footnote,
+    /// so the prompt is read by whoever is about to pick the app that raises it.
+    var cells: [Cell] {
+        buttons.map { button in
+            guard let option = option(forButton: button.id) else {
+                return Cell(button: button, badge: nil, detail: button.detail)
+            }
+            let detail = [option.detail, button.detail, option.warning].compactMap { $0 }.joined(separator: " ")
+            return Cell(button: button, badge: option.label.uppercased(), detail: detail)
+        }
+    }
+}
+
+/// What pressing an install button does on the panel, decided from the page it was pressed on (spec D3).
+enum PointOfUseInstallStep: Equatable {
+    /// The offer carries a local-app choice (the Mac has neither app): open the choice page instead of
+    /// installing on the user's behalf.
+    case chooseApp(PointOfUseLocalAppChoice)
+    /// The choice page's button for this app was pressed.
+    case installApp(LocalBackendID)
+    /// Install the page's own components: an offer with no choice, or Retry on the running page.
+    case installComponents
+    /// Nothing: a button that installs nothing on this page.
+    case none
 }
 
 enum PointOfUseOffer: Equatable {
@@ -544,6 +583,7 @@ enum PointOfUsePolicy {
     static let localButtonID = "set-up-local-models"
     static let lmStudioAppButtonID = "install-lm-studio"
     static let ollamaAppButtonID = "install-ollama"
+    static let retryButtonID = "retry"
 
     static let surfaceIdentifier = "point-of-use-offer"
     static let headerIdentifier = "point-of-use-header"
@@ -574,13 +614,61 @@ enum PointOfUsePolicy {
     }
 
     /// `progressLine` with what the running row reported: real bytes for an Ollama pull, or the wait for
-    /// Ollama's macOS prompt. Every other phase reads exactly as `progressLine` does.
-    ///
-    /// TODO(S3c/S8): `InstallOfferPanel`'s running page renders rows through this, with
-    /// `BootstrapInstallCoordinator.activity(for:)`, and redraws on `didReportActivity`.
+    /// Ollama's macOS prompt. Every other phase reads exactly as `progressLine` does. `InstallOfferPanel`'s
+    /// running page renders its rows through this with `BootstrapInstallCoordinator.activity(for:)`, and the
+    /// presenter redraws it on `didReportActivity`.
     static func progressLine(_ record: BootstrapComponentRecord,
                              activity: InstallerLocalActivity?) -> String {
         guard record.phase == .installing, activity != nil else { return progressLine(record) }
         return "\(record.title)   \(InstallProgress.statusText(for: record, activity: activity))"
+    }
+
+    /// The running page's lines: one per row, then, while Ollama's own row has not landed, the warning about
+    /// its macOS prompt (D8: said before the install and kept beside it while it runs, because the prompt
+    /// appears in the middle of the install, behind whatever the user went back to).
+    static func runningLines(_ records: [BootstrapComponentRecord],
+                             activity: (String) -> InstallerLocalActivity?) -> [String] {
+        var lines = records.map { progressLine($0, activity: activity($0.id)) }
+        if records.contains(where: { $0.id == BootstrapInstallPlan.ollama.id && $0.phase != .installed }) {
+            lines.append(OllamaInstaller.adminPromptWarning)
+        }
+        return lines
+    }
+
+    /// The running page's buttons. None while anything is still waiting or installing: the page reports, and
+    /// esc closes it without cancelling (B9). Once the queue has finished with a failed row, Retry runs the
+    /// same rows again through the same queue - the word every installer failure tells the user to choose
+    /// (`InstallProgress.retryTitle`) - and Close leaves it. Both are `.install` / `.skip`, so the
+    /// `PointOfUseRoute` invariant holds on this page too.
+    static func runningButtons(_ records: [BootstrapComponentRecord]) -> [PointOfUseButton] {
+        let finished = !records.contains { $0.phase == .pending || $0.phase == .installing }
+        guard finished, records.contains(where: { $0.phase == .failed }) else { return [] }
+        return [
+            PointOfUseButton(id: retryButtonID, title: InstallProgress.retryTitle,
+                             detail: "Runs the rows that stopped again. The ones that finished stay.",
+                             route: .install),
+            PointOfUseButton(id: skipButtonID, title: "Close",
+                             detail: "Nothing else is installed and your text is untouched.",
+                             route: .skip),
+        ]
+    }
+
+    /// What an `.install` button does on the page it was pressed on. `offer` is the offer page (nil on the
+    /// other pages), `choice` the app-choice page (nil elsewhere); `running` is true on the running page.
+    ///
+    /// On a Mac with neither app the offer's install button ("Install now", or the chooser's "Set up local
+    /// models") opens the choice rather than installing LM Studio unasked; only the choice page installs an
+    /// app. A button whose route is not `.install` never reaches an install from here.
+    static func installStep(pressed button: PointOfUseButton, offer: PointOfUseOffer?,
+                            choice: PointOfUseLocalAppChoice?, running: Bool) -> PointOfUseInstallStep {
+        guard button.route == .install else { return .none }
+        if let choice {
+            return choice.option(forButton: button.id).map { .installApp($0.backend) } ?? .none
+        }
+        if let offer {
+            if let appChoice = offer.localAppChoice { return .chooseApp(appChoice) }
+            return .installComponents
+        }
+        return running ? .installComponents : .none
     }
 }

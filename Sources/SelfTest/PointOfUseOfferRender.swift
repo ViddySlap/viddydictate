@@ -15,6 +15,12 @@ import Cocoa
 ///   - `offer-install-model.png`- the same offer where only the model is missing, quoting its MEASURED size.
 ///   - `offer-running.png`      - the install running, one row done, one row failed with the real error.
 ///   - `offer-selection.png`    - the same chooser with the selection moved, so the highlight is visible.
+///   - `offer-local-app-choice.png` - the page "Set up local models" opens on a Mac with neither local app:
+///                                LM Studio first, badged simple and recommended; Ollama advanced, with the
+///                                macOS-prompt warning in its own cell; Not now (Ollama lane S3c).
+///   - `offer-local-app-choice-ollama.png` - the same page with the selection moved onto Ollama.
+///   - `offer-running-ollama-approval.png` - Ollama's install waiting on its macOS prompt: the row says so,
+///                                and the warning stays under it.
 ///
 /// What a screenshot cannot assert, and this gate does: that every line the policy produced actually
 /// reached a control rather than being dropped by the layout, that no line is clipped by the box it was
@@ -97,6 +103,9 @@ enum PointOfUseOfferRender {
                     expectPrerequisite: false)
         print("--- the install running, including a row that failed ---")
         renderRunning(modelOnly, outDir: outDir)
+        print("--- D3: which local app, on a Mac with neither ---")
+        renderLocalAppChoice(chooser, outDir: outDir)
+        renderOllamaApproval(chained, outDir: outDir)
 
         print("[point-of-use-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
@@ -201,13 +210,121 @@ enum PointOfUseOfferRender {
         check("a failed row shows the vendor's own text, not a generic message",
               rendered.last?.contains("Could not resolve host: huggingface.co") == true,
               rendered.last ?? "")
-        check("the running page offers no buttons to arrow through", panel.buttons.isEmpty)
+        // The queue has finished with a failed row, so the page offers Retry - the word the failure message
+        // tells the user to choose - and Close. Both only install or skip.
+        check("a finished install with a failed row offers Retry and Close",
+              panel.buttons.map(\.title) == [InstallProgress.retryTitle, "Close"]
+                && panel.buttons.map(\.route) == [.install, .skip],
+              panel.buttons.map(\.title).joined(separator: ","))
+        check("Retry and Close reached the panel as cells",
+              panel.buttons.allSatisfy {
+                  SelfTestRenderCapture.find(PointOfUsePolicy.buttonIdentifier($0.id), in: view) != nil
+              })
+        // While a row is still installing there is nothing to press: esc closes and the download keeps going.
+        var installing = BootstrapComponentRecord(id: BootstrapInstallPlan.gemma.id,
+                                                  title: LMStudioInstaller.gemmaModelID)
+        installing.markInstalling()
+        _ = panel.renderForSeam(.running(install, [done, installing]))
+        check("while a row is still installing the running page offers no buttons", panel.buttons.isEmpty)
+        _ = panel.renderForSeam(.running(install, [done, failed]))
         check("the running heading names the feature, not its internal id",
               SelfTestRenderCapture.label(PointOfUsePolicy.headerIdentifier, in: view)?.stringValue
                 == "INSTALLING - EMAIL MODE",
               SelfTestRenderCapture.label(PointOfUsePolicy.headerIdentifier, in: view)?
                 .stringValue ?? "missing")
         assertNotClipped(in: view, label: "running")
+    }
+
+    /// D3's page, on the chooser a Mac with nothing installed gets. Drawn from the chooser's own choice, so
+    /// what is photographed is what "Set up local models" opens (`PointOfUsePolicy.installStep`).
+    private static func renderLocalAppChoice(_ offer: PointOfUseOffer, outDir: String) {
+        guard let choice = offer.localAppChoice else {
+            check("the bare-machine chooser carries a local-app choice", false)
+            return
+        }
+        let setUp = offer.buttons.first { $0.id == PointOfUsePolicy.localButtonID }
+        check("Set up local models opens the choice rather than installing LM Studio unasked",
+              setUp.map { PointOfUsePolicy.installStep(pressed: $0, offer: offer, choice: nil, running: false) }
+                == .chooseApp(choice))
+
+        let panel = InstallOfferPanel()
+        let view = panel.renderForSeam(.appChoice(offer, choice))
+        SelfTestRenderCapture.capture(view, to: outDir + "/offer-local-app-choice.png", name: "local app choice",
+                                      report: check)
+        let header = SelfTestRenderCapture.label(PointOfUsePolicy.headerIdentifier, in: view)?.stringValue
+        check("the choice page's header is the choice's own", header == choice.header, header ?? "missing")
+        for (index, line) in choice.lines.enumerated() {
+            let field = SelfTestRenderCapture.label(PointOfUsePolicy.lineIdentifier(index), in: view)
+            check("choice line \(index) reached the panel intact", field?.stringValue == line,
+                  field?.stringValue ?? "missing")
+        }
+        check("the page's buttons are LM Studio, Ollama, Not now, in that order",
+              panel.buttons.map(\.id) == [PointOfUsePolicy.lmStudioAppButtonID, PointOfUsePolicy.ollamaAppButtonID,
+                                          PointOfUsePolicy.skipButtonID],
+              panel.buttons.map(\.id).joined(separator: ","))
+        check("every button on the page only installs or skips",
+              panel.buttons.allSatisfy { [.install, .skip].contains($0.route.kind) })
+
+        let cells = choice.cells.compactMap {
+            SelfTestRenderCapture.find(PointOfUsePolicy.buttonIdentifier($0.button.id), in: view)
+        }
+        check("all three cells reached the panel, left to right, one row, one width",
+              cells.count == 3 && zip(cells, cells.dropFirst()).allSatisfy { $0.frame.minX < $1.frame.minX }
+                && Set(cells.map { Int($0.frame.minY.rounded()) }).count == 1
+                && Set(cells.map { Int($0.frame.width.rounded()) }).count == 1)
+        let texts = choice.cells.map { content -> [String] in
+            guard let cell = SelfTestRenderCapture.find(PointOfUsePolicy.buttonIdentifier(content.button.id),
+                                                        in: view) else { return [] }
+            return SelfTestRenderCapture.allViews(in: cell).compactMap { ($0 as? NSTextField)?.stringValue }
+        }
+        check("LM Studio's cell is badged simple and recommended, Ollama's advanced",
+              texts.count == 3 && texts[0].contains("SIMPLE - RECOMMENDED") && texts[1].contains("ADVANCED")
+                && !texts[1].contains("SIMPLE - RECOMMENDED") && !texts[2].contains("ADVANCED"),
+              texts.map { $0.joined(separator: " / ") }.joined(separator: " | "))
+        check("Ollama's cell carries the macOS approval warning; LM Studio's does not",
+              texts.count == 3 && texts[1].contains { $0.contains(OllamaInstaller.adminPromptWarning) }
+                && !texts[0].contains { $0.contains("Touch ID") })
+        check("the page opens on LM Studio", panel.selectedButton?.id == PointOfUsePolicy.lmStudioAppButtonID,
+              panel.selectedButton?.id ?? "nil")
+        assertNotClipped(in: view, label: "local app choice")
+
+        let firstInk = ink(view)
+        panel.moveRight()
+        let moved = panel.renderForSeam(.appChoice(offer, choice))
+        SelfTestRenderCapture.capture(moved, to: outDir + "/offer-local-app-choice-ollama.png",
+                                      name: "local app choice, Ollama selected", report: check)
+        check("moving right selects Ollama and changes the pixels",
+              panel.selectedButton?.id == PointOfUsePolicy.ollamaAppButtonID && abs(ink(moved) - firstInk) > 0.0001,
+              panel.selectedButton?.id ?? "nil")
+        check("pressing Ollama's cell installs Ollama",
+              panel.selectedButton.map {
+                  PointOfUsePolicy.installStep(pressed: $0, offer: nil, choice: choice, running: false)
+              } == .installApp(.ollama))
+    }
+
+    /// Ollama's own row, running, waiting on its macOS prompt: the panel reads the queue's report for the row
+    /// (`InstallOfferPanel.activity`) and keeps the warning on screen while the prompt is the thing to do.
+    private static func renderOllamaApproval(_ offer: PointOfUseOffer, outDir: String) {
+        guard let choice = offer.localAppChoice, let option = choice.option(.ollama) else {
+            check("the install offer on a Mac with neither app carries the Ollama option", false)
+            return
+        }
+        let install = PointOfUsePolicy.installOffer(for: .email, outstanding: option.components)
+        var row = BootstrapComponentRecord(id: BootstrapInstallPlan.ollama.id, title: BootstrapInstallPlan.ollama.title)
+        row.markInstalling()
+        let panel = InstallOfferPanel()
+        panel.activity = { $0 == BootstrapInstallPlan.ollama.id ? .awaitingApproval(.ollama) : nil }
+        let view = panel.renderForSeam(.running(install, [row]))
+        SelfTestRenderCapture.capture(view, to: outDir + "/offer-running-ollama-approval.png",
+                                      name: "Ollama approval wait", report: check)
+        let first = SelfTestRenderCapture.label(PointOfUsePolicy.lineIdentifier(0), in: view)?.stringValue
+        let second = SelfTestRenderCapture.label(PointOfUsePolicy.lineIdentifier(1), in: view)?.stringValue
+        check("Ollama's running row says it is waiting on the user's approval, not failing",
+              first == "Ollama   waiting for you to approve Ollama's macOS prompt", first ?? "missing")
+        check("the warning stays on the running page under it",
+              second == OllamaInstaller.adminPromptWarning, second ?? "missing")
+        check("a waiting row offers nothing to press", panel.buttons.isEmpty)
+        assertNotClipped(in: view, label: "Ollama approval wait")
     }
 
     /// The whole answer a user used to get when a mode had no model: one toast, and then nothing.

@@ -164,16 +164,20 @@ final class ModelsPowerSettingsView: NSView {
 
     /// The provenance row describes the provider that will actually run this route. Remembered bundles for
     /// other providers remain available for switching, but they are not evidence about the selected model.
+    ///
+    /// A Local badge names its app by the Local picker's own rule (`LocalModelPickerItems.presetBadge`): only
+    /// when the route's picker over `localCatalog` names apps. With one app the badge is unchanged.
     static func provenancePresentation(
         for route: LLMRouteID,
         store: ModelsPowerSettingsStore,
+        localCatalog: [LMStudioModelOption]? = nil,
         ratification: (LLMProvider) -> LLMRatificationState
     ) -> ProvenancePresentation {
         let bundle = store.selectedBundle(for: route)
+        let badge = CloudUpdateSurface.provenanceRow(bundle: bundle, ratification: ratification(bundle.provider))
         return ProvenancePresentation(
             bundle: bundle,
-            badge: CloudUpdateSurface.provenanceRow(
-                bundle: bundle, ratification: ratification(bundle.provider)))
+            badge: LocalModelPickerItems.presetBadge(badge, bundle: bundle, catalog: localCatalog))
     }
 
     /// What the inline rescue says (D6). Pure, so the deterministic rail covers the wording rather than only
@@ -462,7 +466,8 @@ final class ModelsPowerSettingsView: NSView {
     private func addRouteProvenanceRows(spec: RouteCard, card: NSView, y: CGFloat) -> CGFloat {
         var nextY = y
         for route in spec.routes {
-            let provenance = Self.provenancePresentation(for: route, store: settingsStore) {
+            let provenance = Self.provenancePresentation(for: route, store: settingsStore,
+                                                         localCatalog: localCatalog) {
                 routeRatification(route: route, provider: $0)
             }
             let bundle = provenance.bundle
@@ -827,6 +832,7 @@ final class ModelsPowerSettingsView: NSView {
         let bundle: LLMProviderBundle
         if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
             bundle = LocalModelPickerItems.applying(ref, to: current)
+            LocalModelPickerItems.showSelectedTitleAsToolTip(sender)
         } else {
             bundle = CodexPickerCatalog.applyingModelSelection(id, to: current)
         }

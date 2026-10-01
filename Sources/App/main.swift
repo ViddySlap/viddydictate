@@ -131,6 +131,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S6: the local-app install plan (LM Studio app -> lms-ready -> model, Ollama app -> server-ready
     // -> pull), the D3 point-of-use app choice, and unchanged persisted ids. Scratch only; built-in mutants.
     case installerLocalStepsSelftest = "--installer-local-steps-selftest"
+    // Ollama lane S3c: the Setup tab's local app rows (state, Install/Open/Start, LM Studio first and the only
+    // one ever recommended), the headline, the Preferred local app, the point-of-use app choice and running
+    // page, and the app-named Local preset line, as data. Built-in mutants.
+    case localAppsSetupSelftest = "--local-apps-setup-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

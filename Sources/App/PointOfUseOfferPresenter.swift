@@ -25,8 +25,12 @@ final class PointOfUseOfferPresenter {
     private let coordinator: BootstrapInstallCoordinator
     private let measure: () -> [LLMProvider: LLMProviderDetection.Presence]
     private var changeToken: NSObjectProtocol?
+    private var activityToken: NSObjectProtocol?
     private var pendingFeature: PointOfUseFeature?
     private var measuring = false
+    /// Whether the install on the running page came from the local-app choice, so a Retry of it still moves
+    /// the Preferred local app the way the first attempt would have.
+    private var installFollowsChoice = false
 
     init(panel: InstallOfferPanel = InstallOfferPanel(),
          coordinator: BootstrapInstallCoordinator = .shared,
@@ -35,10 +39,13 @@ final class PointOfUseOfferPresenter {
         self.panel = panel
         self.coordinator = coordinator
         self.measure = measure
+        // The running page reads what each row last reported from the same queue it installs through.
+        panel.activity = { [weak coordinator] id in coordinator?.activity(for: id) }
     }
 
     deinit {
         if let changeToken { NotificationCenter.default.removeObserver(changeToken) }
+        if let activityToken { NotificationCenter.default.removeObserver(activityToken) }
     }
 
     var isPresenting: Bool { panel.state != nil }
@@ -89,7 +96,32 @@ final class PointOfUseOfferPresenter {
             dismiss()
             onOpenProviderSetup?(provider)
         case .install:
-            beginInstall()
+            // What an install button does depends on the page (`PointOfUsePolicy.installStep`): on a Mac with
+            // neither app the offer's button opens the app choice, LM Studio first; the choice page installs
+            // the app picked; Retry on the running page runs the same rows again.
+            var offer: PointOfUseOffer?
+            var choice: PointOfUseLocalAppChoice?
+            var running = false
+            switch panel.state {
+            case .offer(let shown)?: offer = shown
+            case .appChoice(_, let shown)?: choice = shown
+            case .running?: running = true
+            case nil: break
+            }
+            switch PointOfUsePolicy.installStep(pressed: button, offer: offer, choice: choice,
+                                                running: running) {
+            case .chooseApp(let appChoice):
+                guard let offer else { return }
+                let apps = appChoice.options.map(\.backend.rawValue).joined(separator: ",")
+                Log.write("point-of-use: asking which local app (\(apps))")
+                panel.show(.appChoice(offer, appChoice))
+            case .installApp(let backend):
+                installLocalApp(backend)
+            case .installComponents:
+                beginInstall()
+            case .none:
+                break
+            }
         }
     }
 
@@ -105,22 +137,28 @@ final class PointOfUseOfferPresenter {
 
     // MARK: - install
 
-    /// Install the app the user picked from the offer's local-app choice (spec D3), on a Mac with neither.
-    /// The option's components go through the same queue as every other row.
-    ///
-    /// TODO(S3c/S8): `InstallOfferPanel` draws `PointOfUseOffer.localAppChoice` as its own page and calls this
-    /// with the picked app. Until it does, "Install now" and "Set up local models" install LM Studio, the
-    /// recommended option, exactly as before.
+    /// Install the app the user picked on the local-app choice page (spec D3), on a Mac with neither. The
+    /// option's components go through the same queue as every other row.
     func installLocalApp(_ backend: LocalBackendID) {
-        guard let feature = pendingFeature, case .offer(let offer) = panel.state,
-              let option = offer.localAppChoice?.option(backend) else { return }
+        guard let feature = pendingFeature else { return }
+        let choice: PointOfUseLocalAppChoice?
+        switch panel.state {
+        case .appChoice(_, let shown)?: choice = shown
+        case .offer(let offer)?: choice = offer.localAppChoice
+        default: choice = nil
+        }
+        guard let option = choice?.option(backend) else { return }
         beginInstall(feature: feature, components: option.components, fromLocalAppChoice: true)
     }
 
     private func beginInstall() {
         guard let feature = pendingFeature else { return }
         var fromChoice = false
-        if case .offer(let offer) = panel.state { fromChoice = offer.localAppChoice != nil }
+        switch panel.state {
+        case .offer(let offer)?: fromChoice = offer.localAppChoice != nil
+        case .running?: fromChoice = installFollowsChoice
+        default: break
+        }
         beginInstall(feature: feature, components: installComponents(), fromLocalAppChoice: fromChoice)
     }
 
@@ -130,6 +168,7 @@ final class PointOfUseOfferPresenter {
                               fromLocalAppChoice: Bool) {
         guard !components.isEmpty else { return }
         let offer = PointOfUsePolicy.installOffer(for: feature, outstanding: components)
+        installFollowsChoice = fromLocalAppChoice
         startWatching()
         panel.show(.running(offer, rows(for: components)))
         // The SAME queue the setup surface drives, given the same descriptors. A second entry point,
@@ -156,6 +195,8 @@ final class PointOfUseOfferPresenter {
         switch panel.state {
         case .offer(.install(let offer)): return offer.components
         case .offer(.chooser(let chooser)): return chooser.localComponents
+        // The choice page installs through `installLocalApp`, never through here.
+        case .appChoice: return []
         case .running(let offer, _): return offer.components
         case .none: return []
         }
@@ -187,8 +228,9 @@ final class PointOfUseOfferPresenter {
     }
 
     /// D3: once the chosen app's own row has landed, the Preferred local app follows it (see
-    /// `PointOfUsePolicy.preferenceAfterInstalling`). Written only when it changes.
-    private static func followInstalledApp(components: [InstallerComponentDescriptor],
+    /// `PointOfUsePolicy.preferenceAfterInstalling`). Written only when it changes. Also used by the Setup
+    /// tab's Install on a Mac that had neither app.
+    static func followInstalledApp(components: [InstallerComponentDescriptor],
                                            results: [InstallerComponentResult]) {
         let landed = Set(results.filter(\.succeeded).map(\.componentID))
         for component in components where landed.contains(component.id) {
@@ -203,22 +245,26 @@ final class PointOfUseOfferPresenter {
         }
     }
 
-    // TODO(S3c/S8): also observe `BootstrapInstallCoordinator.didReportActivity` and redraw the running rows
-    // through `PointOfUsePolicy.progressLine(_:activity:)`, so an Ollama pull shows its bytes and the
-    // approval wait shows its own words. The panel does not draw activity yet.
+    /// Redraw the running page on every durable change AND on every activity report, so an Ollama pull
+    /// shows its bytes and the approval wait shows its own words (the panel renders rows through
+    /// `PointOfUsePolicy.progressLine(_:activity:)`). Reports are throttled at the source to four a second.
     private func startWatching() {
         guard changeToken == nil else { return }
-        changeToken = NotificationCenter.default.addObserver(
-            forName: BootstrapInstallCoordinator.didChange, object: coordinator, queue: .main
-        ) { [weak self] _ in
+        let redraw: (Notification) -> Void = { [weak self] _ in
             guard let self, case .running(let offer, _) = self.panel.state else { return }
             self.panel.show(.running(offer, self.rows(for: offer.components)))
         }
+        changeToken = NotificationCenter.default.addObserver(
+            forName: BootstrapInstallCoordinator.didChange, object: coordinator, queue: .main, using: redraw)
+        activityToken = NotificationCenter.default.addObserver(
+            forName: BootstrapInstallCoordinator.didReportActivity, object: coordinator, queue: .main,
+            using: redraw)
     }
 
     private func stopWatching() {
-        guard let changeToken else { return }
-        NotificationCenter.default.removeObserver(changeToken)
-        self.changeToken = nil
+        if let changeToken { NotificationCenter.default.removeObserver(changeToken) }
+        if let activityToken { NotificationCenter.default.removeObserver(activityToken) }
+        changeToken = nil
+        activityToken = nil
     }
 }

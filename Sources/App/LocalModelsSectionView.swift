@@ -1,8 +1,12 @@
 import Cocoa
 
-/// The Local models section on the Setup tab, as two cards: the controls that govern how much memory local
+/// The Local models section on the Setup tab, as three cards: one status row per local app (LM Studio, then
+/// Ollama) with the Preferred local app under them, then the controls that govern how much memory local
 /// models may hold and how long ViddyDictate keeps its own, then a read-only row reporting LM Studio's own
 /// JIT model timeout.
+///
+/// The app rows are `LocalAppRows`'s, built from the Setup tab's own observation (S3a's merged `.local`
+/// presence, the same measurement the preflight rows read), so this section never probes an app itself.
 ///
 /// Built the same way L4's provider sign-in section and L5's Gemini key section are: the judgement and the
 /// words belong to `LocalModelSetup`, the card and label chrome come from `SettingsSectionKit`, and this
@@ -24,12 +28,94 @@ final class LocalModelsSectionView: NSView {
         var setBudgetPosition: (Double) -> Void
         var idleSeconds: () -> Int
         var setIdleSeconds: (Int) -> Void
+        /// The explicit Preferred local app (S3a's `Settings.preferredLocalBackend`); nil is Automatic.
+        var preferredBackend: () -> LocalBackendID?
+        var setPreferredBackend: (LocalBackendID?) -> Void
 
         static var live: Store {
             Store(budgetPosition: { Settings.modelMemoryBudgetSliderPosition },
                   setBudgetPosition: { Settings.modelMemoryBudgetSliderPosition = $0 },
                   idleSeconds: { Settings.modelIdleUnloadSeconds },
-                  setIdleSeconds: { Settings.modelIdleUnloadSeconds = $0 })
+                  setIdleSeconds: { Settings.modelIdleUnloadSeconds = $0 },
+                  preferredBackend: { Settings.preferredLocalBackend },
+                  setPreferredBackend: { Settings.preferredLocalBackend = $0 })
+        }
+    }
+
+    /// What the app rows' buttons DO, injected for the reason everything else here is: the render gate drives
+    /// every button on every row and must never install, open or start anything on the Mac running it.
+    struct AppActions {
+        /// Queue the app's install row (`LocalAppRows.installDescriptor`) on the SHARED install queue, the
+        /// one the point-of-use offer and the first-run window drive, then call back on the main queue once
+        /// the queue finishes. `followsPreference` is true when the Mac had neither app, so the Preferred
+        /// local app follows the install (D3). Returns false when the queue is busy with other rows.
+        var install: (_ backend: LocalBackendID, _ followsPreference: Bool,
+                      _ completion: @escaping () -> Void) -> Bool
+        /// Open the app by PATH, in front. False when no app bundle was found to open.
+        var open: (LocalBackendID) -> Bool
+        /// Start an installed app that is not running, in the background, then call back on the main queue.
+        var start: (_ backend: LocalBackendID, _ completion: @escaping () -> Void) -> Void
+        /// What the shared queue says about the app's own install row right now.
+        var activity: (LocalBackendID) -> LocalAppRows.Activity
+
+        static var live: AppActions {
+            AppActions(
+                install: { backend, followsPreference, completion in
+                    let descriptor = LocalAppRows.installDescriptor(backend)
+                    return BootstrapInstallCoordinator.shared.start(descriptors: [descriptor]) { results in
+                        DispatchQueue.main.async {
+                            if followsPreference {
+                                PointOfUseOfferPresenter.followInstalledApp(components: [descriptor],
+                                                                            results: results)
+                            }
+                            completion()
+                        }
+                    }
+                },
+                open: { backend in
+                    guard let path = AppActions.installedAppPath(backend) else { return false }
+                    // By path: right after an install LaunchServices may not know the app by name yet.
+                    return NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+                },
+                start: { backend, completion in
+                    // Both starts block (a subprocess, then a bounded poll), so neither touches the main thread.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        switch backend {
+                        case .lmStudio:
+                            // LM Studio's own start, the one its loads already run lazily (`lms server start`).
+                            ModelResidency.serverStart()
+                        case .ollama:
+                            // S3a's starter, aimed at Ollama alone: it opens the APP by path in the background
+                            // and waits within its bound. It never starts a command-line install.
+                            let starter = LLMProviderDetection.LocalBackendStarter(
+                                pinnedBackends: [.ollama], preferredExplicit: .ollama,
+                                launch: LLMProviderDetection.openInBackground,
+                                pollTimeout: LLMProviderDetection.LocalBackendStarter.defaultPollTimeout,
+                                pollInterval: LLMProviderDetection.LocalBackendStarter.defaultPollInterval,
+                                now: { Date() }, sleep: { Thread.sleep(forTimeInterval: $0) })
+                            _ = LLMProviderDetection.observeLocal(starter: starter)
+                        }
+                        DispatchQueue.main.async(execute: completion)
+                    }
+                },
+                activity: { backend in
+                    let coordinator = BootstrapInstallCoordinator.shared
+                    let id = LocalAppRows.installDescriptor(backend).id
+                    return LocalAppRows.activity(record: coordinator.snapshot.component(id),
+                                                 queueRunning: coordinator.isRunning,
+                                                 reported: coordinator.activity(for: id))
+                })
+        }
+
+        /// The app bundle to open: where each installer puts it first, then a per-user copy.
+        static func installedAppPath(_ backend: LocalBackendID) -> String? {
+            switch backend {
+            case .lmStudio:
+                return LMStudioInstaller.applicationCandidates
+                    .first { FileManager.default.fileExists(atPath: $0.path) }?.path
+            case .ollama:
+                return OllamaBackend().installedAppPath
+            }
         }
     }
 
@@ -76,6 +162,7 @@ final class LocalModelsSectionView: NSView {
         var unloadAll: UnloadAll
         /// Injected so a gate can drive TTL countdowns against a fixed clock instead of racing one.
         var now: () -> Date
+        var apps: AppActions
 
         static var live: Environment {
             Environment(store: .live,
@@ -87,13 +174,17 @@ final class LocalModelsSectionView: NSView {
                                 DispatchQueue.main.async { completion(reading) }
                             }
                         },
+                        // TODO(S4): "Unload ViddyDictate's models" on both apps, behind a confirmation, once
+                        // ViddyDictate tracks which models it loaded (spec section 5). Until then this stays
+                        // 1.1.0's LM Studio `lms unload --all`, unchanged and not widened to Ollama.
                         unloadAll: { completion in
                             DispatchQueue.global(qos: .utility).async {
                                 ModelResidency.unloadAll()
                                 DispatchQueue.main.async { completion() }
                             }
                         },
-                        now: Date.init)
+                        now: Date.init,
+                        apps: .live)
         }
     }
 
@@ -103,6 +194,10 @@ final class LocalModelsSectionView: NSView {
     /// running from its `maxY`. Without this the section would silently overlap the read-only preflight
     /// rows below it the moment a model was loaded or unloaded.
     var onHeightChanged: (() -> Void)?
+
+    /// Fired when an app row changed what the machine is (an install finished, a start came back), so the
+    /// host re-measures. The rows only ever show the host's measurement; nothing here believes its own click.
+    var onAppsChanged: (() -> Void)?
 
     /// How often the resident set is re-read while the tab is on screen. Long enough that the CLI is not
     /// being spawned constantly, short enough that Unload all and a model load both show up while the
@@ -134,6 +229,19 @@ final class LocalModelsSectionView: NSView {
     /// see `showResidency`.
     private var needsRelayout = false
     private var refreshTimer: Timer?
+
+    /// The Setup tab's last measurement of the local apps (S3a's merged `.local` presence), nil until its
+    /// first check lands. Kept across a re-check, so the rows do not flash back to "Checking..." each time.
+    private var appsPresence: LLMProviderDetection.Presence?
+    /// Apps the user pressed Start on whose start has not come back yet.
+    private var startingApps = Set<LocalBackendID>()
+    /// One extra line per app for what a click could not do (the queue was busy, no app bundle to open).
+    /// Cleared by the next measurement.
+    private var appNotes: [LocalBackendID: String] = [:]
+    /// The queue activity the rows were last drawn with, so a queue notification that changes nothing for
+    /// either app does not rebuild the section.
+    private var drawnAppActivity: [LocalBackendID: LocalAppRows.Activity] = [:]
+    private var queueObservers: [NSObjectProtocol] = []
 
     init(width: CGFloat, leftInset: CGFloat = 20, environment: Environment = .live) {
         self.W = width
@@ -167,10 +275,63 @@ final class LocalModelsSectionView: NSView {
     /// closed Settings window would spawn `lms ps` forever for nobody.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { stopRefreshing() } else { startRefreshing() }
+        if window == nil {
+            stopRefreshing()
+            stopWatchingQueue()
+        } else {
+            startRefreshing()
+            startWatchingQueue()
+        }
     }
 
-    deinit { refreshTimer?.invalidate() }
+    deinit {
+        refreshTimer?.invalidate()
+        for observer in queueObservers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    // MARK: - the local apps
+
+    /// Hand the section the Setup tab's newest measurement. The host then re-renders through `apply()`.
+    func showLocalApps(_ presence: LLMProviderDetection.Presence?) {
+        appsPresence = presence
+        startingApps = []
+        appNotes = [:]
+    }
+
+    /// The rows as they stand: the measurement, then what the install queue and a pending Start say.
+    private func currentAppRows() -> [LocalAppRows.Row] {
+        LocalAppRows.build(presence: appsPresence, activity: currentAppActivity())
+    }
+
+    private func currentAppActivity() -> [LocalBackendID: LocalAppRows.Activity] {
+        var activity: [LocalBackendID: LocalAppRows.Activity] = [:]
+        for backend in LocalAppRows.order {
+            activity[backend] = startingApps.contains(backend) ? .starting : environment.apps.activity(backend)
+        }
+        return activity
+    }
+
+    /// An install row starting, waiting on Ollama's prompt, landing or failing changes what a row says. The
+    /// queue posts far more often than that (every pull report), so the section rebuilds only when either
+    /// app's own activity actually changed, and never under a mouse that is holding a control.
+    private func startWatchingQueue() {
+        guard queueObservers.isEmpty else { return }
+        for name in [BootstrapInstallCoordinator.didChange, BootstrapInstallCoordinator.didReportActivity] {
+            queueObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main) { [weak self] _ in self?.queueChanged() })
+        }
+    }
+
+    private func stopWatchingQueue() {
+        for observer in queueObservers { NotificationCenter.default.removeObserver(observer) }
+        queueObservers = []
+    }
+
+    private func queueChanged() {
+        guard currentAppActivity() != drawnAppActivity else { return }
+        if NSEvent.pressedMouseButtons != 0 { needsRelayout = true; return }
+        rebuild(notifyingHost: true)
+    }
 
     private func startRefreshing() {
         guard refreshTimer == nil else { return }
@@ -283,10 +444,159 @@ final class LocalModelsSectionView: NSView {
         let before = frame.height
         subviews.forEach { $0.removeFromSuperview() }
         let contentW = W - L - 20
-        var y = buildControlsCard(width: contentW, at: 0)
+        var y = buildAppsCard(width: contentW, at: 0)
+        y = buildControlsCard(width: contentW, at: y + 8)
         y = buildJITCard(width: contentW, at: y + 8)
         frame = NSRect(x: 0, y: frame.origin.y, width: W, height: y)
         if notifyingHost, abs(frame.height - before) > 0.5 { onHeightChanged?() }
+    }
+
+    /// One row per local app, LM Studio first, then the Preferred local app. Returns the y this card ends at.
+    ///
+    /// Each row uses the preflight row's geometry (state word in its own column, then the name), so the
+    /// apps read like the checks further down the tab; the Preferred row uses the controls card's
+    /// title / control geometry, because it is a setting.
+    private func buildAppsCard(width contentW: CGFloat, at originY: CGFloat) -> CGFloat {
+        let card = SettingsSectionKit.card(
+            frame: NSRect(x: L, y: originY, width: contentW, height: 0),
+            identifier: LocalAppRows.cardIdentifier)
+        addSubview(card)
+
+        let activity = currentAppActivity()
+        drawnAppActivity = activity
+        let rows = LocalAppRows.build(presence: appsPresence, activity: activity)
+
+        var y: CGFloat = 12
+        let title = SettingsSectionKit.label(LocalAppRows.cardTitle, x: 14, y: y, width: contentW - 28,
+                                             size: 12.5, weight: .semibold, color: .labelColor)
+        title.identifier = NSUserInterfaceItemIdentifier(LocalAppRows.cardTitleIdentifier)
+        card.addSubview(title)
+        y += 26
+
+        for row in rows {
+            y = buildAppRow(row, in: card, width: contentW, at: y) + 10
+            card.addSubview(separator(x: 14, y: y, width: contentW - 28))
+            y += 11
+        }
+
+        // --- The Preferred local app (spec D1/D3) ---
+        let titleW: CGFloat = 170
+        let preferTitle = SettingsSectionKit.label(LocalAppRows.preferenceTitle, x: 14, y: y + 4, width: titleW,
+                                                   size: 12.5, weight: .semibold, color: .labelColor)
+        preferTitle.identifier = NSUserInterfaceItemIdentifier(LocalAppRows.preferenceTitleIdentifier)
+        card.addSubview(preferTitle)
+
+        let popup = NSPopUpButton(frame: NSRect(x: 14 + titleW + 8, y: y, width: 200, height: 25),
+                                  pullsDown: false)
+        popup.identifier = NSUserInterfaceItemIdentifier(LocalAppRows.preferencePopupIdentifier)
+        popup.font = .systemFont(ofSize: 12)
+        popup.target = self
+        popup.action = #selector(preferenceChanged)
+        for choice in LocalAppRows.preferenceChoices(explicit: environment.store.preferredBackend(),
+                                                     presence: appsPresence) {
+            popup.addItem(withTitle: choice.title)
+            popup.lastItem?.representedObject = choice.value?.rawValue ?? ""
+            if choice.isSelected { popup.select(popup.lastItem) }
+        }
+        card.addSubview(popup)
+        y = popup.frame.maxY + 4
+
+        let hint = SettingsSectionKit.wrapped(LocalAppRows.preferenceHint, x: 14, y: y, width: contentW - 28,
+                                              size: 10.5, color: .secondaryLabelColor)
+        hint.identifier = NSUserInterfaceItemIdentifier(LocalAppRows.preferenceHintIdentifier)
+        card.addSubview(hint)
+        y = hint.frame.maxY
+
+        card.frame.size.height = y + 9
+        return card.frame.maxY
+    }
+
+    /// One app: state word, name (and on a Mac with neither app its simple / advanced tag), status, what to
+    /// know, and its buttons on the right. Returns the y the row ends at.
+    private func buildAppRow(_ row: LocalAppRows.Row, in card: NSView, width contentW: CGFloat,
+                             at originY: CGFloat) -> CGFloat {
+        let statusW: CGFloat = 124
+        let textX = statusW + 20
+        let rightX = contentW - 14
+        let buttonW: CGFloat = 92
+        let buttonGap: CGFloat = 6
+        let buttonsW = row.buttons.isEmpty ? 0
+            : CGFloat(row.buttons.count) * buttonW + CGFloat(row.buttons.count - 1) * buttonGap
+        var y = originY
+
+        let running: Bool
+        if case .running = row.state { running = true } else { running = false }
+        let state = SettingsSectionKit.label(
+            row.stateWord, x: 14, y: y + 2, width: statusW - 8, size: 10, weight: .semibold,
+            color: row.needsAttention ? .systemOrange : (running ? .systemGreen : .secondaryLabelColor))
+        state.identifier = rowIdentifier(.state, row.backend)
+        card.addSubview(state)
+
+        let name = SettingsSectionKit.label(row.title, x: textX, y: y, width: 200, size: 12.5,
+                                            weight: .semibold, color: .labelColor)
+        name.sizeToFit()
+        name.frame.origin = NSPoint(x: textX, y: y)
+        name.identifier = rowIdentifier(.title, row.backend)
+        card.addSubview(name)
+
+        if let tag = row.tag {
+            // Green only on the recommended one: the two apps must never read as equals (D3).
+            let label = SettingsSectionKit.label(
+                tag, x: name.frame.maxX + 8, y: y + 2, width: 160, size: 10, weight: .semibold,
+                color: row.recommended ? .systemGreen : .secondaryLabelColor)
+            label.sizeToFit()
+            label.frame.origin = NSPoint(x: name.frame.maxX + 8, y: y + 2)
+            label.identifier = rowIdentifier(.tag, row.backend)
+            card.addSubview(label)
+        }
+
+        var buttonX = rightX - buttonsW
+        for button in row.buttons {
+            let control = NSButton(title: button.title, target: self, action: #selector(appButtonClicked(_:)))
+            control.bezelStyle = .rounded
+            control.font = .systemFont(ofSize: 11)
+            control.identifier = NSUserInterfaceItemIdentifier(
+                LocalAppRows.buttonIdentifier(button.action, row.backend))
+            control.isEnabled = button.isEnabled
+            control.frame = NSRect(x: buttonX, y: y - 2, width: buttonW, height: 24)
+            card.addSubview(control)
+            buttonX += buttonW + buttonGap
+        }
+        let buttonsBottom = row.buttons.isEmpty ? y : y + 22
+        y += 20
+
+        // The status shares its line with the buttons, so it stops short of them; the detail runs under both.
+        let statusLine = SettingsSectionKit.wrapped(
+            row.status, x: textX, y: y, width: rightX - textX - (buttonsW > 0 ? buttonsW + 10 : 0),
+            size: 11, color: .labelColor)
+        statusLine.identifier = rowIdentifier(.status, row.backend)
+        card.addSubview(statusLine)
+        y = statusLine.frame.maxY + 2
+
+        let detail = [row.detail, appNotes[row.backend]].compactMap { $0 }.joined(separator: " ")
+        if !detail.isEmpty {
+            // Secondary, not tertiary: tertiary body copy on this card fill measures 2.26:1 (see the controls
+            // card), and this line is the one that says what to do.
+            let field = SettingsSectionKit.wrapped(detail, x: textX, y: y, width: rightX - textX,
+                                                   size: 10.5,
+                                                   color: row.needsAttention ? .labelColor : .secondaryLabelColor)
+            field.identifier = rowIdentifier(.detail, row.backend)
+            field.toolTip = detail
+            card.addSubview(field)
+            y = field.frame.maxY
+        }
+        return max(y, buttonsBottom)
+    }
+
+    private func separator(x: CGFloat, y: CGFloat, width: CGFloat) -> NSBox {
+        let line = NSBox(frame: NSRect(x: x, y: y, width: width, height: 1))
+        line.boxType = .separator
+        return line
+    }
+
+    private func rowIdentifier(_ part: LocalAppRows.RowPart, _ backend: LocalBackendID)
+        -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier(LocalAppRows.identifier(part, backend))
     }
 
     /// The budget slider and the idle timer. Returns the y this card ends at.
@@ -306,8 +616,9 @@ final class LocalModelsSectionView: NSView {
         let valX = contentW - textX - valW
         var y: CGFloat = 12
 
-        let headline = wrapped(.headline, LocalModelSetup.headline, x: textX, y: y, width: textW,
-                               size: 12.5, weight: .semibold, color: .labelColor)
+        // 1.1.0's exact words unless Ollama is installed (`LocalAppRows.headline`).
+        let headline = wrapped(.headline, LocalAppRows.headline(presence: appsPresence), x: textX, y: y,
+                               width: textW, size: 12.5, weight: .semibold, color: .labelColor)
         card.addSubview(headline)
         y = headline.frame.maxY + 3
 
@@ -546,6 +857,56 @@ final class LocalModelsSectionView: NSView {
                 self.refreshResidency()
             }
         }
+    }
+
+    /// Install, Open or Start on one app's row. Every one of them ends with the host re-measuring rather than
+    /// the row believing its own click: an install that landed, or a start that answered, shows up as the
+    /// next measurement says it did.
+    @objc private func appButtonClicked(_ sender: NSButton) {
+        guard let pressed = LocalAppRows.button(fromIdentifier: sender.identifier?.rawValue) else { return }
+        let (backend, action) = pressed
+        guard let row = currentAppRows().first(where: { $0.backend == backend }),
+              row.button(action)?.isEnabled == true else { return }
+        Log.write("setup tab: \(action.rawValue) \(backend.rawValue) requested")
+        switch action {
+        case .install:
+            // D3: on a Mac with neither app, the Preferred local app follows what this installs.
+            let neither = LocalAppRows.installedApps(appsPresence)?.isEmpty == true
+            let started = environment.apps.install(backend, neither) { [weak self] in
+                self?.onAppsChanged?()
+            }
+            if !started {
+                appNotes[backend] = "Setup is already installing something else. Press Install again once it "
+                    + "finishes."
+            }
+            rebuild(notifyingHost: true)
+        case .open:
+            if !environment.apps.open(backend) {
+                appNotes[backend] = "ViddyDictate could not find \(backend.displayName)'s app to open."
+                rebuild(notifyingHost: true)
+            }
+        case .start:
+            startingApps.insert(backend)
+            rebuild(notifyingHost: true)
+            environment.apps.start(backend) { [weak self] in
+                Self.onMain {
+                    guard let self else { return }
+                    self.startingApps.remove(backend)
+                    self.rebuild(notifyingHost: true)
+                    self.onAppsChanged?()
+                }
+            }
+        }
+    }
+
+    /// Store the Preferred local app. Re-rendered so Automatic's own label and the selection agree with
+    /// what was stored, never with what was clicked.
+    @objc private func preferenceChanged(_ sender: NSPopUpButton) {
+        let raw = sender.selectedItem?.representedObject as? String ?? ""
+        let value = raw.isEmpty ? nil : LocalBackendID(rawValue: raw)
+        environment.store.setPreferredBackend(value)
+        Log.write("setup tab: preferred local app \(value?.rawValue ?? "automatic")")
+        rebuild(notifyingHost: true)
     }
 
     /// Changing the app's own timer changes what the LM Studio row is measured against, so the row is

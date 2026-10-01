@@ -19,6 +19,13 @@ extension LocalModelPickerItems {
             if item.isSelected { chosen = popup.lastItem }
         }
         if let chosen { popup.select(chosen) }
+        showSelectedTitleAsToolTip(popup)
+    }
+
+    /// A popup this narrow truncates "Ollama · qwen3-coder:30b (19.00 GB)  ·  Custom" when it is closed, so
+    /// the full selected title rides on the popup's tooltip. Call again after the selection changes.
+    static func showSelectedTitleAsToolTip(_ popup: NSPopUpButton) {
+        popup.toolTip = popup.titleOfSelectedItem
     }
 
     /// The ref of the selected row, or nil when the selection is not a Local model row.

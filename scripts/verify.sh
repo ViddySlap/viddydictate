@@ -472,6 +472,9 @@ tier_deterministic() {
         run_gate deterministic "local model budget rendering and LM Studio JIT reader selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --local-model-setup-selftest || true
+        run_gate deterministic "Setup local app rows, LM Studio-first app choice, and Retry wording (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-apps-setup-selftest || true
         run_gate deterministic "secret-store resolution order and off-state selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --secret-store-selftest || true

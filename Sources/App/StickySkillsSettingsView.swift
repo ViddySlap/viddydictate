@@ -434,6 +434,7 @@ final class StickySkillsSettingsView: NSView {
         let candidate: LLMProviderBundle
         if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
             candidate = LocalModelPickerItems.applying(ref, to: current)
+            LocalModelPickerItems.showSelectedTitleAsToolTip(sender)
         } else {
             candidate = CodexPickerCatalog.applyingModelSelection(model, to: current)
         }
