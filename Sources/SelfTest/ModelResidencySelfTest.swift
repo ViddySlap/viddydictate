@@ -74,14 +74,53 @@ enum ModelResidencySelfTest {
         if sandboxDependencies != nil {
             print("  [info] vm.global_* unavailable; residency mechanism uses an injected test budget")
         }
-        func ensureReady(ttlOverrideSeconds: Int? = nil) -> Bool {
+        func readiness(ttlOverrideSeconds: Int? = nil) -> ModelManager.ReadinessResult {
             if let sandboxDependencies {
                 return ModelManager.shared.ensureReady(
                     model, ttlOverrideSeconds: ttlOverrideSeconds,
-                    dependencies: sandboxDependencies).isReady
+                    dependencies: sandboxDependencies)
             }
             return ModelManager.shared.ensureReady(
-                model, ttlOverrideSeconds: ttlOverrideSeconds).isReady
+                model, ttlOverrideSeconds: ttlOverrideSeconds)
+        }
+        /// Diagnostic only: when the capacity-gated load does not make the model ready, say WHY, with the
+        /// figures the policy compares. It never changes what any check below asserts.
+        func explainIfNotReady(_ result: ModelManager.ReadinessResult, step: String, wiredBefore: UInt64?) {
+            let verdict: String
+            switch result {
+            case .ready: return
+            case .capacityRefused(.overBudget): verdict = "refused over budget"
+            case .capacityRefused(.factsUnavailable): verdict = "refused: a capacity fact (resident set, size, wired or budget) was unreadable"
+            case .loadFailed: verdict = "load failed (capacity allowed it; LM Studio did not make it resident)"
+            }
+            let size = ModelResidency.availableInstalledModels()?.first(where: { $0.modelID == model })?.sizeBytes
+            let incoming = size.flatMap { ModelManager.estimatedIncomingBytes(sizeBytes: $0) }
+            let budget = sandboxDependencies != nil ? UInt64.max
+                : SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
+            func gb(_ bytes: UInt64?) -> String {
+                guard let bytes else { return "unreadable" }
+                return bytes == UInt64.max ? "unbounded" : SystemMemory.formatGB(bytes)
+            }
+            let total: String
+            if let wiredBefore, let incoming {
+                let (sum, overflow) = wiredBefore.addingReportingOverflow(incoming)
+                total = overflow ? "overflow" : gb(sum)
+            } else {
+                total = "unreadable"
+            }
+            let residents = ModelResidency.residentModels()?
+                .map { "\($0.identifier) \(SystemMemory.formatGB($0.sizeBytes))" }
+                .joined(separator: ", ") ?? "unreadable"
+            print("  [diagnosis] \(step): \(verdict); wired before=\(gb(wiredBefore)) "
+                + "incoming=\(gb(incoming)) (installed \(size.map { SystemMemory.formatGB(UInt64(max(0, $0))) } ?? "unreadable")"
+                + " x \(ModelManager.incomingFootprintFactor)) wired+incoming=\(total) budget=\(gb(budget)) "
+                + "slider=\(Settings.modelMemoryBudgetSliderPosition); resident now: \(residents)")
+        }
+        func ensureReady(ttlOverrideSeconds: Int? = nil, step: String) -> Bool {
+            let wiredBefore = SystemMemory.wiredBytes
+            let result = readiness(ttlOverrideSeconds: ttlOverrideSeconds)
+            explainIfNotReady(result, step: step, wiredBefore: wiredBefore)
+            return result.isReady
         }
 
         // Record bge-m3 residency up front; the invariant is that qwen's whole load/evict cycle does not
@@ -98,7 +137,7 @@ enum ModelResidencySelfTest {
             .first(where: { $0.modelID == model })?.sizeBytes
         let wiredBeforeLoad = SystemMemory.wiredBytes
         let t0 = Date()
-        let ready = ensureReady(ttlOverrideSeconds: testTTL)
+        let ready = ensureReady(ttlOverrideSeconds: testTTL, step: "cleanup-path load")
         let residentAfterLoad = ModelResidency.isLoaded(model)
         let wiredAfterLoad = SystemMemory.wiredBytes
         check("cleanup-path load makes qwen resident", ready && residentAfterLoad,
@@ -125,7 +164,7 @@ enum ModelResidencySelfTest {
         check("qwen /v1 chat turn succeeds", turn.ok, turn.detail)
 
         // 5. A second cleanup-path ensureReady reuses the SAME instance (resident -> no reload).
-        let reuse = ensureReady()
+        let reuse = ensureReady(step: "cleanup-path reuse")
         check("cleanup-path reuse hits the resident instance", reuse && ModelResidency.isLoaded(model),
               "ensureReady=\(b(reuse)), isLoaded=\(b(ModelResidency.isLoaded(model)))")
 
@@ -139,7 +178,7 @@ enum ModelResidencySelfTest {
               "bge-m3 before=\(b(bgeBefore)), after=\(b(bgeAfter))")
 
         // 7. JIT reload on the next request restores it (and leaves qwen resident with the production TTL).
-        let reloaded = ensureReady()
+        let reloaded = ensureReady(step: "JIT reload")
         check("next request JIT-reloads qwen", reloaded && ModelResidency.isLoaded(model),
               "ensureReady=\(b(reloaded)), isLoaded=\(b(ModelResidency.isLoaded(model)))")
 

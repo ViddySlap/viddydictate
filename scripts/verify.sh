@@ -702,6 +702,129 @@ stage_service_bundle() {
     [[ -x "$service_bundle/Contents/MacOS/ViddyDictateTests" ]]
 }
 
+# --- Service-tier memory state -------------------------------------------------------------------------
+# The LM Studio service gates each load models and leave them resident (with the app's idle TTL), so a
+# later gate ran against whatever the earlier ones left behind: on a 64 GB Mac the residency gate's qwen
+# load was refused over budget only because cleanup, email, per-take and web search had left qwen, gemma
+# and a step-down model loaded (A/B on 2026-10-01: it passes on a clean machine at base and tip alike).
+#
+# The tier snapshots what is resident when it starts. That is the user's working set and is never touched.
+# After each gate that can load a model, restore_service_memory_state unloads ONLY what is resident now and
+# was NOT in that snapshot, one model at a time (never `lms unload --all`), then waits for wired memory to
+# settle. Ollama is handled the same way through /api/ps and keep_alive 0. If a snapshot could not be taken
+# (no lms, LM Studio not answering, Ollama not running) that app is left alone entirely: without a
+# trustworthy baseline every resident model would look like the tier's own.
+SERVICE_LMS=""
+SERVICE_LMS_BASELINE_OK=0
+SERVICE_LMS_BASELINE=""
+SERVICE_OLLAMA_URL="http://127.0.0.1:11434"
+SERVICE_OLLAMA_BASELINE_OK=0
+SERVICE_OLLAMA_BASELINE=""
+
+# Resident LM Studio identifiers, one per line; fails when `lms ps --json` cannot be read.
+service_lms_resident() {
+    [[ -n "$SERVICE_LMS" ]] || return 1
+    local json
+    json="$(HOME="$ORIGINAL_HOME" "$SERVICE_LMS" ps --json 2>/dev/null)" || return 1
+    json="${json#"${json%%[![:space:]]*}"}"
+    [[ "$json" == \[* ]] || return 1
+    grep -oE '"identifier"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$json" \
+        | sed -E 's/^"identifier"[[:space:]]*:[[:space:]]*"(.*)"$/\1/' || true
+}
+
+# Resident Ollama model names, one per line; fails when /api/ps does not answer.
+service_ollama_resident() {
+    command -v curl >/dev/null 2>&1 || return 1
+    local json
+    json="$(curl -fsS --max-time 3 "$SERVICE_OLLAMA_URL/api/ps" 2>/dev/null)" || return 1
+    [[ "$json" == *'"models"'* ]] || return 1
+    grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$json" \
+        | sed -E 's/^"name"[[:space:]]*:[[:space:]]*"(.*)"$/\1/' || true
+}
+
+service_wired_bytes() {
+    command -v vm_stat >/dev/null 2>&1 || return 1
+    vm_stat 2>/dev/null | awk '
+        /page size of/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) page = $i }
+        /Pages wired down/ { gsub(/\./, "", $4); wired = $4 }
+        END { if (page == "" || wired == "") exit 1; printf "%.0f\n", wired * page }'
+}
+
+snapshot_service_memory_state() {
+    SERVICE_LMS=""
+    if [[ -x "$ORIGINAL_HOME/.lmstudio/bin/lms" ]]; then
+        SERVICE_LMS="$ORIGINAL_HOME/.lmstudio/bin/lms"
+    fi
+    if SERVICE_LMS_BASELINE="$(service_lms_resident)"; then
+        SERVICE_LMS_BASELINE_OK=1
+        local service_lms_baseline_list
+        service_lms_baseline_list="$(tr '\n' ' ' <<<"${SERVICE_LMS_BASELINE:-}" | sed 's/ *$//')"
+        printf '[verify][services] LM Studio working set at tier start (never unloaded): %s\n' \
+            "${service_lms_baseline_list:-none}"
+    else
+        SERVICE_LMS_BASELINE_OK=0
+        SERVICE_LMS_BASELINE=""
+        printf '[verify][services] LM Studio resident set unreadable at tier start (lms %s); its models will not be restored between gates\n' \
+            "$([[ -n "$SERVICE_LMS" ]] && printf 'not answering' || printf 'absent')"
+    fi
+    if SERVICE_OLLAMA_BASELINE="$(service_ollama_resident)"; then
+        SERVICE_OLLAMA_BASELINE_OK=1
+        local service_ollama_baseline_list
+        service_ollama_baseline_list="$(tr '\n' ' ' <<<"${SERVICE_OLLAMA_BASELINE:-}" | sed 's/ *$//')"
+        printf '[verify][services] Ollama working set at tier start (never unloaded): %s\n' \
+            "${service_ollama_baseline_list:-none}"
+    else
+        SERVICE_OLLAMA_BASELINE_OK=0
+        SERVICE_OLLAMA_BASELINE=""
+        printf '[verify][services] Ollama not answering at tier start; its models will not be restored between gates\n'
+    fi
+}
+
+# Unload what the tier's own gates left resident, then let wired memory settle. Never fails the tier.
+restore_service_memory_state() {
+    local after="$1" model unloaded=0 now
+    if [[ $SERVICE_LMS_BASELINE_OK -eq 1 ]] && now="$(service_lms_resident)"; then
+        while IFS= read -r model; do
+            [[ -n "$model" ]] || continue
+            grep -Fxq -- "$model" <<<"$SERVICE_LMS_BASELINE" && continue
+            printf '[verify][services] after %s: unloading LM Studio %s (not resident at tier start)\n' "$after" "$model"
+            HOME="$ORIGINAL_HOME" "$SERVICE_LMS" unload "$model" >/dev/null 2>&1 \
+                || printf '[verify][services] after %s: lms unload %s failed; continuing\n' "$after" "$model"
+            unloaded=$((unloaded + 1))
+        done <<<"$now"
+    fi
+    if [[ $SERVICE_OLLAMA_BASELINE_OK -eq 1 ]] && now="$(service_ollama_resident)"; then
+        while IFS= read -r model; do
+            [[ -n "$model" ]] || continue
+            grep -Fxq -- "$model" <<<"$SERVICE_OLLAMA_BASELINE" && continue
+            printf '[verify][services] after %s: unloading Ollama %s (not resident at tier start)\n' "$after" "$model"
+            curl -fsS --max-time 10 -X POST "$SERVICE_OLLAMA_URL/api/generate" \
+                -H 'Content-Type: application/json' \
+                -d "{\"model\":\"$model\",\"keep_alive\":0}" >/dev/null 2>&1 \
+                || printf '[verify][services] after %s: Ollama keep_alive 0 for %s failed; continuing\n' "$after" "$model"
+            unloaded=$((unloaded + 1))
+        done <<<"$now"
+    fi
+    (( unloaded > 0 )) || return 0
+
+    # `lms unload` returns before macOS unwires the pages (ModelManager measured ~0.7 s). Wait, bounded,
+    # until two readings 0.25 s apart agree within 64 MiB.
+    local previous="" current waited=0
+    while (( waited < 40 )); do
+        current="$(service_wired_bytes)" || break
+        if [[ -n "$previous" ]]; then
+            local delta=$(( current > previous ? current - previous : previous - current ))
+            (( delta <= 67108864 )) && break
+        fi
+        previous="$current"
+        sleep 0.25
+        waited=$((waited + 1))
+    done
+    printf '[verify][services] after %s: unloaded %d model(s); wired now %s bytes\n' \
+        "$after" "$unloaded" "$(service_wired_bytes || printf 'unreadable')"
+    return 0
+}
+
 tier_services() {
     local failures_before=$FAILURES
     local unverified_before=$UNVERIFIED
@@ -711,6 +834,7 @@ tier_services() {
         local service_env=(env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" \
             CFPREFERENCES_AVOID_DAEMON=1 TMPDIR="$SCRATCH_TMP/")
         if run_gate service "scratch-isolated service bundle" stage_service_bundle; then
+            snapshot_service_memory_state
             # The gate checks the named login-Keychain item without requesting its data, then runs
             # the vendor status command against the real machine HOME. A seatbelt that denies
             # Keychain makes it abstain with exit 0; unsandboxed release verification runs this same
@@ -739,9 +863,12 @@ tier_services() {
             run_service_gate "Claude auth status (real Keychain-backed CLI)" normal \
                 "${claude_auth_command[@]}" || true
             run_service_gate "cleanup LM Studio gate" normal "${service_env[@]}" "$service_app" --selftest || true
+            restore_service_memory_state "cleanup LM Studio gate"
             run_service_gate "email LM Studio gate" normal "${service_env[@]}" "$service_app" --email-selftest || true
+            restore_service_memory_state "email LM Studio gate"
             run_service_gate "per-take armed transform release (live LM Studio)" normal \
                 "${service_env[@]}" "$service_app" --per-take-arm-service || true
+            restore_service_memory_state "per-take armed transform release"
             run_service_gate "LM Studio available-model discovery" normal \
                 "${service_env[@]}" "$service_app" --lmstudio-model-catalog-live || true
             # Loads the smallest usable model that was NOT already resident (keep_alive 20 s, num_ctx 4096),
@@ -754,6 +881,7 @@ tier_services() {
             # /api/ps on its own. Abstains when Ollama or gemma4:e4b is absent, or gemma4:e4b is already resident.
             run_service_gate "Ollama live transforms (cleanup + email on gemma4:e4b, keep_alive unload)" normal \
                 "${service_env[@]}" "$service_app" --ollama-transforms-live || true
+            restore_service_memory_state "Ollama live gates"
             # Read-only: it never passes --unload-all, so it cannot change what the machine is holding.
             run_service_gate "Setup tab resident-models readout (real lms ps)" normal \
                 "${service_env[@]}" "$service_app" --local-models-readout-live || true
@@ -805,7 +933,11 @@ tier_services() {
                 "$TEST_APP" \
                 --claude-catalog-live || true
             run_service_gate "web-search pipeline" normal "${service_env[@]}" "$service_app" --websearch-selftest || true
+            # The residency gate measures a cold load against the budget, so it must start from the working
+            # set the tier found, not from what the gates above left resident.
+            restore_service_memory_state "web-search pipeline"
             run_service_gate "LM Studio residency gate" normal "${service_env[@]}" "$service_app" --residency-selftest || true
+            restore_service_memory_state "LM Studio residency gate"
         fi
     fi
     finish_tier services "$failures_before" "$unverified_before"

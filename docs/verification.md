@@ -16,6 +16,13 @@ Run the rail from the repository root:
 | `gui` | Models & Power UI probe, HUD probe/render, and `--mic-probe` | Logged-in GUI/AppKit session and enumerated input devices; no capture |
 | `full` | All three tiers, then `git diff --check` and a clean-worktree gate | Everything above |
 
+The services tier records what LM Studio (`lms ps`) and Ollama (`/api/ps`) are holding when it starts:
+that is your working set, and the tier never unloads it. After each gate that can load a model, and
+before the residency gate, it unloads only the models resident now that were not resident at the start
+(`lms unload <identifier>` one at a time, never `--all`; Ollama `keep_alive: 0`), logs each one, and
+waits for wired memory to settle, so every gate sees the memory state the tier started with. An app
+whose resident set could not be read at the start is left alone.
+
 `build.sh` creates the shipped `build/ViddyDictate.app` plus a sibling verification bundle,
 `build/ViddyDictateTests.app`. All selftest/probe manifest flags, including
 `--list-selftest-flags`, are answered by the test bundle. The shipped app remains the build/launch
