@@ -32,6 +32,31 @@ private enum SmokeAbstain {
         + preconditionMissingMarker
 }
 
+/// Token shapes the smoke never prints, even inside a stderr head the runtime already rendered:
+/// `sk-` keys, `eyJ` JWTs, bearer credentials, and access/refresh token assignments.
+private func redactingTokenShapes(_ text: String) -> String {
+    let rules: [(pattern: String, template: String)] = [
+        (#"(?i)\b(access_token|refresh_token)\b["']?\s*[:=]\s*["']?[^\s"',;}]+"#, "$1=<redacted>"),
+        (#"(?i)\bbearer\b\s*[:=]?\s*[^\s"',;}]+"#, "Bearer <redacted>"),
+        (#"\beyJ[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-=]*)*"#, "<redacted-token>"),
+        (#"\bsk-[A-Za-z0-9_\-]+"#, "<redacted-token>"),
+    ]
+    var output = text
+    for rule in rules {
+        guard let regex = try? NSRegularExpression(pattern: rule.pattern) else {
+            return "<redacted-unparseable>"
+        }
+        output = regex.stringByReplacingMatches(
+            in: output, range: NSRange(output.startIndex..., in: output),
+            withTemplate: rule.template)
+    }
+    return output
+}
+
+/// `.unavailable` and `.processFailure` carry the operator cause. The live smoke on 2026-10-01 printed a
+/// bare `classification=unavailable` while the real cause, Codex's own stderr ("Failed to synchronize
+/// managed preferences"), was dropped. The stderr TEXT is logged (ADR 0019/0020), never only its size,
+/// and token shapes are redacted on top of the runtime's own rendering.
 private func runtimeFailureLine(for outcome: CodexRuntimeOutcome) -> String {
     let classification: String
     switch outcome {
@@ -43,8 +68,13 @@ private func runtimeFailureLine(for outcome: CodexRuntimeOutcome) -> String {
         classification = "timeout"
     case .rejected(let reason):
         return "[codex-provider-smoke][FAIL] classification=rejected cause: \(reason)"
-    case .unavailable, .processFailure:
-        classification = "unavailable"
+    case .unavailable(let reason):
+        return "[codex-provider-smoke][FAIL] classification=unavailable operator cause: "
+            + redactingTokenShapes(reason)
+    case .processFailure(let exitCode, let stderrBytes, let stderrHead):
+        let head = stderrHead.isEmpty ? "<empty>" : redactingTokenShapes(stderrHead)
+        return "[codex-provider-smoke][FAIL] classification=unavailable operator cause: "
+            + "processFailure exit=\(exitCode) stderrBytes=\(stderrBytes) stderrHead=\(head)"
     }
     return "[codex-provider-smoke][FAIL] classification=\(classification)"
 }
@@ -213,6 +243,59 @@ private func runDiagnosticsSelfTest() -> Bool {
         print("[codex-provider-smoke-selftest][\(ok ? "PASS" : "FAIL")] \(check.name)")
         passed = passed && ok
     }
+
+    // The 2026-10-01 live failure, scripted. The predicate must accept today's line and refuse the
+    // bare classification the smoke printed before (the mutant), so the check cannot pass vacuously.
+    let managedPreferences = "Error: failed to initialize in-process app-server client: "
+        + "Failed to synchronize managed preferences"
+    func showsOperatorCause(_ line: String, exitCode: Int32, head: String) -> Bool {
+        line.hasPrefix("[codex-provider-smoke][FAIL] classification=unavailable operator cause: ")
+            && line.contains("exit=\(exitCode) ") && line.hasSuffix("stderrHead=\(head)")
+    }
+    let processLine = runtimeFailureLine(for: .processFailure(
+        exitCode: 1, stderrBytes: 100, stderrHead: managedPreferences))
+    let bareMutant = "[codex-provider-smoke][FAIL] classification=unavailable"
+    let processCauseOK = processLine == "[codex-provider-smoke][FAIL] classification=unavailable "
+            + "operator cause: processFailure exit=1 stderrBytes=100 stderrHead=\(managedPreferences)"
+        && showsOperatorCause(processLine, exitCode: 1, head: managedPreferences)
+        && !showsOperatorCause(bareMutant, exitCode: 1, head: managedPreferences)
+    print(
+        "[codex-provider-smoke-selftest][\(processCauseOK ? "PASS" : "FAIL")] "
+        + "process failure prints the exit code and the stderr text, not a bare classification")
+    passed = passed && processCauseOK
+
+    let unavailableLine = runtimeFailureLine(for: .unavailable("synthetic runner refusal"))
+    let unavailableCauseOK = unavailableLine
+            == "[codex-provider-smoke][FAIL] classification=unavailable operator cause: synthetic runner refusal"
+        && unavailableLine != bareMutant
+    print(
+        "[codex-provider-smoke-selftest][\(unavailableCauseOK ? "PASS" : "FAIL")] "
+        + "unavailable runtime outcome prints its operator cause")
+    passed = passed && unavailableCauseOK
+
+    let secrets = [
+        "sk-SYNTHETICabc123", "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJzeW50aGV0aWMifQ",
+        "SYNTHETIC_BEARER_VALUE", "SYNTHETIC_ACCESS_VALUE", "SYNTHETIC_REFRESH_VALUE",
+    ]
+    let tokenHead = "Error: auth failed key=sk-SYNTHETICabc123 "
+        + "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2ln "
+        + "Bearer SYNTHETIC_BEARER_VALUE access_token=SYNTHETIC_ACCESS_VALUE "
+        + "\"refresh_token\": \"SYNTHETIC_REFRESH_VALUE\""
+    func leaksToken(_ line: String) -> Bool { secrets.contains { line.contains($0) } }
+    let redactedLine = runtimeFailureLine(for: .processFailure(
+        exitCode: 2, stderrBytes: tokenHead.utf8.count, stderrHead: tokenHead))
+    let unredactedMutant = "[codex-provider-smoke][FAIL] classification=unavailable operator cause: "
+        + "processFailure exit=2 stderrBytes=\(tokenHead.utf8.count) stderrHead=\(tokenHead)"
+    let redactionOK = !leaksToken(redactedLine)
+        && leaksToken(unredactedMutant)
+        && redactedLine.contains("exit=2 ")
+        && redactedLine.contains("stderrHead=Error: auth failed key=<redacted-token>")
+        && !leaksToken(runtimeFailureLine(for: .unavailable("refused Bearer SYNTHETIC_BEARER_VALUE")))
+    print(
+        "[codex-provider-smoke-selftest][\(redactionOK ? "PASS" : "FAIL")] "
+        + "token shapes in the operator cause are redacted (sk-, eyJ, bearer, access_token, refresh_token)")
+    passed = passed && redactionOK
+
     let opaque = CodexShippedModelPair(model: "future/model-exec", effort: "wild effort")
     let explicit = parseSmokeArguments([
         "--pair", opaque.model, opaque.effort,

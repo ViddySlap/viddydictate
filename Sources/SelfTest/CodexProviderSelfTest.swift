@@ -136,6 +136,15 @@ enum CodexProviderSelfTest {
         check("provider smoke rejected runtime outcome includes its exact cause",
               completed && output.contains(
                 "[codex-provider-smoke-selftest][PASS] rejected runtime outcome includes exact classification cause"))
+        check("provider smoke process failure prints the exit code and stderr text",
+              completed && output.contains(
+                "[codex-provider-smoke-selftest][PASS] process failure prints the exit code and the stderr text, not a bare classification"))
+        check("provider smoke unavailable runtime outcome prints its operator cause",
+              completed && output.contains(
+                "[codex-provider-smoke-selftest][PASS] unavailable runtime outcome prints its operator cause"))
+        check("provider smoke redacts token shapes in the operator cause",
+              completed && output.contains(
+                "[codex-provider-smoke-selftest][PASS] token shapes in the operator cause are redacted (sk-, eyJ, bearer, access_token, refresh_token)"))
         check("provider smoke preserves explicit opaque model/effort pair inputs",
               completed && output.contains(
                 "[codex-provider-smoke-selftest][PASS] explicit opaque pair inputs are preserved exactly"))
