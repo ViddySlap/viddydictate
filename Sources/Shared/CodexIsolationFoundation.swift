@@ -18,7 +18,13 @@ enum CodexIsolationError: Error, CustomStringConvertible {
 /// call, reads an auth file, or consults the user's normal Codex home. Production provider integration
 /// uses these exact profile/stdin/JSONL contracts through the external containment runner.
 enum CodexIsolationFoundation {
-    static let codexBinary = "/Applications/ChatGPT.app/Contents/Resources/codex"
+    /// The vendor CLI this process would use right now: the first `CodexCLILocation` candidate that
+    /// resolves, else the primary candidate path, which then fails every existence check. The boundary
+    /// resolves once per audit and threads that one candidate through quarantine and receipt checks;
+    /// this accessor serves diagnostics and the in-place device login.
+    static var codexBinary: String {
+        CodexCLILocation.resolve().candidate?.executable ?? CodexCLILocation.primaryExecutable
+    }
     /// Diagnostic evidence only. Compatibility is earned by an exact-binary receipt, never by
     /// comparing this text to the candidate CLI's reported version.
     static let lastReviewedCLIVersion = "codex-cli 0.150.0-alpha.8"
@@ -507,8 +513,16 @@ enum CodexIsolationFoundation {
         let codeSigning: CodeSigningIdentity?
     }
 
+    /// The seal of a bundle-signed CLI beyond its main executable. The executable's cdHash already
+    /// binds its Info.plist; `_CodeSignature/CodeResources` is the manifest of every other sealed file.
+    struct ExecutableBundleIdentity: Codable, Equatable {
+        let codeResourcesSHA256: String
+    }
+
     struct CompatibilityReceipt: Codable, Equatable {
-        static let currentFormatVersion = 3
+        /// 4: records the origin location and, for a bundle-signed CLI, the bundle seal. A version-3
+        /// receipt fails to decode, which forces one fresh quarantine.
+        static let currentFormatVersion = 4
 
         let formatVersion: Int
         let originExecutable: StrongFileIdentity
@@ -528,6 +542,11 @@ enum CodexIsolationFoundation {
         /// ADR 0020 drift evidence: upstream's observed prompt structure at the time this receipt was
         /// minted. Recorded so the shape can be diffed across Codex binaries. Never asserted.
         let observedPromptShape: String?
+        /// The vendor path that was quarantined. A different resolved candidate is a different origin.
+        let originExecutablePath: String?
+        /// Non-nil exactly when the snapshot is a whole-bundle copy (`codex-<sha256>.app`). The same
+        /// value must hold for the origin bundle and for the snapshot.
+        let executableBundle: ExecutableBundleIdentity?
 
         init(
             originExecutable: StrongFileIdentity,
@@ -544,10 +563,14 @@ enum CodexIsolationFoundation {
             skillsRootSHA256: String,
             schemaSHA256: String,
             executionContractSHA256: String,
-            observedPromptShape: String? = nil
+            observedPromptShape: String? = nil,
+            originExecutablePath: String? = nil,
+            executableBundle: ExecutableBundleIdentity? = nil
         ) {
             self.formatVersion = Self.currentFormatVersion
             self.observedPromptShape = observedPromptShape
+            self.originExecutablePath = originExecutablePath
+            self.executableBundle = executableBundle
             self.originExecutable = originExecutable
             self.executable = executable
             self.executableSnapshotFilename = executableSnapshotFilename
@@ -871,6 +894,208 @@ enum CodexIsolationFoundation {
             fileManager: fm)
     }
 
+    struct InstalledExecutableSnapshot {
+        /// The Mach-O the runner executes: the flat file, or `<entry>/Contents/MacOS/codex`.
+        let url: URL
+        let identity: StrongFileIdentity
+        /// The store entry the receipt names: `codex-<sha256>` or `codex-<sha256>.app`.
+        let entryName: String
+        let bundle: ExecutableBundleIdentity?
+    }
+
+    /// Snapshots a resolved candidate in the shape its signing model requires. A standalone CLI keeps
+    /// the single-file snapshot. A bundle-signed CLI is copied whole: its signature binds Info.plist
+    /// and sealed resources, so a lone copy of its executable is SIGKILLed at launch (measured on
+    /// 0.158: `load code signature error 4`, exit 137).
+    static func installExecutableSnapshot(
+        for candidate: CodexCLILocation.Candidate,
+        originIdentity: StrongFileIdentity,
+        originBundle: ExecutableBundleIdentity?,
+        paths: Paths,
+        fileManager fm: FileManager = .default
+    ) throws -> InstalledExecutableSnapshot {
+        switch candidate.layout {
+        case .standalone:
+            guard originBundle == nil else {
+                throw CodexIsolationError.failed("standalone Codex candidate carries a bundle seal")
+            }
+            let snapshot = try installExecutableSnapshot(
+                from: URL(fileURLWithPath: candidate.executable),
+                originIdentity: originIdentity,
+                paths: paths,
+                fileManager: fm)
+            return InstalledExecutableSnapshot(
+                url: snapshot.url, identity: snapshot.identity,
+                entryName: snapshot.url.lastPathComponent, bundle: nil)
+        case .appBundle:
+            guard let bundleRoot = candidate.bundleRoot, let originBundle,
+                  candidate.executable
+                    == bundleRoot + "/" + CodexCLILocation.bundleExecutableRelativePath else {
+                throw CodexIsolationError.failed("Codex bundle candidate is not canonical")
+            }
+            return try installBundleSnapshot(
+                fromBundle: URL(fileURLWithPath: bundleRoot, isDirectory: true),
+                originIdentity: originIdentity,
+                originBundle: originBundle,
+                paths: paths,
+                fileManager: fm)
+        }
+    }
+
+    static func bundleIdentity(atBundle root: URL) throws -> ExecutableBundleIdentity {
+        try requireDirectoryNoSymlink(root)
+        let seal = root.appendingPathComponent(
+            "Contents/_CodeSignature/CodeResources", isDirectory: false)
+        do {
+            try requireRegularFileNoSymlink(seal)
+        } catch {
+            throw CodexIsolationError.failed("Codex bundle has no sealed-resource manifest")
+        }
+        return ExecutableBundleIdentity(codeResourcesSHA256: try sha256Hex(ofFile: seal))
+    }
+
+    /// `codesign --verify --strict` over the whole snapshot bundle. A snapshot that fails it is never
+    /// installed under its content address and never used.
+    static func verifyBundleSignatureStrict(at root: URL) throws {
+        let bounded: BoundedProcessResult
+        do {
+            bounded = try runBoundedProcess(
+                executable: "/usr/bin/codesign",
+                arguments: ["--verify", "--strict", root.path],
+                environment: ["PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"],
+                currentDirectory: root.deletingLastPathComponent(),
+                timeout: 120,
+                stdoutLimit: 4_096,
+                stderrLimit: 65_536)
+        } catch {
+            throw CodexIsolationError.failed("could not run codesign --verify --strict on the Codex bundle snapshot")
+        }
+        guard bounded.leaderReaped, !bounded.residualProcessGroup, !bounded.captureFailure,
+              !bounded.timedOut, bounded.status == 0 else {
+            throw CodexIsolationError.failed("Codex bundle snapshot failed codesign --verify --strict")
+        }
+    }
+
+    private static func installBundleSnapshot(
+        fromBundle origin: URL,
+        originIdentity: StrongFileIdentity,
+        originBundle: ExecutableBundleIdentity,
+        paths: Paths,
+        fileManager fm: FileManager
+    ) throws -> InstalledExecutableSnapshot {
+        let originExecutable = origin.appendingPathComponent(
+            CodexCLILocation.bundleExecutableRelativePath, isDirectory: false)
+        guard try strongFileIdentity(at: originExecutable, includeCodeSigning: true) == originIdentity,
+              try bundleIdentity(atBundle: origin) == originBundle else {
+            throw CodexIsolationError.failed("Codex bundle origin identity changed before snapshot")
+        }
+        try secureDirectory(paths.executableStore, fileManager: fm)
+        let entryName = "codex-\(originIdentity.sha256).app"
+        let destination = paths.executableStore.appendingPathComponent(entryName, isDirectory: true)
+        var st = stat()
+        if lstat(destination.path, &st) == 0 {
+            try requireDirectoryNoSymlink(destination)
+            try verifyBundleSignatureStrict(at: destination)
+        } else {
+            let staged = paths.executableStore.appendingPathComponent(
+                ".\(entryName).staged-\(UUID().uuidString)", isDirectory: true)
+            do {
+                let copy = try runBoundedProcess(
+                    executable: "/usr/bin/ditto",
+                    arguments: [origin.path, staged.path],
+                    environment: ["PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"],
+                    currentDirectory: paths.executableStore,
+                    timeout: 180,
+                    stdoutLimit: 4_096,
+                    stderrLimit: 65_536)
+                guard copy.leaderReaped, !copy.residualProcessGroup, !copy.captureFailure,
+                      !copy.timedOut, copy.status == 0 else {
+                    throw CodexIsolationError.failed("could not copy the Codex bundle snapshot")
+                }
+                try restrictBundleSnapshot(staged)
+                try verifyBundleSignatureStrict(at: staged)
+                let stagedIdentity = try strongFileIdentity(
+                    at: staged.appendingPathComponent(
+                        CodexCLILocation.bundleExecutableRelativePath, isDirectory: false),
+                    includeCodeSigning: true)
+                guard stagedIdentity.sha256 == originIdentity.sha256,
+                      stagedIdentity.codeSigning == originIdentity.codeSigning,
+                      try bundleIdentity(atBundle: staged) == originBundle else {
+                    throw CodexIsolationError.failed("Codex bundle snapshot identity mismatch")
+                }
+                guard rename(staged.path, destination.path) == 0 else {
+                    throw CodexIsolationError.failed("could not install Codex bundle snapshot")
+                }
+            } catch {
+                if lstat(staged.path, &st) == 0 {
+                    do { try CodexSnapshotRetention.removeSnapshotEntry(staged, fileManager: fm) }
+                    catch {
+                        throw CodexIsolationError.failed(
+                            "Codex bundle snapshot staging cleanup failed")
+                    }
+                }
+                throw error
+            }
+        }
+        try requireFileMode(destination, expected: 0o500)
+        let executable = destination.appendingPathComponent(
+            CodexCLILocation.bundleExecutableRelativePath, isDirectory: false)
+        try requireRegularFileNoSymlink(executable)
+        try requireFileMode(executable, expected: 0o500)
+        let identity = try strongFileIdentity(at: executable, includeCodeSigning: true)
+        guard identity.sha256 == originIdentity.sha256,
+              identity.codeSigning == originIdentity.codeSigning,
+              try bundleIdentity(atBundle: destination) == originBundle,
+              try strongFileIdentity(at: originExecutable, includeCodeSigning: true) == originIdentity,
+              try bundleIdentity(atBundle: origin) == originBundle else {
+            throw CodexIsolationError.failed("Codex bundle origin identity changed during snapshot")
+        }
+        return InstalledExecutableSnapshot(
+            url: executable, identity: identity, entryName: entryName, bundle: originBundle)
+    }
+
+    /// Owner-only and read-only, like the single-file snapshot: directories 0500, files 0400 (0500
+    /// where the vendor set an execute bit), the main executable 0500. Permission bits are not part of
+    /// a code signature; content, which is, is untouched. Symlinks are left exactly as copied.
+    private static func restrictBundleSnapshot(_ root: URL) throws {
+        func walk(_ directory: URL) throws {
+            for child in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
+                let url = directory.appendingPathComponent(child)
+                var st = stat()
+                guard lstat(url.path, &st) == 0 else {
+                    throw CodexIsolationError.failed("cannot inspect Codex bundle snapshot entry")
+                }
+                switch st.st_mode & S_IFMT {
+                case S_IFDIR:
+                    try walk(url)
+                case S_IFREG:
+                    let mode: mode_t = (st.st_mode & 0o100) != 0 ? 0o500 : 0o400
+                    guard chmod(url.path, mode) == 0 else {
+                        throw CodexIsolationError.failed("could not restrict Codex bundle snapshot file")
+                    }
+                case S_IFLNK:
+                    continue
+                default:
+                    throw CodexIsolationError.failed("Codex bundle contains a non-regular entry")
+                }
+            }
+            guard chmod(directory.path, 0o500) == 0 else {
+                throw CodexIsolationError.failed("could not restrict Codex bundle snapshot directory")
+            }
+        }
+        try walk(root)
+    }
+
+    /// Install-order signal for `CodexSnapshotRetention`: the entry's status-change time, which the
+    /// install's own chmod and rename refresh. A reused snapshot is kept as current regardless.
+    static func snapshotRecency(_ url: URL) throws -> Int64 {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else {
+            throw CodexIsolationError.failed("cannot inspect Codex executable snapshot entry")
+        }
+        return Int64(st.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(st.st_ctimespec.tv_nsec)
+    }
+
     static func installRunnerSnapshot(
         from origin: URL,
         originIdentity: StrongFileIdentity,
@@ -951,22 +1176,36 @@ enum CodexIsolationFoundation {
         return (destination, identity)
     }
 
+    /// The Mach-O a receipt authorizes: the flat snapshot file, or the executable inside the bundle
+    /// snapshot. Every launch path (runner argv, login status, audits) goes through here.
     static func executableSnapshotURL(
         paths: Paths,
         receipt: CompatibilityReceipt
     ) throws -> URL {
-        let expected = "codex-\(receipt.originExecutable.sha256)"
+        let entry = try executableSnapshotEntryName(receipt: receipt)
+        guard receipt.executableBundle != nil else {
+            return paths.executableSnapshot(filename: entry)
+        }
+        return paths.executableStore
+            .appendingPathComponent(entry, isDirectory: true)
+            .appendingPathComponent(CodexCLILocation.bundleExecutableRelativePath, isDirectory: false)
+    }
+
+    /// The store entry a receipt names, validated against the receipt's own content address.
+    static func executableSnapshotEntryName(receipt: CompatibilityReceipt) throws -> String {
+        let bundle = receipt.executableBundle != nil
+        let expected = "codex-\(receipt.originExecutable.sha256)" + (bundle ? ".app" : "")
         guard receipt.executableSnapshotFilename == expected,
               receipt.executable.sha256 == receipt.originExecutable.sha256,
               receipt.executable.codeSigning
                 == receipt.originExecutable.codeSigning,
               expected.range(
-                of: #"^codex-[0-9a-f]{64}$"#,
+                of: bundle ? #"^codex-[0-9a-f]{64}\.app$"# : #"^codex-[0-9a-f]{64}$"#,
                 options: .regularExpression) != nil else {
             throw CodexIsolationError.failed(
                 "Codex executable snapshot name is invalid")
         }
-        return paths.executableSnapshot(filename: expected)
+        return expected
     }
 
     static func runnerSnapshotURL(
@@ -1055,8 +1294,8 @@ enum CodexIsolationFoundation {
 
     static var executionContractSHA256: String {
         let canonical = [
-            "receipt=3",
-            "executable=origin-bound-content-addressed-snapshot",
+            "receipt=4",
+            "executable=origin-bound-content-addressed-snapshot;bundle-signed=whole-bundle-codesign-strict",
             "runner=origin-bound-content-addressed-snapshot",
             "envelope=\(envelopeVersion)",
             "schema=\(sha256Hex(schemaBytes))",
@@ -1095,13 +1334,25 @@ enum CodexIsolationFoundation {
         runner: StrongFileIdentity,
         configSHA256: String,
         skillTreeSHA256: String,
-        skillsRootSHA256: String
+        skillsRootSHA256: String,
+        originExecutablePath: String? = nil,
+        originBundle: ExecutableBundleIdentity? = nil,
+        snapshotBundle: ExecutableBundleIdentity? = nil
     ) -> String? {
         guard receipt.formatVersion == CompatibilityReceipt.currentFormatVersion else {
             return "Codex compatibility receipt format changed"
         }
         guard receipt.originExecutable == originExecutable else {
             return "Codex origin executable identity changed"
+        }
+        guard receipt.originExecutablePath == originExecutablePath else {
+            return "Codex origin executable location changed"
+        }
+        guard receipt.executableBundle == originBundle else {
+            return "Codex origin bundle seal changed"
+        }
+        guard receipt.executableBundle == snapshotBundle else {
+            return "Codex executable snapshot bundle seal changed"
         }
         guard receipt.executable.sha256 == receipt.originExecutable.sha256,
               receipt.executable.codeSigning

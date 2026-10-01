@@ -626,18 +626,20 @@ enum CodexProviderRuntime {
                                                     FileManager.default.isExecutableFile(atPath: $0)
                                                 }) throws
         -> CodexIsolationFoundation.CompatibilityReceipt {
-        try verifyCLIAndRunnerAvailable(
+        // Resolved ONCE. Every later step (receipt validation, quarantine, refusal cache) uses this
+        // candidate, so a ChatGPT update mid-audit cannot mix two layouts in one receipt.
+        let origin = try verifyCLIAndRunnerAvailable(
             runnerPath: runnerPath,
             isExecutableFile: isExecutableFile)
 
         try CodexIsolationFoundation.prepareDirectories(paths)
         if let receipt = try validInstalledReceipt(
-            paths: paths, runnerPath: runnerPath) {
+            paths: paths, runnerPath: runnerPath, origin: origin) {
             clearBoundaryRefusal()
             return receipt
         }
         let originIdentity = try? CodexIsolationFoundation.cheapFileIdentity(
-            at: URL(fileURLWithPath: CodexIsolationFoundation.codexBinary))
+            at: URL(fileURLWithPath: origin.executable))
         if let originIdentity, let cached = cachedBoundaryRefusal(for: originIdentity) {
             throw cached
         }
@@ -646,7 +648,7 @@ enum CodexProviderRuntime {
             object: nil)
         do {
             let receipt = try quarantineAndInstallCompatibility(
-                livePaths: paths, runnerPath: runnerPath)
+                livePaths: paths, runnerPath: runnerPath, origin: origin)
             clearBoundaryRefusal()
             NotificationCenter.default.post(
                 name: compatibilityQuarantineDidFinish,
@@ -666,13 +668,19 @@ enum CodexProviderRuntime {
     private static func verifyCLIAndRunnerAvailable(
         runnerPath: String,
         isExecutableFile: (String) -> Bool
-    ) throws {
-        guard isExecutableFile(CodexIsolationFoundation.codexBinary) else {
-            throw BoundaryError(description: "Codex CLI is not installed")
+    ) throws -> CodexCLILocation.Candidate {
+        let resolution = CodexCLILocation.resolve(isExecutableFile: isExecutableFile)
+        guard let candidate = resolution.candidate else {
+            var checked: [String] = []
+            if case .notFound(let paths) = resolution { checked = paths }
+            throw BoundaryError(
+                description: CodexCLILocation.notFoundDescription(checked: checked),
+                preflightDescription: "Codex CLI not found at any supported ChatGPT.app location")
         }
         guard runnerPath.hasPrefix("/"), isExecutableFile(runnerPath) else {
             throw BoundaryError(description: "Codex containment helper is unavailable")
         }
+        return candidate
     }
 
     @discardableResult
@@ -693,7 +701,8 @@ enum CodexProviderRuntime {
 
     private static func validInstalledReceipt(
         paths: CodexIsolationFoundation.Paths,
-        runnerPath: String
+        runnerPath: String,
+        origin: CodexCLILocation.Candidate
     ) throws -> CodexIsolationFoundation.CompatibilityReceipt? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: paths.compatibilityReceipt.path),
@@ -709,6 +718,11 @@ enum CodexProviderRuntime {
                 paths.compatibilityReceipt, expected: 0o400)
             let receipt = try CodexIsolationFoundation.decodeCompatibilityReceipt(
                 Data(contentsOf: paths.compatibilityReceipt))
+            // A receipt earned for the other layout, or another path, never authorizes this one.
+            guard receipt.originExecutablePath == origin.executable,
+                  (receipt.executableBundle != nil) == (origin.layout == .appBundle) else {
+                return nil
+            }
             try CodexIsolationFoundation.requireDirectoryNoSymlink(
                 paths.executableStore)
             try CodexIsolationFoundation.requireFileMode(
@@ -723,6 +737,12 @@ enum CodexProviderRuntime {
             let runnerSnapshotURL =
                 try CodexIsolationFoundation.runnerSnapshotURL(
                     paths: paths, receipt: receipt)
+            let snapshotEntry = paths.executableStore.appendingPathComponent(
+                try CodexIsolationFoundation.executableSnapshotEntryName(receipt: receipt))
+            if receipt.executableBundle != nil {
+                try CodexIsolationFoundation.requireDirectoryNoSymlink(snapshotEntry)
+                try CodexIsolationFoundation.requireFileMode(snapshotEntry, expected: 0o500)
+            }
             try CodexIsolationFoundation.requireRegularFileNoSymlink(snapshotURL)
             try CodexIsolationFoundation.requireFileMode(
                 snapshotURL, expected: 0o500)
@@ -734,7 +754,7 @@ enum CodexProviderRuntime {
             // The cheap identity check is deliberately first on every transform. Strong hashes were
             // earned in quarantine and are recomputed only when this cheap identity changes.
             guard try CodexIsolationFoundation.cheapFileIdentity(
-                at: URL(fileURLWithPath: CodexIsolationFoundation.codexBinary))
+                at: URL(fileURLWithPath: origin.executable))
                 == receipt.originExecutable.cheap,
                   try CodexIsolationFoundation.cheapFileIdentity(
                     at: snapshotURL) == receipt.executable.cheap,
@@ -762,7 +782,7 @@ enum CodexProviderRuntime {
             guard CodexIsolationFoundation.compatibilityReceiptBoundaryFailure(
                 receipt: receipt,
                 originExecutable: try CodexIsolationFoundation.strongFileIdentity(
-                    at: URL(fileURLWithPath: CodexIsolationFoundation.codexBinary),
+                    at: URL(fileURLWithPath: origin.executable),
                     includeCodeSigning: true),
                 executable: try CodexIsolationFoundation.strongFileIdentity(
                     at: snapshotURL,
@@ -775,7 +795,16 @@ enum CodexProviderRuntime {
                     includeCodeSigning: true),
                 configSHA256: configHash,
                 skillTreeSHA256: tree.identitySHA256,
-                skillsRootSHA256: skillsRoot.identitySHA256) == nil else {
+                skillsRootSHA256: skillsRoot.identitySHA256,
+                originExecutablePath: origin.executable,
+                originBundle: try origin.bundleRoot.map {
+                    try CodexIsolationFoundation.bundleIdentity(
+                        atBundle: URL(fileURLWithPath: $0, isDirectory: true))
+                },
+                snapshotBundle: try receipt.executableBundle.map { _ in
+                    try CodexIsolationFoundation.bundleIdentity(atBundle: snapshotEntry)
+                })
+                == nil else {
                 return nil
             }
             try verifyDirectoryPermissions(paths: paths)
@@ -788,9 +817,10 @@ enum CodexProviderRuntime {
 
     private static func quarantineAndInstallCompatibility(
         livePaths: CodexIsolationFoundation.Paths,
-        runnerPath: String
+        runnerPath: String,
+        origin: CodexCLILocation.Candidate
     ) throws -> CodexIsolationFoundation.CompatibilityReceipt {
-        let binaryURL = URL(fileURLWithPath: CodexIsolationFoundation.codexBinary)
+        let binaryURL = URL(fileURLWithPath: origin.executable)
         let runnerURL = URL(fileURLWithPath: runnerPath)
         let originIdentity = try CodexIsolationFoundation.strongFileIdentity(
             at: binaryURL, includeCodeSigning: true)
@@ -801,10 +831,16 @@ enum CodexProviderRuntime {
                 description: "Codex executable code-signing identity is unavailable",
                 preflightDescription: "candidate Codex code-signing identity is unavailable")
         }
+        let originBundle = try origin.bundleRoot.map {
+            try CodexIsolationFoundation.bundleIdentity(
+                atBundle: URL(fileURLWithPath: $0, isDirectory: true))
+        }
         let snapshot = try CodexIsolationFoundation.installExecutableSnapshot(
-            from: binaryURL,
+            for: origin,
             originIdentity: originIdentity,
+            originBundle: originBundle,
             paths: livePaths)
+        let snapshotEntry = livePaths.executableStore.appendingPathComponent(snapshot.entryName)
         let executableURL = snapshot.url
         let executableIdentity = snapshot.identity
         let runnerSnapshot = try CodexIsolationFoundation.installRunnerSnapshot(
@@ -969,7 +1005,7 @@ enum CodexProviderRuntime {
         let receipt = CodexIsolationFoundation.CompatibilityReceipt(
             originExecutable: originIdentity,
             executable: executableIdentity,
-            executableSnapshotFilename: executableURL.lastPathComponent,
+            executableSnapshotFilename: snapshot.entryName,
             originRunner: originRunnerIdentity,
             runner: runnerIdentity,
             runnerSnapshotFilename: runnerSnapshotURL.lastPathComponent,
@@ -985,10 +1021,19 @@ enum CodexProviderRuntime {
                 CodexIsolationFoundation.schemaBytes),
             executionContractSHA256:
                 CodexIsolationFoundation.executionContractSHA256,
-            observedPromptShape: promptShapeDescriptor(prompt))
+            observedPromptShape: promptShapeDescriptor(prompt),
+            originExecutablePath: origin.executable,
+            executableBundle: originBundle)
 
         // Recompute strong identities after the entire no-auth audit. Any binary or runner race
         // invalidates the candidate before app-owned assets can be installed.
+        let originBundleAfterAudit = try origin.bundleRoot.map {
+            try CodexIsolationFoundation.bundleIdentity(
+                atBundle: URL(fileURLWithPath: $0, isDirectory: true))
+        }
+        let snapshotBundleAfterAudit = try originBundle.map { _ in
+            try CodexIsolationFoundation.bundleIdentity(atBundle: snapshotEntry)
+        }
         guard try CodexIsolationFoundation.strongFileIdentity(
             at: binaryURL, includeCodeSigning: true) == originIdentity,
               try CodexIsolationFoundation.strongFileIdentity(
@@ -998,7 +1043,9 @@ enum CodexProviderRuntime {
                 includeCodeSigning: true) == originRunnerIdentity,
               try CodexIsolationFoundation.strongFileIdentity(
                 at: runnerSnapshotURL,
-                includeCodeSigning: true) == runnerIdentity else {
+                includeCodeSigning: true) == runnerIdentity,
+              originBundleAfterAudit == originBundle,
+              snapshotBundleAfterAudit == originBundle else {
             throw BoundaryError(
                 description: "Codex compatibility identity changed during quarantine")
         }
@@ -1009,7 +1056,7 @@ enum CodexProviderRuntime {
             restrictiveConfig: liveConfig,
             receiptBytes: CodexIsolationFoundation.encodeCompatibilityReceipt(receipt))
         guard let installed = try validInstalledReceipt(
-            paths: livePaths, runnerPath: runnerPath), installed == receipt else {
+            paths: livePaths, runnerPath: runnerPath, origin: origin), installed == receipt else {
             if FileManager.default.fileExists(
                 atPath: livePaths.compatibilityReceipt.path) {
                 try FileManager.default.removeItem(
@@ -1018,7 +1065,27 @@ enum CodexProviderRuntime {
             throw BoundaryError(
                 description: "Codex compatibility receipt installation failed")
         }
+        pruneExecutableSnapshots(store: livePaths.executableStore, current: installed)
         return installed
+    }
+
+    /// Housekeeping after a receipt is installed, never part of the boundary: a failure is logged and
+    /// changes nothing about availability. The current snapshot is never a pruning candidate.
+    private static func pruneExecutableSnapshots(
+        store: URL,
+        current receipt: CodexIsolationFoundation.CompatibilityReceipt
+    ) {
+        do {
+            let pruned = try CodexSnapshotRetention.prune(
+                store: store,
+                current: receipt.executableSnapshotFilename,
+                recency: CodexIsolationFoundation.snapshotRecency)
+            for name in pruned {
+                Log.write("[codex-boundary] pruned executable snapshot \(name)")
+            }
+        } catch {
+            Log.write("[codex-boundary] executable snapshot pruning failed; boundary unaffected")
+        }
     }
 
     private static func compatibilityContinuityBaseline(

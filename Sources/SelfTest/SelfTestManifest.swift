@@ -514,6 +514,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .codexConfigTOMLSelftest: .init(tier: .deterministic) { _ in
         CodexConfigTOMLSelfTest.run() ? 0 : 1
     },
+    // Pure: fake ChatGPT.app layouts and snapshot stores under TMPDIR plus synthetic receipts. The real
+    // /Applications is never read and no ditto, codesign, or Codex process runs.
+    .codexCLILocationSelftest: .init(tier: .deterministic) { _ in
+        CodexCLILocationSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

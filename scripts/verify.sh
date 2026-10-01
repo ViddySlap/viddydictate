@@ -636,6 +636,9 @@ tier_deterministic() {
         run_gate deterministic "Codex restrictive config is valid TOML with dotted feature keys" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --codex-config-toml-selftest || true
+        run_gate deterministic "Codex CLI location, bundle snapshot addressing, and retention" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --codex-cli-location-selftest || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi

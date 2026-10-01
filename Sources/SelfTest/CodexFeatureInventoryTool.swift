@@ -9,7 +9,7 @@ enum CodexFeatureInventoryTool {
 
     static func run(arguments: [String]) -> Int32 {
         do {
-            let binary = try binaryPath(arguments: arguments)
+            let candidate = try binaryCandidate(arguments: arguments)
             let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
                 .appendingPathComponent(
                     "viddydictate-codex-quarantine-inventory-\(UUID().uuidString)",
@@ -21,17 +21,25 @@ enum CodexFeatureInventoryTool {
             try CodexIsolationFoundation.prepareDirectories(paths)
             try CodexIsolationFoundation.stageSchema(paths: paths)
             try CodexProviderRuntime.stageBootstrapConfig(paths: paths)
-            let origin = URL(fileURLWithPath: binary)
+            let origin = URL(fileURLWithPath: candidate.executable)
             let originIdentity = try CodexIsolationFoundation.strongFileIdentity(
                 at: origin, includeCodeSigning: true)
             guard originIdentity.codeSigning != nil else {
                 throw CodexIsolationError.failed(
                     "candidate Codex code-signing identity is unavailable")
             }
+            // Same snapshot shape as the production quarantine: a bundle-signed CLI is copied whole and
+            // must pass codesign --verify --strict, because a lone copy of its executable is killed.
             let snapshot = try CodexIsolationFoundation.installExecutableSnapshot(
-                from: origin,
+                for: candidate,
                 originIdentity: originIdentity,
+                originBundle: try candidate.bundleRoot.map {
+                    try CodexIsolationFoundation.bundleIdentity(
+                        atBundle: URL(fileURLWithPath: $0, isDirectory: true))
+                },
                 paths: paths)
+            print("[codex-feature-inventory] layout=\(candidate.layout.rawValue) "
+                    + "binary=\(candidate.executable)")
             let runner = shippingRunnerPath()
             let runnerIdentity = try CodexIsolationFoundation.strongFileIdentity(
                 at: URL(fileURLWithPath: runner),
@@ -106,12 +114,18 @@ enum CodexFeatureInventoryTool {
         }
     }
 
-    private static func binaryPath(arguments: [String]) throws -> String {
+    private static func binaryCandidate(arguments: [String]) throws -> CodexCLILocation.Candidate {
         guard let flagIndex = arguments.firstIndex(of: "--codex-feature-inventory") else {
             throw CodexIsolationError.failed("missing --codex-feature-inventory mode")
         }
         let trailing = Array(arguments[(flagIndex + 1)...])
-        if trailing.isEmpty { return CodexIsolationFoundation.codexBinary }
+        if trailing.isEmpty {
+            guard let resolved = CodexCLILocation.resolve().candidate else {
+                throw CodexIsolationError.failed(
+                    "Codex CLI not found at any supported ChatGPT.app location")
+            }
+            return resolved
+        }
         guard trailing.count == 2, trailing[0] == "--binary", trailing[1].hasPrefix("/") else {
             throw CodexIsolationError.failed(
                 "usage: --codex-feature-inventory [--binary <absolute-path>]")
@@ -119,7 +133,7 @@ enum CodexFeatureInventoryTool {
         guard FileManager.default.isExecutableFile(atPath: trailing[1]) else {
             throw CodexIsolationError.failed("candidate Codex binary is not executable")
         }
-        return trailing[1]
+        return CodexCLILocation.candidate(forExecutable: trailing[1])
     }
 
     static func shippingRunnerPath(
@@ -140,10 +154,7 @@ enum CodexFeatureInventoryTool {
     private static func runCommand(
         runner: String,
         operation: String,
-        snapshot: (
-            url: URL,
-            identity: CodexIsolationFoundation.StrongFileIdentity
-        ),
+        snapshot: CodexIsolationFoundation.InstalledExecutableSnapshot,
         runnerIdentity: CodexIsolationFoundation.StrongFileIdentity,
         paths: CodexIsolationFoundation.Paths
     ) throws -> CommandResult {
