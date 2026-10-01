@@ -20,6 +20,10 @@ VERIFY_BUNDLE_ID="com.viddydictate.app.verify.$(basename "$SCRATCH")"
 mkdir -p "$SCRATCH_HOME/Library/Logs" "$SCRATCH_HOME/Library/Preferences" "$SCRATCH_TMP"
 cleanup_scratch() {
     defaults delete "$VERIFY_BUNDLE_ID" >/dev/null 2>&1 || true
+    # A Codex bundle snapshot in the scratch home is read-only all the way down (about 230 MB for the
+    # real CLI), and rm cannot unlink inside a 0500 directory. find does not follow the symlinks the
+    # services tier plants into the real HOME, and -type d never matches one.
+    find "$SCRATCH" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true
     rm -rf "$SCRATCH"
 }
 trap cleanup_scratch EXIT
@@ -36,6 +40,9 @@ Usage: ./scripts/verify.sh deterministic|services|gui|full
   services       Real LM Studio, Claude subscription, web-search, and residency checks.
   gui            HUD render/probe plus non-capture input-device diagnostics.
   full           deterministic + services + gui, then clean diff/worktree gates.
+
+  VD_ALLOW_LIVE_CODEX_STORE=1  run the two Codex store-writing service gates against the real HOME.
+                               This MODIFIES and PRUNES the live Codex store. Default: scratch home.
 
 Host-only Codex pin audit after a deterministic build:
   build/ViddyDictateTests.app/Contents/MacOS/ViddyDictateTests --codex-feature-inventory [--binary <absolute-path>]
@@ -708,7 +715,7 @@ tier_deterministic() {
         run_codex_bundle_snapshot_host_gate || true
         run_gate deterministic "service-gate classifier: an abstaining gate is never PASS" \
             service_gate_classifier_selftest "$SCRATCH/service-gate-classifier" \
-            "$ROOT/Sources/SelfTest/SelfTestAbstain.swift" || true
+            "$ROOT/Sources/SelfTest/SelfTestAbstain.swift" "$ROOT/Tools/CodexProviderSmoke.swift" || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi
@@ -901,10 +908,35 @@ restore_service_memory_state() {
     return 0
 }
 
+# The canonical Codex service gates run the production boundary, which snapshots the vendor CLI into,
+# rewrites the compatibility receipt in, and prunes the Codex store under HOME
+# (~/Library/Application Support/ViddyDictate/codex-executables, codex-runners, codex-home). On a
+# working build that would delete all but two of the existing snapshots in the live store. So by
+# default they run in the scratch home: the boundary is exercised for real up to "not logged in", and
+# the authenticated part abstains as SKIP with [precondition-missing], never PASS. Only
+# VD_ALLOW_LIVE_CODEX_STORE=1, exactly, runs them against the real HOME and its logged-in Codex home.
+codex_live_store_allowed() {
+    [[ "${VD_ALLOW_LIVE_CODEX_STORE:-}" == "1" ]]
+}
+
+announce_codex_store() {
+    if codex_live_store_allowed; then
+        printf '\n[verify][service][LIVE-CODEX-STORE] VD_ALLOW_LIVE_CODEX_STORE=1: the Codex all-shipped-pair and live catalog gates WILL MODIFY THE LIVE CODEX STORE under %s/Library/Application Support/ViddyDictate: snapshot the installed Codex CLI into codex-executables/, rewrite the compatibility receipt in codex-home/, and PRUNE codex-executables/ to the current snapshot plus one previous.\n' \
+            "$ORIGINAL_HOME"
+    else
+        if [[ -n "${VD_ALLOW_LIVE_CODEX_STORE:-}" ]]; then
+            printf '[verify][service] VD_ALLOW_LIVE_CODEX_STORE=%s is not 1; ignored\n' \
+                "$VD_ALLOW_LIVE_CODEX_STORE"
+        fi
+        printf '\n[verify][service] Codex gates use the scratch home and never touch the live Codex store; their authenticated part will SKIP. Set VD_ALLOW_LIVE_CODEX_STORE=1 to run them against the real HOME (modifies and prunes the live store).\n'
+    fi
+}
+
 tier_services() {
     local failures_before=$FAILURES
     local unverified_before=$UNVERIFIED
     local skipped_before=$SKIPPED
+    announce_codex_store
     if require_built_app service; then
         stage_service_home_dependencies
         local service_app="$SCRATCH/ViddyDictateVerify.app/Contents/MacOS/ViddyDictateTests"
@@ -968,13 +1000,29 @@ tier_services() {
             # invocation outright until 2026-08-12, and no offline tier could see it.
             run_service_gate "sticky skill on a pinned cloud route (whole note + attachment)" required \
                 "${service_env[@]}" "$service_app" --sticky-cloud-service || true
-            run_service_gate "Codex subscription all-shipped-pair contained verifier" required \
-                /usr/bin/env -i HOME="$ORIGINAL_HOME" PATH="/usr/bin:/bin" \
+            # Codex store: see codex_live_store_allowed. Live: the real HOME, unchanged from before, and
+            # the smoke is `required`. Default: HOME and CFFIXED_USER_HOME are the scratch home, the
+            # smoke abstains on a not-logged-in home, and it is `normal` so that abstain is SKIP.
+            local codex_home_env codex_smoke_requirement codex_smoke_abstain=()
+            if codex_live_store_allowed; then
+                announce_codex_store
+                codex_home_env=(HOME="$ORIGINAL_HOME")
+                codex_smoke_requirement=required
+            else
+                codex_home_env=(HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME")
+                codex_smoke_requirement=normal
+                codex_smoke_abstain=(--abstain-if-not-logged-in)
+            fi
+            run_service_gate "Codex subscription all-shipped-pair contained verifier" \
+                "$codex_smoke_requirement" \
+                /usr/bin/env -i "${codex_home_env[@]}" PATH="/usr/bin:/bin" \
                 LANG="en_US.UTF-8" LC_ALL="en_US.UTF-8" TERM="dumb" \
-                "$CODEX_SMOKE" --all-shipped-pairs --runner "$CODEX_RUNNER" || true
+                "$CODEX_SMOKE" --all-shipped-pairs --runner "$CODEX_RUNNER" \
+                ${codex_smoke_abstain[@]+"${codex_smoke_abstain[@]}"} || true
             # Real app-server handshake. The fixture catalog selftest cannot see vendor
-            # protocol drift; this is the gate that does. Runs against the real HOME because
-            # it needs the production compatibility boundary and its authenticated codex-home.
+            # protocol drift; this is the gate that does. It needs the production compatibility
+            # boundary and an authenticated codex-home, so it reaches the handshake only with
+            # VD_ALLOW_LIVE_CODEX_STORE=1; in the scratch home it abstains at "not logged in".
             #
             # `normal` here means EXACTLY "this gate is allowed to skip ITSELF", and nothing more.
             # run_service_gate records a failure on ANY non-zero exit regardless of this argument;
@@ -984,7 +1032,7 @@ tier_services() {
             # reported as [verify][service][SKIP] and counted, never as PASS. It stays fully
             # blocking on any real handshake that violates expectations.
             run_service_gate "Codex live catalog handshake (real app-server)" normal \
-                /usr/bin/env -i HOME="$ORIGINAL_HOME" PATH="/usr/bin:/bin" \
+                /usr/bin/env -i "${codex_home_env[@]}" PATH="/usr/bin:/bin" \
                 LANG="en_US.UTF-8" LC_ALL="en_US.UTF-8" TERM="dumb" \
                 "$TEST_APP" \
                 --codex-catalog-live --runner "$CODEX_RUNNER" || true

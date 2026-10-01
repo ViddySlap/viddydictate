@@ -49,6 +49,15 @@ snapshot's `Contents/MacOS/codex`, and adds only that snapshot bundle's root as 
 a receipt is installed, older snapshots are pruned to the current one plus one previous
 (`CodexSnapshotRetention.retainedSnapshotCount`).
 
+Pruning has a one-time effect on an existing install. The first launch of a build that can snapshot the
+bundle CLI finds a receipt for the old standalone path, re-quarantines, installs the bundle snapshot
+(about 230 MB), and prunes every older flat snapshot but the most recent. Earlier releases never
+pruned, so on the maintainer's Mac that first launch deletes 11 of 12 flat snapshots, about 2.5 GB, from
+`~/Library/Application Support/ViddyDictate/codex-executables/`. Nothing in them is user data; they are
+copies of past vendor CLIs. Whether a release may do this without asking the user is pending ruling (a).
+The verification rail never triggers it on the live store unless `VD_ALLOW_LIVE_CODEX_STORE=1` is set
+(see `docs/verification.md`).
+
 The content-free `codex-update-outcome.json` records only the last attempt, last successful catalog time,
 a fixed stale/hold reason code, the next retry, and the outcome state. It has no fields for catalog rows,
 provider output, stderr, prompts, or user content. Settings observes its change notification, so an already

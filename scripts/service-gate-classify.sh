@@ -8,7 +8,8 @@
 # `[verify][service][PASS]`, and the Codex catalog and device-auth gates read green through a two-week
 # Codex outage.
 
-# Must equal SelfTestAbstain.preconditionMissingMarker (Sources/SelfTest/SelfTestAbstain.swift).
+# Must equal SelfTestAbstain.preconditionMissingMarker (Sources/SelfTest/SelfTestAbstain.swift) and
+# SmokeAbstain.preconditionMissingMarker (Tools/CodexProviderSmoke.swift).
 PRECONDITION_MISSING_MARKER='[precondition-missing]'
 
 service_gate_log_abstained() {
@@ -69,9 +70,10 @@ legacy_classify_service_gate_log() {
     printf 'PASS\n'
 }
 
-# Deterministic selftest: fixture gate logs in "$1", Swift marker source at "$2".
+# Deterministic selftest: fixture gate logs in "$1", Swift marker sources in "$2" and after.
 service_gate_classifier_selftest() {
-    local dir="$1" swift_source="$2" fail=0 lying_verdict honest_verdict marker_verdict
+    local dir="$1" fail=0 lying_verdict honest_verdict marker_verdict swift_source
+    shift
     mkdir -p "$dir" || return 1
     local abstain="$dir/abstain.log" pass="$dir/pass.log" lying="$dir/lying.log"
     local partial="$dir/partial.log" bare="$dir/bare-marker.log"
@@ -118,11 +120,17 @@ service_gate_classifier_selftest() {
     expect "mutant: the 1.1.0 classifier reported the lying gate as PASS" \
         "$(legacy_classify_service_gate_log "$lying" normal)" PASS
     # The Swift gates and this classifier must agree on the marker byte for byte.
-    if grep -Fq -- "static let preconditionMissingMarker = \"$PRECONDITION_MISSING_MARKER\"" "$swift_source"; then
-        marker_verdict=same
-    else
-        marker_verdict=drifted
+    if [[ $# -eq 0 ]]; then
+        expect "at least one Swift marker source is checked" none some
     fi
-    expect "the Swift abstain marker equals the shell marker" "$marker_verdict" same
+    for swift_source in "$@"; do
+        if grep -Fq -- "static let preconditionMissingMarker = \"$PRECONDITION_MISSING_MARKER\"" "$swift_source"; then
+            marker_verdict=same
+        else
+            marker_verdict=drifted
+        fi
+        expect "the Swift abstain marker in $(basename "$swift_source") equals the shell marker" \
+            "$marker_verdict" same
+    done
     return "$fail"
 }
