@@ -337,7 +337,7 @@ enum CodexUpdateSurface {
         case .checkedUnchanged:
             return "Codex catalog checked; routes unchanged\(retry)"
         case .routesMigrated:
-            return "Codex routes migrated; replacements are unratified\(retry)"
+            return "\(StaffPicks.codexMigratedStatus)\(retry)"
         case .recommendationAvailable:
             return "Codex recommendation available; route unchanged\(retry)"
         case .candidateHeld:
@@ -394,7 +394,7 @@ enum CodexUpdateSurface {
         case .current:
             var lines: [String] = []
             if !outcome.applied.isEmpty {
-                lines.append("Codex routes migrated; replacements are unratified")
+                lines.append(StaffPicks.codexMigratedStatus)
             }
             if !outcome.recommendations.isEmpty {
                 lines.append("Codex recommendation available; route unchanged")

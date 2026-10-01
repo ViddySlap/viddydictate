@@ -450,6 +450,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .firstRunSetupSelftest: .init(tier: .deterministic) { _ in
         FirstRunSetupFixtureSelfTest.run() ? 0 : 1
     },
+    // Pure label functions and one scratch Models & Power store under a temporary folder. No view, no window,
+    // no LM Studio, no Ollama. The AppKit half is --models-power-render and --models-power-ui-probe.
+    .staffPicksCopySelftest: .init(tier: .deterministic) { _ in
+        StaffPicksCopyFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

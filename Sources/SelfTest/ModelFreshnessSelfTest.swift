@@ -186,11 +186,11 @@ enum ModelFreshnessSelfTest {
         check("a retired pin migrates to the newest live model in its own family",
               migrated?.disposition == .swapped(.deprecation)
                 && migrated?.resultingBundle.modelID == liveSonnet)
-        check("a migrated pin is marked unratified auto-updated with exact provenance",
+        check("a migrated pin keeps exact auto-update provenance internally and reads as a staff pick",
               migrated?.resultingBundle.autoUpdated == LLMAutoUpdateProvenance(
                 fromModelID: retiredSonnet, date: checkedAt, reason: .deprecation)
-                && CloudUpdateSurface.provenanceBadge(bundle: migrated!.resultingBundle)
-                    == "AUTO-UPDATED \(checkedAt) unratified")
+                && StaffPicks.badge(bundle: migrated!.resultingBundle, route: .cleanupL1)
+                    == "STAFF PICK \(liveSonnet)")
         check("a migration preserves the superseded ratification claim and the stored effort",
               migrated?.resultingBundle.ratified == provenance
                 && migrated?.resultingBundle.effort == "medium")
@@ -263,43 +263,39 @@ enum ModelFreshnessSelfTest {
             checkedAt: checkedAt,
             resolutions: ["sonnet": .resolved("claude-sonnet-6")])
 
-        check("ratified route badge names the ratified model",
-              CloudUpdateSurface.provenanceBadge(bundle: ratified)
-                == "RATIFIED claude-sonnet-5")
-        check("auto-updated route badge is visibly unratified",
-              CloudUpdateSurface.provenanceBadge(bundle: updated)
-                == "AUTO-UPDATED 2026-07-20T08:15:00Z unratified")
-        // The provenance ROW composes the bundle's badge with the store's derived verdict (item P11). The
-        // badge alone cannot see a prompt override, which is how a route kept showing a green RATIFIED line
-        // after the user replaced the prompt bytes while the store said the slate was no longer covered.
-        check("a ratified slate with no derived objection reads exactly as its badge",
-              CloudUpdateSurface.provenanceRow(
-                bundle: ratified, ratification: .ratified(ratified.ratified!))
-                == "RATIFIED claude-sonnet-5")
-        check("a prompt override turns a ratified row unratified and says why",
-              CloudUpdateSurface.provenanceRow(
-                bundle: ratified, ratification: .unratified([.promptOverridden]))
-                == "UNRATIFIED claude-sonnet-5 - your prompt edit replaced the tested wording")
-        check("evidence that covers another model is named rather than left as a bare UNRATIFIED",
-              CloudUpdateSurface.provenanceRow(
-                bundle: updated, ratification: .unratified([.evidenceCoversAnotherModel]))
-                == "AUTO-UPDATED 2026-07-20T08:15:00Z unratified - "
-                    + "the tested slate covers a different model")
-        check("co-occurring reasons are both reported, in declaration order",
-              CloudUpdateSurface.provenanceRow(
-                bundle: ratified,
+        // D11: every built-in default reads STAFF PICK, ratified or auto-updated alike; the evidence stays in
+        // the bundle (asserted above) and never reaches the line.
+        check("a ratified default's badge is a staff pick naming its model",
+              StaffPicks.badge(bundle: ratified, route: .email) == "STAFF PICK claude-sonnet-5")
+        check("an auto-updated default's badge is a staff pick naming the new model",
+              StaffPicks.badge(bundle: updated, route: .email) == "STAFF PICK claude-sonnet-6")
+        var migratedUserPin = LLMProviderBundle(provider: .claude, modelID: "claude-sonnet-6", effort: "medium")
+        migratedUserPin.autoUpdated = updated.autoUpdated
+        check("an auto-updated user pin stays the user's own choice",
+              StaffPicks.badge(bundle: migratedUserPin, route: .email) == "CUSTOM claude-sonnet-6")
+        // The ROW composes the badge with the store's derived verdict (item P11). The badge alone cannot see a
+        // prompt override; only that reason reaches the line, and evidence reasons stay internal.
+        check("a staff pick with no prompt edit reads exactly as its badge",
+              StaffPicks.provenanceRow(
+                bundle: ratified, route: .email, ratification: .ratified(ratified.ratified!))
+                == "STAFF PICK claude-sonnet-5")
+        check("a prompt override keeps the staff pick badge and notes the custom prompt",
+              StaffPicks.provenanceRow(
+                bundle: ratified, route: .email, ratification: .unratified([.promptOverridden]))
+                == "STAFF PICK claude-sonnet-5 - custom prompt")
+        check("evidence covering another model is internal and adds nothing to the line",
+              StaffPicks.provenanceRow(
+                bundle: updated, route: .email, ratification: .unratified([.evidenceCoversAnotherModel]))
+                == "STAFF PICK claude-sonnet-6")
+        check("co-occurring reasons surface only the custom prompt",
+              StaffPicks.provenanceRow(
+                bundle: updated, route: .email,
                 ratification: .unratified([.evidenceCoversAnotherModel, .promptOverridden]))
-                == "UNRATIFIED claude-sonnet-5 - the tested slate covers a different model; "
-                    + "your prompt edit replaced the tested wording")
-        // Local arms never carry ratification evidence, so restating noEvidence would append a clause to
-        // every Local row without adding a fact the badge does not already carry.
-        check("a bare no-evidence verdict adds no clause to the badge",
-              CloudUpdateSurface.provenanceRow(
-                bundle: LLMProviderBundle(provider: .local, modelID: "gemma", effort: nil),
-                ratification: .unratified([.noEvidence])) == "LOCAL gemma")
-        check("every unratified reason has its own user-facing wording",
-              Set(LLMUnratifiedReason.allCases.map(CloudUpdateSurface.unratifiedReasonText)).count
-                == LLMUnratifiedReason.allCases.count)
+                == "STAFF PICK claude-sonnet-6 - custom prompt")
+        check("a user's own Local model reads Custom with no clause",
+              StaffPicks.provenanceRow(
+                bundle: LLMProviderBundle(provider: .local, modelID: "gemma", effort: nil), route: .email,
+                ratification: .unratified([.noEvidence])) == "CUSTOM gemma")
         check("last-checked line distinguishes never from a cached check",
               CloudUpdateSurface.lastCheckedText(cache: nil)
                 == "Cloud presets: last checked never"
@@ -333,7 +329,7 @@ enum ModelFreshnessSelfTest {
         check("changes and failures assemble into the full outcome toast",
               CloudUpdateSurface.requiresFullToast(changed)
                 && changedLines == [
-                    "cleanup L1 -> claude-sonnet-6 (unratified - auto-updated)",
+                    "cleanup L1 -> claude-sonnet-6 (new staff pick)",
                     "Claude sonnet: live probe failed (fixture)",
                 ])
         let pending = CodexUpdateOutcomeRecord(

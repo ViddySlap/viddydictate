@@ -845,9 +845,9 @@ enum CodexModelUpdaterSelfTest {
             held: [],
             recommendations: [],
             plannerHolds: [:])
-        check("migration status says replacements are unratified",
+        check("migration status says the routes moved to new staff picks",
               CodexUpdateSurface.toastLines(for: migrated)
-                == ["Codex routes migrated; replacements are unratified"])
+                == ["Codex routes migrated to new staff picks"])
         let quarantine = outcome(status: .catalogFailed(.compatibilityBoundary))
         check("compatibility quarantine failure is distinct from stale catalog",
               CodexUpdateSurface.toastLines(for: quarantine)

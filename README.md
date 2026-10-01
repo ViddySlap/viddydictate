@@ -186,9 +186,9 @@ reports each missing requirement without blocking unrelated features.
      `claude auth login` and notices when login completes.
    - Codex: click Connect Codex and finish the ChatGPT subscription device-login flow.
      ViddyDictate uses a dedicated Codex home and does not read or change the everyday Codex login.
-2. On modest hardware, open Hotkeys and use "Set every provider-capable route to its tested
-   default" to select the cloud provider just connected. Fresh routes are selected Local, which
-   expects the optional LM Studio models.
+2. On modest hardware, open Hotkeys and use "Set every route to its staff pick" to select the
+   cloud provider just connected. Fresh routes are selected Local, which expects the optional
+   LM Studio models.
 3. Grant the three macOS permissions when prompted:
    - Microphone, so the app can record.
    - Accessibility, so it can deliver text to the focused field.

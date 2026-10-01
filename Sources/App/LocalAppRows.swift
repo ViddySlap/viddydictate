@@ -303,7 +303,7 @@ enum LocalAppRows {
     static let preferenceTitle = "Preferred local app"
 
     static let preferenceHint =
-        "Which app new routes and tested defaults use, and the one ViddyDictate may start in the background. "
+        "Which app new routes and staff picks use, and the one ViddyDictate may start in the background. "
         + "Automatic follows what is installed, and picks LM Studio when both or neither are."
 
     /// Automatic, LM Studio, Ollama, with the explicit choice selected. Automatic names what it resolves to

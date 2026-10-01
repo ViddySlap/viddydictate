@@ -319,7 +319,7 @@ final class StickySkillsSettingsView: NSView {
         }
         if let tested = LLMProviderDefaults.testedBundle(
             for: selected.provider, route: skill.routeID) {
-            append(tested.modelID, compactModelName(tested.modelID) + " - Shipped default")
+            append(tested.modelID, compactModelName(tested.modelID) + StaffPicks.stickyQualifier)
         }
         for option in ModeModelCatalog.options where option.provider == selected.provider {
             append(option.modelID, ModeModelCatalog.displayName(option))

@@ -803,11 +803,15 @@ enum ComponentPicker {
         "Cleanup, email and local web answers can run in a local model app on this Mac. Most people only need "
         + "one; you can add the other later from Settings > Setup."
 
-    /// The Ollama warning again, above Continue, while the choice is Ollama and Ollama is still to be installed:
-    /// the one thing the user must do mid-install is said where they commit to it, not only at the top.
+    /// The one-line reminder above Continue. The Ollama card already carries the full `ollamaWarning`, so the
+    /// footer only points back at it rather than repeating the whole paragraph.
+    static let ollamaContinueReminder = "Remember to approve Ollama's macOS prompt when it appears."
+
+    /// The Ollama reminder above Continue, while the choice is Ollama and Ollama is still to be installed: the
+    /// one thing the user must do mid-install is said where they commit to it, not only at the top.
     static func continueWarning(selection: Selection, environment: Environment) -> String? {
         guard selection.localApp == .ollama, !environment.ollamaInstalled else { return nil }
-        return ollamaWarning
+        return ollamaContinueReminder
     }
 
     static func title(_ id: RowID) -> String {

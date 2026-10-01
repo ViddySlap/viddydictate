@@ -79,7 +79,7 @@ enum ModelsPowerSettingsError: Error, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .noTestedDefault(let provider, let route):
-            return "No tested \(provider.rawValue) default exists for \(route.rawValue)"
+            return "No \(provider.rawValue) staff pick exists for \(route.rawValue)"
         case .invalidBundle(let expected, let actual):
             return "Expected a \(expected.rawValue) bundle, got \(actual.rawValue)"
         case .customRoutePrompt(let route):

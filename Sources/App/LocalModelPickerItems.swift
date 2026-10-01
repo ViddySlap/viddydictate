@@ -62,16 +62,17 @@ enum LocalModelPickerItems {
 
     /// The routing grid's Local picker (Hotkeys tab, `ModelsPowerSettingsView`): the catalog (or the shipped
     /// fallback list when discovery has not answered), then the pin when the catalog lacks it. The pin's row
-    /// reads "  ·  Custom" and the route's shipped default "  ·  Shipped default", both matched by (app, id),
-    /// so Ollama's copy of the shipped default's id is not called the shipped default.
+    /// reads "  ·  Custom" and each app's copy of the route's default "  ·  Staff pick" (D11), both matched by
+    /// (app, id): Ollama's staff pick is its own tag for the same family (`StaffPicks.localRefs`), so Ollama's
+    /// copy of LM Studio's default id is not called a staff pick.
     static func routingGrid(catalog: [LMStudioModelOption]?, pinned: LLMProviderBundle,
                             tested: LLMProviderBundle?) -> [Item] {
         let pin = pinned.localRef
         let options = routingGridOptions(catalog: catalog, pinned: pinned)
-        let testedRef = tested?.localRef
+        let staffPicks = StaffPicks.localRefs(tested: tested)
         return build(options: options, selected: pin) { ref in
-            if ref == testedRef { return "  ·  Shipped default" }
-            return ref == pin ? "  ·  Custom" : ""
+            if staffPicks.contains(ref) { return StaffPicks.gridQualifier }
+            return ref == pin ? StaffPicks.gridCustomQualifier : ""
         }
     }
 
@@ -88,17 +89,20 @@ enum LocalModelPickerItems {
     }
 
     /// The routing grid's "Local preset:" badge, naming the app by the picker's own rule: only when the
-    /// route's Local picker names apps (`labelsApps` over the same rows), "LOCAL <id>" reads
-    /// "LOCAL · Ollama · <id>". With one app, or for any bundle that is not Local or a badge that does not lead
-    /// with the bundle's id, it is returned unchanged, so an LM-Studio-only Mac's line is byte-identical.
+    /// route's Local picker names apps (`labelsApps` over the same rows), "STAFF PICK <id>" reads
+    /// "STAFF PICK · Ollama · <id>" (and "CUSTOM <id>" likewise). The badge word is everything before the
+    /// bundle's id, so a two-word badge keeps both words. With one app, or for any bundle that is not Local or a
+    /// badge whose leading upper-case word is not followed by the bundle's id, it is returned unchanged, so an
+    /// LM-Studio-only Mac's line names no app.
     static func presetBadge(_ badge: String, bundle: LLMProviderBundle,
                             catalog: [LMStudioModelOption]?) -> String {
         guard bundle.provider == .local, !bundle.modelID.isEmpty,
               labelsApps(routingGridOptions(catalog: catalog, pinned: bundle)),
-              let space = badge.firstIndex(of: " "),
-              badge[badge.index(after: space)...].hasPrefix(bundle.modelID) else { return badge }
-        let word = String(badge[..<space])
-        let rest = String(badge[badge.index(after: space)...])
+              let idStart = badge.range(of: " " + bundle.modelID) else { return badge }
+        let word = String(badge[..<idStart.lowerBound])
+        guard !word.isEmpty, word == word.uppercased(),
+              word.allSatisfy({ $0.isLetter || $0 == " " || $0 == "-" }) else { return badge }
+        let rest = String(badge[badge.index(after: idStart.lowerBound)...])
         return word + appPrefixSeparator + bundle.resolvedLocalBackend.displayName + appPrefixSeparator + rest
     }
 
@@ -110,7 +114,7 @@ enum LocalModelPickerItems {
         var options = LMStudioModelCatalog.pickerOptions(discovered: catalog)
         if let tested {
             options.append(LMStudioModelOption(
-                modelID: tested.modelID, label: shortName(tested.modelID) + " - Shipped default",
+                modelID: tested.modelID, label: shortName(tested.modelID) + StaffPicks.stickyQualifier,
                 backend: tested.resolvedLocalBackend))
         }
         options.append(LMStudioModelOption(

@@ -41,52 +41,8 @@ final class CloudUpdateRuntimeState {
 }
 
 enum CloudUpdateSurface {
-    static func provenanceBadge(bundle: LLMProviderBundle) -> String {
-        if let update = bundle.autoUpdated {
-            return "AUTO-UPDATED \(update.date) unratified"
-        }
-        if let ratified = bundle.ratified, ratified.modelID == bundle.modelID {
-            return "RATIFIED \(ratified.modelID)"
-        }
-        if bundle.provider == .local { return "LOCAL \(bundle.modelID)" }
-        return "UNRATIFIED \(bundle.modelID)"
-    }
-
-    /// Why a slate reads unratified, in the words a user can act on. One case per
-    /// `LLMUnratifiedReason`, so a new reason cannot be added without landing here.
-    static func unratifiedReasonText(_ reason: LLMUnratifiedReason) -> String {
-        switch reason {
-        case .noEvidence: return "no tested slate covers this choice"
-        case .evidenceCoversAnotherModel: return "the tested slate covers a different model"
-        case .promptOverridden: return "your prompt edit replaced the tested wording"
-        }
-    }
-
-    /// The provenance row as a user reads it: the bundle's own badge plus every reason the DERIVED verdict
-    /// gives for calling the slate unratified.
-    ///
-    /// `provenanceBadge` can only see the bundle, so it cannot see a prompt override - which meant a route
-    /// whose bundle carried ratified evidence kept showing a green `RATIFIED` row after the user replaced
-    /// the prompt bytes, while `ModelsPowerSettingsStore.ratificationState` said the opposite. Two answers
-    /// to one question, and the wrong one was the one on screen. The badge stays the bundle's own fact and
-    /// this composes it with the store's verdict, which is the authority on whether the evidence still
-    /// covers what runs.
-    static func provenanceRow(bundle: LLMProviderBundle,
-                              ratification: LLMRatificationState) -> String {
-        let badge = provenanceBadge(bundle: bundle)
-        guard case .unratified(let reasons) = ratification else { return badge }
-        // `noEvidence` is precisely what the badge's own UNRATIFIED / LOCAL wording already means, so
-        // restating it would add a clause to every Local row without adding a fact. The other two are
-        // invisible to a bundle-only badge, which is the whole reason this composition exists.
-        let explained = reasons.filter { $0 != .noEvidence }
-        guard !explained.isEmpty else { return badge }
-        let listed = explained.map(unratifiedReasonText).joined(separator: "; ")
-        // A bundle-shaped RATIFIED badge with an unratified verdict is exactly the disagreement above. The
-        // verdict wins and the badge is restated as UNRATIFIED, because appending a reason to the word
-        // RATIFIED would leave the row's own headline claiming the opposite of its explanation.
-        guard badge.hasPrefix("RATIFIED") else { return "\(badge) - \(listed)" }
-        return "UNRATIFIED \(bundle.modelID) - \(listed)"
-    }
+    // The preset line's badge and row moved to `StaffPicks` (D11): every built-in default reads "STAFF PICK",
+    // and ratification stays internal.
 
     static func lastCheckedText(cache: ModelFreshnessCache?) -> String {
         "Cloud presets: last checked \(cache?.checkedAt ?? "never")"
@@ -95,7 +51,7 @@ enum CloudUpdateSurface {
     static func toastLines(for result: CloudUpdateCheckResult) -> [String] {
         guard requiresFullToast(result) else { return ["Cloud presets up to date"] }
         let changes = result.changes.sorted { $0.route.rawValue < $1.route.rawValue }.map { change in
-            "\(routeName(change.route)) -> \(change.toModelID) (unratified - auto-updated)"
+            "\(routeName(change.route)) -> \(change.toModelID) \(StaffPicks.newStaffPickSuffix)"
         }
         return changes + result.failures
     }

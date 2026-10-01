@@ -121,9 +121,9 @@ enum ModelsPowerSettingsSelfTest {
         check("Local provenance uses the selected provider and model, not remembered Claude",
               presentation.bundle.provider == .local
                 && presentation.bundle.modelID == "user-picked-local-model"
-                && presentation.badge == "LOCAL user-picked-local-model")
-        check("a user-selected Local model carries no ratification badge",
-              !presentation.badge.contains("RATIFIED"))
+                && presentation.badge == "CUSTOM user-picked-local-model")
+        check("a user-selected Local model reads Custom, never a staff pick or an evidence word",
+              !presentation.badge.contains("STAFF PICK") && !presentation.badge.contains("RATIFIED"))
     }
 
     private static func checkPromptsAvailabilityAndRestore(
@@ -154,7 +154,7 @@ enum ModelsPowerSettingsSelfTest {
         check("L/G keep separate route profiles while sharing tested prompt bytes",
               s.effectivePrompt(for: .searchLocalSynth, provider: .local) == "LOCAL L ONLY"
                 && s.effectivePrompt(for: .searchGeminiSynth, provider: .local) == defaultSearchSynthPrompt)
-        check("prompt state reports Tested default versus Customized",
+        check("prompt state reports the staff pick versus Customized",
               s.promptCustomizationState(for: .email, provider: .local) == .customized
                 && s.promptCustomizationState(for: .searchGeminiSynth, provider: .local) == .testedDefault)
 

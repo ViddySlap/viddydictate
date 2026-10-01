@@ -67,9 +67,8 @@ enum LocalPickerMergeRenderCases {
             // S3c: the full selected title rides on the tooltip, and the preset line names no app.
             report("routing grid, one app: the popup's tooltip is its full selected title",
                    popup?.toolTip != nil && popup?.toolTip == popup?.titleOfSelectedItem, popup?.toolTip ?? "nil")
-            report("routing grid, one app: the Local preset line is byte-identical (no app named)",
-                   presetLine(view).hasPrefix("Local preset: LOCAL \(lmsCoder)") && !presetLine(view).contains(" · "),
-                   presetLine(view))
+            report("routing grid, one app: the Local preset line reads Custom and names no app",
+                   presetLine(view) == "Local preset: CUSTOM \(lmsCoder)", presetLine(view))
             SelfTestRenderCapture.capture(view, card: "card.email", to: outDir + "/local-picker-one-app.png",
                                           name: "local picker one app", report: report)
             host.orderOut(nil)
@@ -102,7 +101,7 @@ enum LocalPickerMergeRenderCases {
             report("routing grid, two apps: the popup's tooltip is the full app-labelled title",
                    popup?.toolTip == "Ollama · " + ollamaSharedLabel + "  ·  Custom", popup?.toolTip ?? "nil")
             report("routing grid, two apps: the Local preset line names the app",
-                   presetLine(view).hasPrefix("Local preset: LOCAL · Ollama · \(sharedID)"), presetLine(view))
+                   presetLine(view) == "Local preset: CUSTOM · Ollama · \(sharedID)", presetLine(view))
 
             // The real action, both ways.
             choose(lmsShared, in: popup)
@@ -120,7 +119,7 @@ enum LocalPickerMergeRenderCases {
             report("routing grid: the tooltip and the preset line follow the choice",
                    popup?.toolTip != nil && popup?.toolTip == popup?.titleOfSelectedItem
                        && popup?.toolTip == "LM Studio · " + lmsSharedLabel + "  ·  Custom"
-                       && presetLine(view).hasPrefix("Local preset: LOCAL · LM Studio · \(sharedID)"),
+                       && presetLine(view) == "Local preset: CUSTOM · LM Studio · \(sharedID)",
                    "\(popup?.toolTip ?? "nil") / \(presetLine(view))")
             choose(ollamaShared, in: popup)
             view.refresh()
@@ -159,7 +158,7 @@ enum LocalPickerMergeRenderCases {
             dumpMenu(popup, label: "sticky skill, one app")
             var expected = [lmsCoderLabel, lmsSharedLabel]
             if let tested = LLMProviderDefaults.testedBundle(for: .local, route: route) {
-                expected.append(shortName(tested.modelID) + " - Shipped default")
+                expected.append(shortName(tested.modelID) + " - Staff pick")
             }
             report("sticky skill, one app: titles are the pre-Ollama picker's, byte for byte",
                    titles(popup) == expected, titles(popup).joined(separator: " | "))
@@ -183,7 +182,7 @@ enum LocalPickerMergeRenderCases {
             dumpMenu(popup, label: "sticky skill, two apps, Ollama pin")
             var expected = ["LM Studio · " + lmsCoderLabel, "LM Studio · " + lmsSharedLabel]
             if let tested = LLMProviderDefaults.testedBundle(for: .local, route: route) {
-                expected.append("LM Studio · " + shortName(tested.modelID) + " - Shipped default")
+                expected.append("LM Studio · " + shortName(tested.modelID) + " - Staff pick")
             }
             expected += ["", "Ollama · " + ollamaCoderLabel, "Ollama · " + ollamaSharedLabel]
             report("sticky skill, two apps: LM Studio's group, a separator, Ollama's, every row named",

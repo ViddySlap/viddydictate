@@ -174,7 +174,8 @@ final class ModelsPowerSettingsView: NSView {
         ratification: (LLMProvider) -> LLMRatificationState
     ) -> ProvenancePresentation {
         let bundle = store.selectedBundle(for: route)
-        let badge = CloudUpdateSurface.provenanceRow(bundle: bundle, ratification: ratification(bundle.provider))
+        let badge = StaffPicks.provenanceRow(bundle: bundle, route: route,
+                                             ratification: ratification(bundle.provider))
         return ProvenancePresentation(
             bundle: bundle,
             badge: LocalModelPickerItems.presetBadge(badge, bundle: bundle, catalog: localCatalog))
@@ -343,7 +344,7 @@ final class ModelsPowerSettingsView: NSView {
                            size: 12, weight: .semibold, color: .labelColor)
         derived.identifier = NSUserInterfaceItemIdentifier("bulk-derived-state")
         card.addSubview(derived)
-        card.addSubview(text("Set every provider-capable route to its tested default:", x: 174, y: 125,
+        card.addSubview(text(StaffPicks.globalControlTitle, x: 174, y: 125,
                              width: 260, size: 10.5, weight: .regular, color: .secondaryLabelColor))
 
         var bx = card.bounds.width - 300
@@ -353,7 +354,7 @@ final class ModelsPowerSettingsView: NSView {
             let b = button(title, id: "bulk|\(provider.rawValue)", action: #selector(bulkProviderClicked(_:)),
                            x: bx, y: 144, width: 92)
             if provider == .codex {
-                b.toolTip = "Uses the eight shipped Codex defaults; Cleanup is auto-updated and unratified."
+                b.toolTip = StaffPicks.codexGlobalToolTip
             }
             card.addSubview(b)
             bx += 98
@@ -474,13 +475,9 @@ final class ModelsPowerSettingsView: NSView {
             let badge = provenance.badge
             let routePrefix = spec.routes.count > 1 ? "\(Self.displayName(for: route)): " : ""
             let prefix = "\(routePrefix)\(Self.displayName(for: bundle.provider)) preset: "
-            let color: NSColor
-            if badge.hasPrefix("RATIFIED") { color = .systemGreen }
-            else if badge.hasPrefix("AUTO-UPDATED") || badge.hasPrefix("UNRATIFIED") {
-                color = .systemOrange
-            } else {
-                color = .secondaryLabelColor
-            }
+            // D11: a staff pick is a suggestion, not a pass mark, and a custom choice is not a warning. The
+            // accent marks the app's pick; the user's own choice reads in the row's ordinary secondary colour.
+            let color: NSColor = badge.hasPrefix(StaffPicks.badgeWord) ? .controlAccentColor : .secondaryLabelColor
             let label = text(prefix + badge, x: 14, y: nextY + 2,
                              width: card.bounds.width - 28, size: 10.5,
                              weight: .semibold, color: color)
@@ -547,11 +544,7 @@ final class ModelsPowerSettingsView: NSView {
                 LLMProviderDefaults.testedBundle(for: provider, route: $0) != nil
             }.count
             var title = Self.displayName(for: provider)
-            if defaultCount == 0 {
-                title += " · No tested default"
-            } else if defaultCount < spec.routes.count {
-                title += " · \(defaultCount)/\(spec.routes.count) defaults"
-            }
+            title += StaffPicks.providerCoverageSuffix(defaults: defaultCount, of: spec.routes.count)
             p.addItem(withTitle: title)
             p.lastItem?.representedObject = provider.rawValue
         }
@@ -614,7 +607,7 @@ final class ModelsPowerSettingsView: NSView {
             choices.append((selected.modelID, compactModelName(selected.modelID)))
         }
         if choices.isEmpty {
-            p.addItem(withTitle: "No tested model yet")
+            p.addItem(withTitle: "No staff pick yet")
             p.lastItem?.representedObject = ""
             p.lastItem?.isEnabled = false
             p.isEnabled = false
@@ -622,9 +615,9 @@ final class ModelsPowerSettingsView: NSView {
             let testedID = LLMProviderDefaults.testedBundle(for: selected.provider, route: route)?.modelID
             for choice in choices {
                 var title = choice.label
-                if choice.model == testedID { title += "  ·  Shipped default" }
+                if choice.model == testedID { title += StaffPicks.gridQualifier }
                 else if choice.model == selected.modelID && choice.model != testedID {
-                    title += "  ·  Custom"
+                    title += StaffPicks.gridCustomQualifier
                 }
                 p.addItem(withTitle: title)
                 p.lastItem?.representedObject = choice.model
@@ -717,7 +710,7 @@ final class ModelsPowerSettingsView: NSView {
         let resetX = editX - 106
         for variant in promptVariants(for: route) {
             let state = settingsStore.promptCustomizationState(for: route, provider: provider, variant: variant)
-            let stateLabel = state == .testedDefault ? "Tested default" : "Customized"
+            let stateLabel = StaffPicks.promptStateLabel(state)
             let variantName = promptVariantName(variant, route: route)
             let title = "\(variantName) prompt · \(Self.displayName(for: provider)): \(stateLabel)"
             let label = text(title, x: xOffset, y: y + 4, width: max(120, resetX - 8 - xOffset),
@@ -744,11 +737,11 @@ final class ModelsPowerSettingsView: NSView {
     }
 
     private func addRestoreButtons(to card: NSView, spec: RouteCard, y: CGFloat) -> CGFloat {
-        card.addSubview(text("Restore complete tested bundle:", x: 14, y: y + 5, width: 188,
+        card.addSubview(text("Restore the full staff pick:", x: 14, y: y + 5, width: 188,
                              size: 10.5, weight: .regular, color: .secondaryLabelColor))
         var x: CGFloat = 205
         for provider in LLMProvider.allCases {
-            let b = button("Restore \(Self.displayName(for: provider)) default",
+            let b = button(Self.displayName(for: provider),
                            id: "restore|\(spec.key)|\(provider.rawValue)",
                            action: #selector(restoreProvider(_:)), x: x, y: y, width: 126)
             let available = spec.routes.filter {
@@ -756,11 +749,11 @@ final class ModelsPowerSettingsView: NSView {
             }
             b.isEnabled = !available.isEmpty
             if available.isEmpty {
-                b.toolTip = "No shipped \(Self.displayName(for: provider)) default exists for this route."
+                b.toolTip = "No \(Self.displayName(for: provider)) staff pick exists for this route."
             } else if available.count < spec.routes.count {
                 let skipped = spec.routes.filter { !available.contains($0) }
                     .map { Self.displayName(for: $0) }.joined(separator: ", ")
-                b.toolTip = "Restores available defaults only. No \(Self.displayName(for: provider)) default: \(skipped)."
+                b.toolTip = "Restores available staff picks only. No \(Self.displayName(for: provider)) staff pick: \(skipped)."
             }
             card.addSubview(b)
             x += 132
@@ -788,9 +781,9 @@ final class ModelsPowerSettingsView: NSView {
             try settingsStore.applyGlobalProvider(provider)
             let skipped = noTestedDefaultRoutes(provider: provider, routes: settingsStore.routeIDs())
             if skipped.isEmpty {
-                status("All provider-capable routes now use their tested \(Self.displayName(for: provider)) defaults.")
+                status("All provider-capable routes now use their \(Self.displayName(for: provider)) staff picks.")
             } else {
-                status("Applied tested \(Self.displayName(for: provider)) defaults where available. No default; unchanged: \(routeList(skipped)).")
+                status("Applied \(Self.displayName(for: provider)) staff picks where available. No staff pick; unchanged: \(routeList(skipped)).")
             }
         } catch { status(error.localizedDescription, error: true) }
     }
@@ -814,7 +807,7 @@ final class ModelsPowerSettingsView: NSView {
                 if skipped.isEmpty {
                     status("\(spec.title) now uses \(Self.displayName(for: provider)).")
                 } else {
-                    status("Applied \(Self.displayName(for: provider)) where available. No default; unchanged: \(routeList(skipped)).")
+                    status("Applied \(Self.displayName(for: provider)) where available. No staff pick; unchanged: \(routeList(skipped)).")
                 }
             } else {
                 try settingsStore.selectProvider(provider, for: spec.primaryRoute)
@@ -887,8 +880,8 @@ final class ModelsPowerSettingsView: NSView {
             on: window,
             title: "\(Self.displayName(for: provider)) · \(Self.displayName(for: route)) · \(promptVariantName(variant, route: route))",
             subtitle: customized
-                ? "Customized. Restore shipped default, then Save, clears your override."
-                : "This is the prompt this build ships. Saving an edit marks it customized.",
+                ? StaffPicks.customizedPromptSubtitle
+                : StaffPicks.staffPickPromptSubtitle,
             text: settingsStore.effectivePrompt(for: route, provider: provider, variant: variant),
             shippedDefault: settingsStore.factoryPrompt(for: route, provider: provider, variant: variant)
         ) { [weak self] text in
@@ -899,18 +892,18 @@ final class ModelsPowerSettingsView: NSView {
     /// What a saved prompt edit means. Blank text and the shipped bytes both mean "no override"; the store
     /// owns that rule, so the sheet hands over exactly what the user typed and this reports the state that
     /// resulted — which is why restoring the shipped default inside the editor and saving it reads back as
-    /// Tested default rather than as an override that happens to match.
+    /// Staff pick rather than as an override that happens to match.
     func applyPromptEdit(_ text: String, route: LLMRouteID, provider: LLMProvider,
                          variant: LLMPromptVariant) {
         do {
             try settingsStore.setPromptOverride(text, for: route, provider: provider, variant: variant)
             let restored = settingsStore.promptCustomizationState(
                 for: route, provider: provider, variant: variant) == .testedDefault
-            status(restored ? "Prompt restored to Tested default." : "Prompt saved as Customized.")
+            status(restored ? "Prompt restored to the staff pick." : "Prompt saved as Customized.")
         } catch { status(error.localizedDescription, error: true) }
     }
 
-    /// Prompt-only reset: it deletes the overlay entry and nothing else. "Restore <provider> default" below
+    /// Prompt-only reset: it deletes the overlay entry and nothing else. "Restore the full staff pick" below
     /// reinstalls the whole tested bundle and selects that provider, which is a much bigger gesture than
     /// "put the prompt back" — a user who only retuned wording should not have to accept a model/effort
     /// rewrite to undo it.
@@ -919,7 +912,7 @@ final class ModelsPowerSettingsView: NSView {
         let (route, provider, variant) = target
         do {
             try settingsStore.setPromptOverride(nil, for: route, provider: provider, variant: variant)
-            status("\(promptVariantName(variant, route: route)) prompt reset to the shipped \(Self.displayName(for: provider)) default. Model and effort unchanged.")
+            status("\(promptVariantName(variant, route: route)) prompt reset to the \(Self.displayName(for: provider)) staff pick. Model and effort unchanged.")
         } catch { status(error.localizedDescription, error: true) }
     }
 
@@ -960,9 +953,9 @@ final class ModelsPowerSettingsView: NSView {
             try settingsStore.restoreProviderDefault(provider, for: spec.routes)
             let skipped = noTestedDefaultRoutes(provider: provider, routes: spec.routes)
             if skipped.isEmpty {
-                status("Restored \(spec.title) to its complete tested \(Self.displayName(for: provider)) bundle.")
+                status("Restored \(spec.title) to its full \(Self.displayName(for: provider)) staff pick.")
             } else {
-                status("Restored available \(Self.displayName(for: provider)) defaults. No default; unchanged: \(routeList(skipped)).")
+                status("Restored available \(Self.displayName(for: provider)) staff picks. No staff pick; unchanged: \(routeList(skipped)).")
             }
         } catch { status(error.localizedDescription, error: true) }
     }
@@ -1044,7 +1037,7 @@ final class ModelsPowerSettingsView: NSView {
                 }
             }
         }
-        return "Prompt: \(customized ? "Customized" : "Tested default")"
+        return StaffPicks.promptSummary(customized: customized)
     }
 
     /// The route-level ratification verdict: a fold of the store's per-variant judgement, not a new one.

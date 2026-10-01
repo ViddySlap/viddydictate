@@ -206,9 +206,9 @@ again. The human must then:
      opens `claude auth login` in Terminal and waits for it to complete.
    - Codex requires `/Applications/ChatGPT.app`. The in-app button starts a ChatGPT subscription
      device login in ViddyDictate's dedicated Codex home. It does not reuse the normal Codex login.
-2. On a Mac that will use the cloud path, open Hotkeys and use "Set every provider-capable route to
-   its tested default" to select the provider just connected. Fresh routes are selected Local and
-   otherwise expect the optional LM Studio models.
+2. On a Mac that will use the cloud path, open Hotkeys and use "Set every route to its staff pick"
+   to select the provider just connected. Fresh routes are selected Local and otherwise expect the
+   optional LM Studio models.
 3. Start one dictation and approve the Microphone prompt.
 4. Enable ViddyDictate in System Settings > Privacy & Security > Accessibility and Input Monitoring.
 5. Quit and reopen ViddyDictate after changing Accessibility or Input Monitoring, then click Check

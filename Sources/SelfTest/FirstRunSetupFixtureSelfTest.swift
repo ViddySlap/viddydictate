@@ -145,9 +145,9 @@ enum FirstRunSetupFixtureSelfTest {
                         .localApp == .lmStudio)
 
         let ollama = ollamaSelection(mac64)
-        r.record("the Ollama warning is said again above Continue while Ollama is chosen and still to install",
+        r.record("a one-line Ollama reminder sits above Continue while Ollama is chosen and still to install",
                  ComponentPicker.continueWarning(selection: ollama, environment: bare)
-                    == ComponentPicker.ollamaWarning
+                    == "Remember to approve Ollama's macOS prompt when it appears."
                     && ComponentPicker.continueWarning(selection: ollama, environment: ollamaOnly) == nil
                     && ComponentPicker.continueWarning(
                         selection: ComponentPicker.defaultSelection(facts: mac64, environment: bare),

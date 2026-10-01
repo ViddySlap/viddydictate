@@ -370,9 +370,11 @@ enum ComponentPickerRender {
                   [ComponentPicker.RowID.lmStudio, .gemma, .qwen].allSatisfy {
                       find(ComponentPicker.cardIdentifier($0), in: ollama) == nil
                   })
-            check("[ollama-\(name)] the warning is said again above Continue",
+            check("[ollama-\(name)] a one-line reminder, not the card's whole warning, sits above Continue",
                   label(ComponentPicker.continueWarningIdentifier, in: ollama)?.stringValue
-                    == ComponentPicker.ollamaWarning
+                    == "Remember to approve Ollama's macOS prompt when it appears."
+                    && label(ComponentPicker.continueWarningIdentifier, in: ollama)?.stringValue
+                        != ComponentPicker.ollamaWarning
                     && (label(ComponentPicker.continueWarningIdentifier, in: ollama)?.frame.maxY ?? .infinity)
                         <= (find(ComponentPicker.continueIdentifier, in: ollama)?.frame.minY ?? 0))
             let total = label(ComponentPicker.totalIdentifier, in: ollama)?.stringValue ?? ""

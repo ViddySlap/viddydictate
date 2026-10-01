@@ -151,12 +151,12 @@ enum LocalPickerMergeFixtureSelfTest {
         let expectedSticky = [
             "LM Studio · " + lmsAlphaLabel,
             "LM Studio · " + lmsSharedLabel,
-            "LM Studio · tested-local - Shipped default",
+            "LM Studio · tested-local - Staff pick",
             "",
             "Ollama · " + ollamaCoderLabel,
             "Ollama · " + ollamaSharedLabel,
         ]
-        reporter.record("two apps (Sticky Skill): the shipped default joins LM Studio's group, not the list's tail",
+        reporter.record("two apps (Sticky Skill): the staff pick joins LM Studio's group, not the list's tail",
                         titles(sticky) == expectedSticky, describe(sticky))
 
         // The shared id, pinned to Ollama, in both views; and the same id pinned to LM Studio.
@@ -310,7 +310,9 @@ enum LocalPickerMergeFixtureSelfTest {
     // MARK: - The pre-Ollama pickers, verbatim
 
     /// `ModelsPowerSettingsView.modelPopup`'s Local path before S3b: dedupe by id, append the pin, then the
-    /// "Shipped default" / "Custom" qualifiers by id, and select the first row whose id is the pin's.
+    /// "Shipped default" / "Custom" qualifiers by id, and select the first row whose id is the pin's. D11 renamed
+    /// the default's qualifier to "Staff pick" in both views, so both copies below carry the new word; the
+    /// one-app comparison is about rows, order and selection, which D11 did not touch.
     private static func legacyRoutingGrid(catalog: [LMStudioModelOption]?, pinned selected: LLMProviderBundle,
                                           tested: LLMProviderBundle?) -> (titles: [String], selected: Int?) {
         var choices: [(model: String, label: String)] = []
@@ -327,7 +329,7 @@ enum LocalPickerMergeFixtureSelfTest {
         var titles: [String] = []
         for choice in choices {
             var title = choice.label
-            if choice.model == testedID { title += "  ·  Shipped default" }
+            if choice.model == testedID { title += "  ·  Staff pick" }
             else if choice.model == selected.modelID && choice.model != testedID {
                 title += "  ·  Custom"
             }
@@ -348,7 +350,7 @@ enum LocalPickerMergeFixtureSelfTest {
             append(option.modelID, option.label)
         }
         if let tested {
-            append(tested.modelID, compactModelName(tested.modelID) + " - Shipped default")
+            append(tested.modelID, compactModelName(tested.modelID) + " - Staff pick")
         }
         append(selected.modelID, compactModelName(selected.modelID) + " - Current")
         return (choices.map(\.label), choices.firstIndex { $0.id == selected.modelID })

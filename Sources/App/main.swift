@@ -139,6 +139,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama rows' plan and fit check, Skip's empty plan, the first-launch rule over scratch stores (an upgraded
     // working install is never shown it), and the LM Studio picker unchanged. Built-in mutants.
     case firstRunSetupSelftest = "--first-run-setup-selftest"
+    // Ollama lane D11: every built-in default reads "Staff pick" on every user-visible surface (badges, prompt
+    // labels, pickers, the global control, Codex and cloud update copy), and ratification survives a store
+    // round-trip internally. Pure label functions plus one scratch store. Built-in mutants.
+    case staffPicksCopySelftest = "--staff-picks-copy-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

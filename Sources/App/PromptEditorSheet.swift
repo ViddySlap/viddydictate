@@ -120,7 +120,7 @@ final class PromptEditorSheet: NSObject, NSTextViewDelegate {
     /// user saves (never on cancel).
     static func present(on parent: NSWindow, title: String, subtitle: String? = nil, text: String,
                         shippedDefault: String? = nil,
-                        restoreButtonTitle: String = "Restore shipped default",
+                        restoreButtonTitle: String = StaffPicks.restorePromptTitle,
                         onSave: @escaping (String) -> Void) {
         let s = PromptEditorSheet(shippedDefault: shippedDefault, assembly: nil, onSave: onSave)
         s.retain = s
@@ -134,7 +134,7 @@ final class PromptEditorSheet: NSObject, NSTextViewDelegate {
     /// `present` would have shown.
     static func makeForTesting(title: String, subtitle: String? = nil, text: String,
                                shippedDefault: String?,
-                               restoreButtonTitle: String = "Restore shipped default",
+                               restoreButtonTitle: String = StaffPicks.restorePromptTitle,
                                onSave: @escaping (String) -> Void) -> PromptEditorSheet {
         let s = PromptEditorSheet(shippedDefault: shippedDefault, assembly: nil, onSave: onSave)
         s.build(title: title, subtitle: subtitle, text: text,

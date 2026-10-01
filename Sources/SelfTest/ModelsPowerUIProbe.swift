@@ -165,9 +165,11 @@ enum ModelsPowerUIProbe {
                   card.subviews.allSatisfy { $0 === pointer || !$0.frame.intersects(pointer.frame) })
         }
         check("derived global provider state", find("bulk-derived-state", in: view) is NSTextField)
-        check("Codex global action declares the shipped unratified Cleanup replacement",
-              (find("bulk|codex", in: view) as? NSButton)?.toolTip?.contains(
-                "Cleanup is auto-updated and unratified") == true)
+        check("Codex global action says it uses Codex's staff picks",
+              (find("bulk|codex", in: view) as? NSButton)?.toolTip
+                == "Uses Codex's staff pick on all eight routes.")
+        check("the global control reads Set every route to its staff pick",
+              texts(in: view).contains("Set every route to its staff pick:"))
 
         let cardIDs = [
             "card.cleanup", "card.promptPrep", "card.email", "card.searchLocalSynth",
@@ -180,7 +182,7 @@ enum ModelsPowerUIProbe {
               texts(in: view).contains { $0.contains("Gemini grounding (fixed)") })
         let emailProvider = find("provider|email", in: view) as? NSPopUpButton
         check("per-route provider control", emailProvider != nil)
-        check("email exposes Codex as a complete tested default",
+        check("email exposes Codex as a complete staff pick",
               emailProvider?.itemArray.first(where: {
                   ($0.representedObject as? String) == "codex"
               })?.title == "Codex")
@@ -467,7 +469,7 @@ enum ModelsPowerUIProbe {
               (find("prompt-summary|email", in: view) as? NSTextField)?.stringValue == "Prompt: Customized")
     }
 
-    /// P10: resetting a prompt is prompt-only. "Restore <provider> default" reinstalls the whole tested
+    /// P10: resetting a prompt is prompt-only. "Restore the full staff pick" reinstalls the whole tested
     /// bundle and selects that provider; a user who only retuned wording must be able to undo exactly that,
     /// so the model/effort comparison below is the assertion that matters, not the state label.
     private static func checkPromptResetControl(_ view: ModelsPowerSettingsView,
@@ -499,16 +501,14 @@ enum ModelsPowerUIProbe {
         // store already considered the slate uncovered. This drives the whole wiring - override, per-variant
         // fold, row text - rather than the pure composition the freshness gate covers.
         let overriddenRow = (find("provenance|email", in: view) as? NSTextField)?.stringValue ?? ""
-        check("an overridden prompt turns the route's provenance row unratified",
-              overriddenRow.hasPrefix("Claude preset: UNRATIFIED"))
-        check("the provenance row names the prompt edit as the reason",
-              overriddenRow.contains(CloudUpdateSurface.unratifiedReasonText(.promptOverridden)))
+        check("a user's own model with an overridden prompt reads Custom and notes the custom prompt",
+              overriddenRow == "Claude preset: CUSTOM probe-reset-model - custom prompt")
 
         let before = routing.selectedBundle(for: .email)
         reset.performClick(nil)
-        check("clearing the override drops the prompt-edit reason from the provenance row",
+        check("clearing the override drops the custom-prompt note from the provenance row",
               (find("provenance|email", in: view) as? NSTextField)?.stringValue
-                .contains(CloudUpdateSurface.unratifiedReasonText(.promptOverridden)) == false)
+                == "Claude preset: CUSTOM probe-reset-model")
         check("Reset prompt deletes the overlay entry",
               routing.promptCustomizationState(for: .email, provider: .claude) == .testedDefault)
         check("Reset prompt runs the bytes this build ships",
@@ -535,8 +535,8 @@ enum ModelsPowerUIProbe {
         let clean = (find("provenance|promptPrep", in: view) as? NSTextField)?.stringValue ?? ""
         check("Option+P provenance names the selected provider",
               clean.hasPrefix("\(ModelsPowerSettingsView.displayName(for: displayed)) preset: "))
-        check("Option+P starts with no prompt-edit objection",
-              !clean.contains(CloudUpdateSurface.unratifiedReasonText(.promptOverridden)))
+        check("Option+P starts with no custom-prompt note",
+              !clean.hasSuffix(" - \(StaffPicks.customPromptNote)"))
         do {
             try routing.setPromptOverride("probe tighten prompt", for: .promptPrep,
                                           provider: displayed, variant: .cleanupL2)
@@ -544,9 +544,8 @@ enum ModelsPowerUIProbe {
             check("prompt-variant fold scratch setup", false)
             return
         }
-        check("editing one of Option+P's three prompts marks the route unratified",
-              (find("provenance|promptPrep", in: view) as? NSTextField)?.stringValue
-                .contains(CloudUpdateSurface.unratifiedReasonText(.promptOverridden)) == true)
+        check("editing one of Option+P's three prompts adds the custom-prompt note to the route's row",
+              (find("provenance|promptPrep", in: view) as? NSTextField)?.stringValue == clean + " - custom prompt")
         do {
             try routing.setPromptOverride(nil, for: .promptPrep, provider: displayed, variant: .cleanupL2)
         } catch {
@@ -575,10 +574,10 @@ enum ModelsPowerUIProbe {
         check("the editor opens on the text that actually runs",
               sheet.editorTextForTesting == "probe editor prompt")
         guard let restore = find("prompt-editor-restore", in: root) as? NSButton else {
-            check("the editor exposes Restore shipped default", false)
+            check("the editor exposes Restore staff pick", false)
             return
         }
-        check("the editor exposes Restore shipped default", restore.isEnabled)
+        check("the editor exposes Restore staff pick", restore.isEnabled && restore.title == "Restore staff pick")
         restore.performClick(nil)
         check("Restore shows the shipped bytes without saving them",
               sheet.editorTextForTesting == shipped

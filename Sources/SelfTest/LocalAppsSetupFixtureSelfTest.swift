@@ -449,26 +449,38 @@ enum LocalAppsSetupFixtureSelfTest {
         let twoApps = oneApp + [LMStudioModelOption(modelID: shared, label: "shared", backend: .ollama)]
         let lmsPin = LLMProviderBundle.local(ref: LocalModelRef(backend: .lmStudio, modelID: shared))
         let ollamaPin = LLMProviderBundle.local(ref: LocalModelRef(backend: .ollama, modelID: shared))
-        let badge = "LOCAL \(shared)"
+        // D11's two badge words: a user's own model reads CUSTOM, a built-in default STAFF PICK (two words, so
+        // the app name must go after both, not after the first).
+        let badge = "CUSTOM \(shared)"
+        let staffPick = "STAFF PICK \(shared)"
 
-        reporter.record("one app: the Local preset badge is byte-identical",
+        reporter.record("one app: the Local preset badge names no app",
                         LocalModelPickerItems.presetBadge(badge, bundle: lmsPin, catalog: oneApp) == badge
-                            && LocalModelPickerItems.presetBadge(badge, bundle: lmsPin, catalog: nil) == badge)
+                            && LocalModelPickerItems.presetBadge(badge, bundle: lmsPin, catalog: nil) == badge
+                            && LocalModelPickerItems.presetBadge(staffPick, bundle: lmsPin, catalog: oneApp)
+                                == staffPick)
         reporter.record("both apps: the badge names the pinned app",
                         LocalModelPickerItems.presetBadge(badge, bundle: ollamaPin, catalog: twoApps)
-                            == "LOCAL · Ollama · \(shared)"
+                            == "CUSTOM · Ollama · \(shared)"
                             && LocalModelPickerItems.presetBadge(badge, bundle: lmsPin, catalog: twoApps)
-                            == "LOCAL · LM Studio · \(shared)",
+                            == "CUSTOM · LM Studio · \(shared)",
                         LocalModelPickerItems.presetBadge(badge, bundle: ollamaPin, catalog: twoApps))
+        reporter.record("both apps: a two-word STAFF PICK badge keeps both words before the app",
+                        LocalModelPickerItems.presetBadge(staffPick, bundle: ollamaPin, catalog: twoApps)
+                            == "STAFF PICK · Ollama · \(shared)"
+                            && LocalModelPickerItems.presetBadge(
+                                staffPick + " - custom prompt", bundle: lmsPin, catalog: twoApps)
+                            == "STAFF PICK · LM Studio · \(shared) - custom prompt",
+                        LocalModelPickerItems.presetBadge(staffPick, bundle: ollamaPin, catalog: twoApps))
         reporter.record("an Ollama pin over an LM-Studio-only catalog is named, as the picker names it",
                         LocalModelPickerItems.presetBadge(badge, bundle: ollamaPin, catalog: oneApp)
-                            == "LOCAL · Ollama · \(shared)"
+                            == "CUSTOM · Ollama · \(shared)"
                             && LocalModelPickerItems.labelsApps(
                                 LocalModelPickerItems.routingGridOptions(catalog: oneApp, pinned: ollamaPin)))
         let cloud = LLMProviderBundle(provider: .claude, modelID: shared)
         reporter.record("a cloud bundle's badge is never touched",
-                        LocalModelPickerItems.presetBadge("UNRATIFIED \(shared)", bundle: cloud, catalog: twoApps)
-                            == "UNRATIFIED \(shared)")
+                        LocalModelPickerItems.presetBadge("CUSTOM \(shared)", bundle: cloud, catalog: twoApps)
+                            == "CUSTOM \(shared)")
     }
 
     // MARK: - Negative controls

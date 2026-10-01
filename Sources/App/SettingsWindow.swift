@@ -860,7 +860,7 @@ final class CodexConnectionPresenter {
         switch state {
         case .connected:
             alert.messageText = "Codex connected"
-            alert.informativeText = "The dedicated ViddyDictate home is authenticated with ChatGPT. Existing route choices and the pending Codex-default slate are unchanged."
+            alert.informativeText = "The dedicated ViddyDictate home is authenticated with ChatGPT. Existing route choices are unchanged, and no route moves to Codex's staff picks until you choose them."
             alert.alertStyle = .informational
         case .disconnected:
             alert.messageText = "Codex not connected"

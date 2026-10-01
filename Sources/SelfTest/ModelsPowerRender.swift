@@ -8,7 +8,7 @@ import Cocoa
 /// It drives the real view against a scratch store and writes three PNGs of the expanded Email card:
 ///   - `prompt-row-default.png`    — no override: Reset prompt is present but disabled.
 ///   - `prompt-row-customized.png` — an override in place: the row reads Customized, Reset is enabled.
-///   - `prompt-row-reset.png`      — after clicking Reset: back to Tested default, model/effort untouched.
+///   - `prompt-row-reset.png`      — after clicking Reset: back to the Staff pick, model/effort untouched.
 /// plus `prompt-editor-customized.png` / `prompt-editor-restored.png` for the sheet's Restore control, and
 /// `local-picker-one-app.png` / `local-picker-two-apps.png` for the Local picker over one and both local apps
 /// (`LocalPickerMergeRenderCases`, which also prints each menu as `[menu]` lines).
@@ -86,6 +86,8 @@ enum ModelsPowerRender {
         let resetID = "reset-prompt|email|\(before.provider.rawValue)|primary"
         let reset = find(resetID, in: view) as? NSButton
         check("Reset prompt is enabled once the route is customized", reset?.isEnabled == true)
+        check("a customized prompt's summary reads Customized",
+              (find("prompt-summary|email", in: view) as? NSTextField)?.stringValue == "Prompt: Customized")
         capture(view, card: "card.email", to: outDir + "/prompt-row-customized.png", name: "customized")
 
         captureEditor(routing: routing, provider: before.provider, outDir: outDir)
@@ -95,6 +97,8 @@ enum ModelsPowerRender {
               routing.promptCustomizationState(for: .email, provider: before.provider) == .testedDefault)
         check("Reset prompt leaves model and effort byte-identical",
               routing.selectedBundle(for: .email) == before)
+        check("after Reset the prompt summary reads Staff pick",
+              (find("prompt-summary|email", in: view) as? NSTextField)?.stringValue == "Prompt: Staff pick")
         capture(view, card: "card.email", to: outDir + "/prompt-row-reset.png", name: "reset")
 
         captureProvenanceRow(routing: routing, view: view, outDir: outDir)
@@ -109,17 +113,16 @@ enum ModelsPowerRender {
 
     /// The provenance row's two states (item P11), captured on the arm the row actually displays.
     ///
-    /// The row used to be a pure function of the BUNDLE, which cannot see a prompt override, so the
-    /// `provenance-row-ratified.png` line below is also exactly what the old code kept showing after the
-    /// prompt bytes had been replaced - a green RATIFIED claim over a slate the store already considered
-    /// uncovered. `provenance-row-unratified.png` is that same state under the fix.
+    /// The row used to be a pure function of the BUNDLE, which cannot see a prompt override, so it kept making
+    /// the same claim after the prompt bytes had been replaced. D11 words it as a staff pick:
+    /// `provenance-row-ratified.png` is the Claude staff pick as shipped, and `provenance-row-unratified.png` is
+    /// the same staff pick once the user's prompt replaces the shipped one. The PNG names are kept so earlier
+    /// Mac verify notes still point at the right files.
     private static func captureProvenanceRow(routing: ModelsPowerSettingsStore,
                                              view: ModelsPowerSettingsView, outDir: String) {
-        // Pin the route to Claude first so this capture documents both RATIFIED and prompt-overridden states.
-        // Local selections now truthfully render their own model and carry no ratification badge.
+        // Pin the route to Claude's staff pick so this capture documents the badge and the prompt-edit note.
         let displayed = LLMProvider.claude
-        guard let claudeArm = routing.rememberedBundle(for: displayed, route: .email)
-                ?? LLMProviderDefaults.testedBundle(for: displayed, route: .email) else {
+        guard let claudeArm = LLMProviderDefaults.testedBundle(for: displayed, route: .email) else {
             check("provenance capture needs a Claude arm for Email", false)
             return
         }
@@ -130,15 +133,15 @@ enum ModelsPowerRender {
         }
         view.refresh()
         if !isExpanded(view) { (find("advanced|email", in: view) as? NSButton)?.performClick(nil) }
-        let reason = CloudUpdateSurface.unratifiedReasonText(.promptOverridden)
 
         func rowText() -> String {
             (find("provenance|email", in: view) as? NSTextField)?.stringValue ?? ""
         }
 
-        check("the provenance row starts with no prompt-edit objection", !rowText().contains(reason))
+        check("the Claude staff pick's row reads STAFF PICK and its model, with no prompt note",
+              rowText() == "Claude preset: STAFF PICK \(claudeArm.modelID)")
         capture(view, card: "card.email", to: outDir + "/provenance-row-ratified.png",
-                name: "provenance ratified")
+                name: "provenance staff pick")
 
         do {
             try routing.setPromptOverride("Write it in the user's own voice.",
@@ -148,10 +151,10 @@ enum ModelsPowerRender {
             return
         }
         view.refresh()
-        check("an overridden prompt turns the displayed arm's provenance row unratified",
-              rowText().contains("UNRATIFIED") && rowText().contains(reason))
+        check("an overridden prompt keeps the staff pick badge and notes the custom prompt",
+              rowText() == "Claude preset: STAFF PICK \(claudeArm.modelID) - custom prompt")
         capture(view, card: "card.email", to: outDir + "/provenance-row-unratified.png",
-                name: "provenance unratified")
+                name: "provenance staff pick, custom prompt")
     }
 
     /// The prompt workstation (W1): the Edit-task-prompt panel for a custom mode, rendering the
@@ -253,7 +256,7 @@ enum ModelsPowerRender {
         let shipped = routing.factoryPrompt(for: .email, provider: provider)
         let sheet = PromptEditorSheet.makeForTesting(
             title: "\(ModelsPowerSettingsView.displayName(for: provider)) · Email (Option+M) · Email",
-            subtitle: "Customized. Restore shipped default, then Save, clears your override.",
+            subtitle: "Customized. Restore staff pick, then Save, clears your override.",
             text: routing.effectivePrompt(for: .email, provider: provider),
             shippedDefault: shipped,
             onSave: { _ in })
@@ -264,8 +267,10 @@ enum ModelsPowerRender {
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         capture(sheet.contentViewForTesting, card: nil,
                 to: outDir + "/prompt-editor-customized.png", name: "editor-customized")
+        check("the editor's Restore button reads Restore staff pick",
+              (find("prompt-editor-restore", in: root) as? NSButton)?.title == "Restore staff pick")
         (find("prompt-editor-restore", in: root) as? NSButton)?.performClick(nil)
-        check("Restore shipped default loads the shipped bytes into the editor",
+        check("Restore staff pick loads the shipped bytes into the editor",
               sheet.editorTextForTesting == shipped)
         capture(sheet.contentViewForTesting, card: nil,
                 to: outDir + "/prompt-editor-restored.png", name: "editor-restored")

@@ -316,7 +316,8 @@ final class ComponentPickerView: NSView {
         addSubview(line)
         y += 14
 
-        // D8: Ollama's macOS prompt, said again where the user commits to the install.
+        // D8: a one-line reminder of Ollama's macOS prompt where the user commits to the install. The Ollama
+        // card says it in full.
         if let warning = ComponentPicker.continueWarning(selection: selection, environment: environment) {
             let field = SettingsSectionKit.wrapped(warning, x: L, y: y, width: width, size: 11,
                                                    weight: .medium, color: .systemOrange)
