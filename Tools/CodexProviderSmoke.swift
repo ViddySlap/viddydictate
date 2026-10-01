@@ -19,6 +19,19 @@ private func connectionFailureLines(
     }
 }
 
+/// The abstain a scratch-home run prints when the boundary was established but the dedicated home is
+/// not logged in. verify.sh's default services tier runs this smoke in its scratch home so it never
+/// snapshots into, rewrites, or prunes the live Codex store; there, the authenticated pairs cannot run.
+private enum SmokeAbstain {
+    /// Must equal PRECONDITION_MISSING_MARKER in scripts/service-gate-classify.sh; the deterministic
+    /// classifier selftest checks this line byte for byte.
+    static let preconditionMissingMarker = "[precondition-missing]"
+
+    static let notLoggedInLine = "[skip] [codex-provider-smoke] SKIPPED: dedicated Codex home is not "
+        + "logged in; the boundary was established, the authenticated pairs did not run "
+        + preconditionMissingMarker
+}
+
 private func runtimeFailureLine(for outcome: CodexRuntimeOutcome) -> String {
     let classification: String
     switch outcome {
@@ -46,6 +59,8 @@ private struct SmokeConfiguration: Equatable {
     let pairs: [CodexShippedModelPair]
     let allShippedPairs: Bool
     let syntheticMode: SyntheticMode
+    /// Only for a scratch home: a not-logged-in home abstains (exit 0) instead of failing.
+    let abstainIfNotLoggedIn: Bool
 }
 
 private struct SmokeSyntheticFixture: Equatable {
@@ -58,6 +73,7 @@ private func parseSmokeArguments(_ arguments: [String]) -> SmokeConfiguration? {
     var runner: String?
     var explicitPairs: [CodexShippedModelPair] = []
     var allShippedPairs = false
+    var abstainIfNotLoggedIn = false
     var index = 0
     while index < arguments.count {
         switch arguments[index] {
@@ -79,6 +95,10 @@ private func parseSmokeArguments(_ arguments: [String]) -> SmokeConfiguration? {
         case "--all-shipped-pairs":
             guard !allShippedPairs else { return nil }
             allShippedPairs = true
+            index += 1
+        case "--abstain-if-not-logged-in":
+            guard !abstainIfNotLoggedIn else { return nil }
+            abstainIfNotLoggedIn = true
             index += 1
         default:
             return nil
@@ -107,7 +127,8 @@ private func parseSmokeArguments(_ arguments: [String]) -> SmokeConfiguration? {
         allShippedPairs: allShippedPairs,
         syntheticMode: !allShippedPairs && explicitPairs.isEmpty
             ? .defaultSinglePair
-            : .fixedPairInventory)
+            : .fixedPairInventory,
+        abstainIfNotLoggedIn: abstainIfNotLoggedIn)
 }
 
 private func syntheticFixture(
@@ -215,6 +236,19 @@ private func runDiagnosticsSelfTest() -> Bool {
         "[codex-provider-smoke-selftest][\(shippedOK ? "PASS" : "FAIL")] "
         + "all-route mode derives every distinct canonical shipped pair")
     passed = passed && shippedOK
+
+    let abstainParsed = parseSmokeArguments([
+        "--all-shipped-pairs", "--abstain-if-not-logged-in", "--runner", "/tmp/synthetic-runner",
+    ])
+    let abstainOK = abstainParsed?.abstainIfNotLoggedIn == true
+        && shipped?.abstainIfNotLoggedIn == false
+        && SmokeAbstain.notLoggedInLine.hasPrefix("[skip] [codex-provider-smoke] SKIPPED: ")
+        && SmokeAbstain.notLoggedInLine.hasSuffix(SmokeAbstain.preconditionMissingMarker)
+        && !SmokeAbstain.notLoggedInLine.contains("PASS")
+    print(
+        "[codex-provider-smoke-selftest][\(abstainOK ? "PASS" : "FAIL")] "
+        + "the not-logged-in abstain is opt-in and carries the precondition marker")
+    passed = passed && abstainOK
 
     let mixedRejected = parseSmokeArguments([
         "--all-shipped-pairs", "--pair", "model", "effort",
@@ -350,11 +384,17 @@ private struct CodexProviderSmokeMain {
         guard let configuration = parseSmokeArguments(arguments) else {
             fputs(
                 "Usage: CodexProviderSmoke --runner <absolute-path> "
-                + "[--all-shipped-pairs | --pair <model> <effort> ...]\n",
+                + "[--all-shipped-pairs | --pair <model> <effort> ...] [--abstain-if-not-logged-in]\n",
                 stderr)
             exit(2)
         }
         let report = CodexProviderRuntime.connectionReport(runnerPath: configuration.runner)
+        // Only `.disconnected` ("Not logged in") abstains: the boundary itself, snapshot and receipt
+        // included, was established. Any boundary refusal stays a failure in every mode.
+        if configuration.abstainIfNotLoggedIn, report.state == .disconnected {
+            print(SmokeAbstain.notLoggedInLine)
+            exit(0)
+        }
         let connectionFailure = connectionFailureLines(
             for: report.state, operatorCause: report.operatorCause)
         guard connectionFailure.isEmpty else {
