@@ -15,8 +15,8 @@ mean the same thing.
   supported installers update their own daemon, virtual environment, and LaunchAgent files in place.
 - Do not uninstall, run rollback scripts, reset TCC permissions, change repository visibility, or
   modify provider logins unless the user explicitly asks.
-- Do not automate clicks or keystrokes for macOS permission prompts or provider authentication. Tell
-  the user exactly what remains and wait.
+- Do not automate clicks or keystrokes for macOS permission prompts, Ollama's first-start admin
+  prompt, or provider authentication. Tell the user exactly what remains and wait.
 - Never build, verify, or install over a ViddyDictate install you did not just create without
   completing section 2 first. Destroying a running instance can leave the user's keyboard
   unresponsive, and a user whose keyboard is dead cannot tell you what went wrong.
@@ -193,10 +193,16 @@ A health response with `"ready": false` means the daemon is running but the Whis
 downloading or warming. Report that honestly; do not call transcription ready yet.
 
 Do not run `./scripts/verify.sh full` as part of a routine install. It requires live provider,
-LM Studio, GUI, and host-only capabilities and is a maintainer/release gate, not a cold-user install
-check.
+LM Studio, Ollama, GUI, and host-only capabilities and is a maintainer/release gate, not a cold-user
+install check.
 
 ## 7. Hand the human the remaining steps
+
+The app has a first-run setup window and a Feature Tour. On a source install neither normally opens
+by itself: `install-daemon.sh` has already installed the speech-to-text core, so the app treats the
+Mac as an existing install. Do not try to force either window. The user can reopen setup with
+**Run first-run setup again…** on the Setup tab, and the tour with **Feature Tour…** in the
+menu-bar menu.
 
 Ask the user to open the ViddyDictate menu-bar item, choose Settings, open Setup, and click Check
 again. The human must then:
@@ -206,20 +212,35 @@ again. The human must then:
      opens `claude auth login` in Terminal and waits for it to complete.
    - Codex requires `/Applications/ChatGPT.app`. The in-app button starts a ChatGPT subscription
      device login in ViddyDictate's dedicated Codex home. It does not reuse the normal Codex login.
-2. On a Mac that will use the cloud path, open Hotkeys and use "Set every route to its staff pick"
+2. Optionally, choose a local model app: LM Studio (the simple choice) or Ollama (the advanced
+   one). The user installs it from Settings > Setup > Local model apps, or from **Run first-run
+   setup again…**, which also offers its staff-pick models sized to the Mac. The app downloads and
+   signature-checks either one itself. Do not download or install LM Studio or Ollama yourself,
+   and do not install Ollama with Homebrew.
+   - **Ollama's first start is a human-only step.** macOS asks for Touch ID or a password because
+     "Ollama is trying to install its command line interface tool", and Ollama's server does not
+     start until it is answered. Hand it to the user and wait. Never automate it, answer it, or
+     try to bypass it. While ViddyDictate's installer waits, Ollama's row reads "waiting for you to
+     approve Ollama's macOS prompt".
+3. On a Mac that will use the cloud path, open Hotkeys and use "Set every route to its staff pick"
    to select the provider just connected. Fresh routes are selected Local and otherwise expect the
-   optional LM Studio models.
-3. Start one dictation and approve the Microphone prompt.
-4. Enable ViddyDictate in System Settings > Privacy & Security > Accessibility and Input Monitoring.
-5. Quit and reopen ViddyDictate after changing Accessibility or Input Monitoring, then click Check
+   optional LM Studio models; with only Ollama running, they run on the largest Ollama model that
+   fits.
+4. Start one dictation and approve the Microphone prompt.
+5. Enable ViddyDictate in System Settings > Privacy & Security > Accessibility and Input Monitoring.
+6. Quit and reopen ViddyDictate after changing Accessibility or Input Monitoring, then click Check
    again.
+7. Optionally, open **Feature Tour…** from the menu bar. It explains every feature with the user's
+   own hotkeys and has a practice box for a first dictation. It changes nothing.
 
 An optional Gemini key enables right Option+G only. The preferred path is the secure field in
 Settings > Setup. Never ask the user to paste the key into chat. The terminal fallback is
 `./scripts/set-gemini-key.sh`, which reads hidden standard input.
 
-LM Studio is optional. Do not steer a 16 GB Mac toward the current 30B local cleanup/search model;
-use Claude or Codex on modest hardware.
+A local model app (LM Studio or Ollama) is optional. Do not steer a 16 GB Mac toward the current 30B
+local cleanup/search model, `qwen3-coder-30b-a3b-instruct-mlx` in LM Studio or `qwen3-coder:30b` in
+Ollama; use Claude or Codex on modest hardware. See
+[docs/local-model-apps.md](docs/local-model-apps.md) for how the two apps compare.
 
 ## 8. Report exact state
 
@@ -233,6 +254,9 @@ End with separate statements for:
 - Human permissions: confirmed in the Setup tab or still pending.
 - Provider: Claude, Codex, or Local confirmed available in the Setup tab, and which provider the
   routes select in Hotkeys, or what is still pending.
+- Local model app: which of LM Studio and Ollama is available, as the Setup tab's Local model apps
+  card shows it (for example running with N models, installed but not running, installed as a
+  command-line tool, or not installed), or that the user chose none.
 
 Do not call the installation complete until the installed app is running, the daemon is ready, the
 three macOS permissions are confirmed, and at least one provider is available for text transforms.
@@ -252,3 +276,13 @@ Raw local dictation can be reported separately if it works before a provider is 
    daemon's error log. Transcription needs no external tools; the daemon decodes the audio itself.
 7. If Claude transforms fail, use the Setup tab and `claude auth status --json`. If Codex transforms
    fail, use the Setup tab because ViddyDictate's dedicated Codex state is intentionally separate.
+8. If the Setup tab shows Ollama as installed but not running, ask the user to click Start or Open
+   on its Local model apps row. A first start may be waiting on Ollama's macOS admin prompt; "Ollama
+   didn't start. Open Ollama and approve its macOS prompt, then try again." means exactly that, and
+   only the user can approve it. Then click Check again.
+9. If Ollama is installed as a command-line tool (Homebrew) and not running, ViddyDictate will not
+   start it, by design. The user starts it with `ollama serve` or `brew services start ollama`,
+   then clicks Check again. It is the user's service: ask before starting it yourself.
+10. Do not change Ollama's or LM Studio's own settings or environment variables to fix a
+    ViddyDictate problem. ViddyDictate passes its idle window with each LM Studio load and each
+    Ollama request, sets Ollama's context per request, and never writes either app's settings.

@@ -1,8 +1,11 @@
-# Model residency: LM Studio owns eviction (one app TTL setting)
+# Model residency: the local model app owns eviction (one app TTL setting)
 
-This file describes ViddyDictate's shipped model-residency behavior. It replaced the earlier
-app-managed idle-unload timer while keeping its intent: an idle Mac must not keep large models
-pinned overnight.
+This file describes ViddyDictate's model-residency behavior. It replaced the earlier app-managed
+idle-unload timer while keeping its intent: an idle Mac must not keep large models pinned overnight.
+
+Most of it is about LM Studio, where the mechanism started. Ollama, the second local model app,
+follows the same contract over its HTTP API; see [Ollama](#ollama-the-same-contract-over-its-http-api)
+below, and [local-model-apps.md](local-model-apps.md) for how the two apps compare.
 
 ## The change
 
@@ -115,7 +118,100 @@ identical at any configured TTL value.
 - `--residency-selftest`, `--selftest` (cleanup, also exercises the clipboard layer), and
   `--email-selftest` all cleared green after the change; bge-m3's residency was unchanged.
 
+## Ollama: the same contract over its HTTP API
+
+Ollama owns eviction and ViddyDictate supplies the same one idle window. ViddyDictate talks to
+Ollama only over its native HTTP API (`http://127.0.0.1:11434` by default); it never shells out to
+the `ollama` command for inference or residency.
+
+### keep_alive on every request is the one idle setting
+
+Every load and every chat carries `keep_alive` set to `Settings.modelIdleUnloadSeconds`, in whole
+seconds: the same value, and the same Setup control, LM Studio's `--ttl` gets. A load is
+`POST /api/generate` with an empty prompt; a chat is `POST /api/chat`. Ollama unloads the model on
+its own once it has sat idle that long. There is no app-side timer.
+
+- A model already resident with enough context gets no load request, because any request would
+  reset the expiry it was loaded with. The chats ViddyDictate then sends do carry its window, so a
+  model another app loaded takes ViddyDictate's window from ViddyDictate's first chat on it, as it
+  would from any Ollama request.
+- The Note to Handoff vision helper keeps its own 300-second window on Ollama, as on LM Studio. It is
+  unloaded straight after its one call only when that pass loaded it cold, so a model another mode
+  already had warm (on Ollama, `gemma4:e4b` is both the email staff pick and the smallest vision
+  model) stays loaded.
+- `ensureReady`'s `ttlOverrideSeconds` test seam applies to Ollama too.
+
+### Unload is keep_alive 0
+
+`unload` sends `POST /api/generate {"model": ..., "keep_alive": 0}` when `/api/ps` lists the model
+or cannot be read. A model `/api/ps` shows Ollama is not holding gets no request.
+
+### Why native `/api/chat`, not Ollama's `/v1`
+
+Ollama's OpenAI-compatible `/v1` endpoint cannot carry `keep_alive` or `num_ctx`.
+
+- **keep_alive:** a `/v1` request inherits Ollama's default keep-alive, and every such call resets
+  the model's expiry to that default. The idle setting would silently stop applying.
+- **num_ctx:** a `/v1` request loads the model at Ollama's own default context, which on large Macs
+  is a 256k-token KV cache. ViddyDictate sets `num_ctx` on every request: 8,192 tokens for cleanup,
+  prompt-prep, custom modes, email, search synthesis, and the vision helper; 16,384 for search
+  retrieval. A model already resident with at least that context is reused as it is; a smaller one
+  is reloaded at ViddyDictate's size.
+
+The clients still build the OpenAI-shaped request they build for LM Studio and parse the
+OpenAI-shaped reply. `OllamaChatTranslator` converts the request to the native body and the reply
+back, so only the transport differs between the two apps.
+
+### Capacity: `/api/ps` under-reports, so the estimate uses tags size plus KV
+
+The memory guard covers Ollama as it covers LM Studio. Two measurements on one 64 GB Apple Silicon
+Mac shaped it:
+
+- **Ollama loads are wired memory.** `gemma4:e4b`, 6.58 GB on disk, added about 7.3 GB of wired
+  memory when loaded at an 8k context and about 8.0 GB at 32k, and released it within a second of
+  `keep_alive: 0`. So the existing whole-machine wired-memory budget sees Ollama's models, and the
+  2-second settle wait after an eviction is kept for both apps.
+- **`/api/ps` size under-reports.** For that same load `/api/ps` reported 0.34 GB, 10 to 20 times
+  less than the memory the load actually took. ViddyDictate never uses that number.
+
+The incoming estimate for an Ollama load is `(size from /api/tags + KV cache for num_ctx) x 1.15`,
+the same 1.15 factor LM Studio's estimate uses. The KV term is a conservative upper bound computed
+from `/api/show` `model_info`; when that lacks the geometry, it falls back to 0.25 x the model's
+size per 8,192 tokens of context, which over-counts on purpose. The Setup tab's **Loaded now** list
+and the eviction ranking also take each resident model's size from `/api/tags`.
+
+Eviction is the existing policy, keyed by app and model together. ViddyDictate only unloads models
+its own process loaded, so a model with the same name in the other app, or one the user loaded, is
+never touched. Because `/api/ps` has no last-use time, Ollama recency is ViddyDictate's own stamp,
+and a model with a ViddyDictate request in flight is never evicted.
+
+### Unload all is per app
+
+LM Studio's **Unload all** is unchanged: `lms unload --all`. When Ollama is installed the Setup tab
+adds Ollama's own **Unload all**, which sends `keep_alive: 0` for every model in `/api/ps`. Each
+button acts on every model in its app, including models other apps loaded, as LM Studio's always
+has. With both apps listed, the buttons read "Unload all in LM Studio" and "Unload all in Ollama".
+
+### ViddyDictate never writes Ollama's settings or environment
+
+The idle window and the context size travel on each request and affect only that request's model.
+ViddyDictate does not change Ollama's settings, its defaults, or any environment variable, so
+models other apps load follow Ollama's own defaults. The one Ollama environment variable it reads
+is `OLLAMA_HOST`, from its own process environment, to find the server.
+
+### Verification
+
+- `--local-capacity-backends-selftest` (deterministic) covers the tags-plus-KV estimate, eviction
+  keyed by app and model, recency, and context reuse, each with a negative control.
+- `--ollama-live` (services) loads a real model with a 20-second window, checks the expiry
+  `/api/ps` reports, unloads it, and requires every model it did not load to stay resident.
+- `--ollama-transforms-live` (services) runs a real cleanup and email on `gemma4:e4b` with a
+  20-second window, then requires the model to leave `/api/ps` on its own.
+
+Both services gates abstain when Ollama, or the model they need, is absent.
+
 ## Current status
 
 This mechanism shipped in ViddyDictate on 2026-07-06. LM Studio still owns eviction; ViddyDictate now
-feeds it one user-controlled idle window for every local model.
+feeds it one user-controlled idle window for every local model. Ollama gets the same window through
+`keep_alive`, as described above.

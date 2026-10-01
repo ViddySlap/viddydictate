@@ -7,6 +7,8 @@ troubleshooting.
 
 - [Code signing and TCC permissions](signing-and-tcc.md): what `setup-signing.sh` creates, why
   permissions survive rebuilds, the security tradeoff that buys, and how to install without it.
+- [Local model apps](local-model-apps.md): LM Studio and Ollama compared, how ViddyDictate picks
+  between them, installing each, and the memory and context it uses.
 - [Local STT daemon](stt-daemon.md): how local transcription is installed, started, and checked.
 - [Dictation history](dictation-history.md): the optional append-only history format and location.
 - [Sticky notes open-notes aggregate](sticky-notes-open-notes.md): the read-only integration contract
@@ -22,5 +24,6 @@ troubleshooting.
   one-time certificate and notarization setup it needs.
 - [Verification rail](verification.md): deterministic, services, GUI, and full verification tiers.
 - [Codex isolation](codex-isolation.md): the security boundary for Codex transforms.
-- [Model residency](model-residency.md): LM Studio loading, eviction, and residency verification.
+- [Model residency](model-residency.md): LM Studio and Ollama loading, eviction, and residency
+  verification.
 - [Sticky Skill trigger verification](sticky-skill-triggers.md): manual QA for the two UI triggers.

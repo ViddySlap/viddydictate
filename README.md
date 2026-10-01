@@ -18,9 +18,10 @@ the provider client. An optional Gemini key is stored in the macOS login keychai
   - Claude Code installed and signed in with a supported claude.ai subscription, or
   - ChatGPT.app installed in `/Applications`, followed by ViddyDictate's in-app Codex device login.
 
-Only one cloud provider is required. Raw dictation works without one. LM Studio is an optional
-local-provider path, but the current local cleanup and search route uses a 30B model that does not
-fit on a 16 GB Mac. On modest hardware, use Claude or Codex.
+Only one cloud provider is required. Raw dictation works without one. A local model app, LM Studio
+or Ollama, is optional (see [Local models](#local-models)), but the current local cleanup and search
+staff pick is a 30B model that does not fit on a 16 GB Mac in either app. On modest hardware, use
+Claude or Codex.
 
 Nothing else is a prerequisite. The app brings its own Python, and you do not need Xcode, the
 Command Line Tools, Homebrew, `ffmpeg`, or Node to run it. Those are needed only to
@@ -68,7 +69,11 @@ for it. Until the core is installed, the setup window comes back at each launch;
 window stays away, and **Run first-run setup again…** on the Setup tab brings it back.
 
 When the setup window closes, ViddyDictate helps you sign in to Claude or Codex if neither is ready
-yet.
+yet. After that, a fresh install opens the [Feature Tour](#feature-tour) once.
+
+Upgrading from an earlier version whose speech-to-text core already works shows neither window by
+itself: the setup window is there under **Run first-run setup again…**, and the tour under
+**Feature Tour…** in the menu bar.
 
 Measured cold on an empty account: **3m25s to working dictation**, and the rest of the core arrives
 behind it.
@@ -188,7 +193,7 @@ reports each missing requirement without blocking unrelated features.
      ViddyDictate uses a dedicated Codex home and does not read or change the everyday Codex login.
 2. On modest hardware, open Hotkeys and use "Set every route to its staff pick" to select the
    cloud provider just connected. Fresh routes are selected Local, which expects the optional
-   LM Studio models.
+   LM Studio models; with only Ollama running, they run on the largest Ollama model that fits.
 3. Grant the three macOS permissions when prompted:
    - Microphone, so the app can record.
    - Accessibility, so it can deliver text to the focused field.
@@ -215,6 +220,39 @@ the process arguments. No key is needed for dictation or the other text-provider
 Hotkeys, input behavior, provider/model routes, prompts, history, audio retention, and appearance are
 configurable in Settings.
 
+## Feature Tour
+
+The Feature Tour is an 11-page window that shows every feature: what it does, how to trigger it,
+and, where there is one, the thing you would not guess. Its chords are read from your own hotkey
+map, so a key you rebound shows as rebound. Page 3 has a practice box for your first dictation.
+The tour explains and can open the matching Settings tab; it never installs or changes anything.
+
+It opens by itself once, on a fresh install, after the setup window and provider sign-in. Open it
+again any time from the menu bar with **Feature Tour…**.
+
+## Local models
+
+Cleanup, prompt-prep, email, local web answers, custom modes, and Note to Handoff's image reading can
+run on a model on your Mac instead of Claude or Codex. The model runs in one of two apps:
+
+- **LM Studio**, the simple choice and the recommended one.
+- **Ollama**, the advanced choice, for people who already use it. Its first start asks for Touch ID
+  or your password so it can install its command-line tool; approve it. An Ollama installed only
+  with Homebrew is used when it is running, but ViddyDictate never starts it.
+
+You can use either, or both. The first-run setup window offers one; **Settings > Setup > Local model
+apps** installs, opens, or starts either later, and its **Preferred local app** choice is
+Automatic, LM Studio, or Ollama. Each route picks its own app and model on the Hotkeys tab. When a
+route's app is not running, it runs in the other local app instead, never in the cloud.
+
+Every built-in model and prompt, on every provider, is a **Staff pick**: the one we would use, and
+yours to change. "Set every route to its staff pick" on the Hotkeys tab puts every route back on a
+provider's staff picks.
+
+Local models stay inside the Setup tab's memory budget and unload after they sit idle. See
+[docs/local-model-apps.md](docs/local-model-apps.md) for how the two apps compare, how ViddyDictate
+picks between them, and the memory and context details.
+
 ## Verification
 
 For a cold checkout, install the locked npm dependencies before the offline rail:
@@ -226,8 +264,9 @@ npm ci
 
 The deterministic tier rebuilds both native and web artifacts and does not call a cloud provider.
 The `services`, `gui`, and `full` tiers require live provider logins, LM Studio, a graphical login
-session, and other host capabilities. See the [documentation index](docs/README.md) for audience
-guidance and [docs/verification.md](docs/verification.md) for the exact tier contract.
+session, and other host capabilities; their Ollama gates skip when Ollama is absent. See the
+[documentation index](docs/README.md) for audience guidance and
+[docs/verification.md](docs/verification.md) for the exact tier contract.
 
 ## Troubleshooting
 
