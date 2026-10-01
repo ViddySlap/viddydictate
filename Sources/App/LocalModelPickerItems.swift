@@ -139,7 +139,46 @@ enum LocalModelPickerItems {
     /// `LLMProviderBundle.local(ref:)` spells it. LM Studio is nil, the spelling every 1.1.0 bundle uses, so
     /// picking an LM Studio model on a one-app Mac writes no `localBackend` key at all. The same id in the
     /// OTHER app is a different model, so switching apps also drops the provenance.
-    static func applying(_ ref: LocalModelRef, to bundle: LLMProviderBundle) -> LLMProviderBundle {
+    ///
+    /// With the `route` and the effective Preferred local app (D1), two picks of a staff pick are told apart:
+    /// - the staff pick that runs now (the preferred app's) keeps the route UNTOUCHED, so it is written in the
+    ///   store's spelling for that, LM Studio's id with no key (`StaffPicks.followsPreferredApp`), and keeps
+    ///   following the Preferred app;
+    /// - LM Studio's copy picked while another app is preferred is the user choosing LM Studio, so the app is
+    ///   spelled out (`localBackend: lmStudio`) and the route stays on LM Studio.
+    /// With LM Studio preferred (the default) both rules write exactly what the plain pick writes.
+    static func applying(_ ref: LocalModelRef, to bundle: LLMProviderBundle, route: LLMRouteID? = nil,
+                         preferred: LocalBackendID = .lmStudio) -> LLMProviderBundle {
+        if let route, let lmStudioPick = LLMProviderDefaults.testedLocalBundle(for: route, on: .lmStudio) {
+            if LLMProviderDefaults.testedLocalBundle(for: route, on: preferred)?.localRef == ref {
+                return applyingPick(lmStudioPick.localRef, to: bundle)
+            }
+            if preferred != .lmStudio, ref == lmStudioPick.localRef {
+                var out = applyingPick(ref, to: bundle)
+                out.localBackend = .lmStudio
+                return out
+            }
+        }
+        return applyingPick(ref, to: bundle)
+    }
+
+    /// The Local route's bundle after the advanced editor saves a typed model id. The editor shows
+    /// `shown` (`ModelsPowerSettingsStore.displayedBundle`); when that differs from `stored` the route is an
+    /// untouched staff pick following the Preferred app, so saving the id it showed changes nothing, and any
+    /// other id runs in the app the route runs in now. When they are the same, the id is set as it always was.
+    static func applyingTypedID(_ modelID: String, stored: LLMProviderBundle,
+                                shown: LLMProviderBundle) -> LLMProviderBundle {
+        guard stored.provider == .local, shown != stored else {
+            var out = stored
+            out.modelID = modelID
+            return out
+        }
+        if modelID == shown.modelID { return stored }
+        return applyingPick(LocalModelRef(backend: shown.resolvedLocalBackend, modelID: modelID), to: stored)
+    }
+
+    /// The plain pick: what every pick wrote before the Preferred app mattered.
+    private static func applyingPick(_ ref: LocalModelRef, to bundle: LLMProviderBundle) -> LLMProviderBundle {
         var out = CodexPickerCatalog.applyingModelSelection(ref.modelID, to: bundle)
         if bundle.resolvedLocalBackend != ref.backend {
             out.ratified = nil

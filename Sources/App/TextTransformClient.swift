@@ -150,7 +150,8 @@ final class TextTransformRetryCenter {
                   settings.availabilityState(for: provider).canRun,
                   let bundle = settings.rememberedBundle(for: provider, route: summary.route)
             else { return nil }
-            return (provider, bundle)
+            // An untouched Local staff pick is offered as the pick that runs (D1), never rewritten.
+            return (provider, settings.followingPreferredApp(bundle, route: summary.route))
         }
     }
 

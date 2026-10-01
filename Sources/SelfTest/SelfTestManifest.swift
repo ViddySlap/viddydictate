@@ -483,6 +483,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         return FeatureTourRenderCases.run(outDir: arguments[i + 1]) ? 0 : 1
     },
+    // Scratch-only: real ModelsPowerSettingsStores under a fresh temporary directory with injected catalogs,
+    // capacity facts and an injected explicit Preferred local app. No LM Studio, no Ollama, no live preferences.
+    .staffPickFollowsAppSelftest: .init(tier: .deterministic) { _ in
+        StaffPickFollowsAppFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

@@ -81,7 +81,8 @@ enum StaffPicks {
         }
     }
 
-    /// Every local app's copy of the route's Local default, given that route's tested Local bundle.
+    /// Every local app's copy of the route's Local default, given that route's tested Local bundle (LM Studio's,
+    /// `LLMProviderDefaults.testedBundle(for: .local, route:)`).
     static func localRefs(tested: LLMProviderBundle?) -> Set<LocalModelRef> {
         guard let tested, tested.provider == .local, !tested.modelID.isEmpty else { return [] }
         return Set(LocalBackendID.allCases.compactMap { backend in
@@ -108,6 +109,42 @@ enum StaffPicks {
         case .claude, .codex:
             return bundle.modelID == shipped.modelID && bundle.effort == shipped.effort
         }
+    }
+
+    // MARK: - Untouched Local routes follow the Preferred local app (D1)
+
+    /// Whether a Local bundle is the route's UNTOUCHED staff pick, the one state that follows the Preferred
+    /// local app. It is a staff pick by the rule above, in the store's one spelling for "on the staff pick",
+    /// which predates backends: the tested Local bundle, LM Studio's id with NO `localBackend` key. Seeding,
+    /// "Set every route to its staff pick", Restore and a never-used provider all write exactly that, and so
+    /// does picking the staff pick that runs now (`LocalModelPickerItems.applying`).
+    ///
+    /// Anything else is the user's choice and keeps its exact (app, model): another id, or a bundle that names
+    /// its app. That includes Ollama's own staff pick picked by name, and LM Studio's spelled out
+    /// (`localBackend: lmStudio`), which is how a pick of LM Studio's copy is stored while another app is
+    /// preferred. Nothing new is stored to tell the two apart.
+    static func followsPreferredApp(_ bundle: LLMProviderBundle, route: LLMRouteID) -> Bool {
+        guard bundle.provider == .local, bundle.localBackend == nil,
+              let lmStudioPick = LLMProviderDefaults.testedLocalBundle(for: route, on: .lmStudio) else {
+            return false
+        }
+        return bundle.modelID == lmStudioPick.modelID && isStaffPick(bundle, route: route)
+    }
+
+    /// What `bundle` runs on this Mac when `preferred` is the effective Preferred local app
+    /// (`LocalBackendPreference.effective`): an untouched route runs that app's staff pick for the route; every
+    /// other bundle is returned unchanged. Read-only: storage is never rewritten, so a later switch of the
+    /// Preferred app moves the route again. With LM Studio preferred the pick IS the stored bundle, so an
+    /// LM-Studio Mac gets its bundle back unchanged, byte for byte. D2's cross-app step-down still applies
+    /// after this, when the pick does not fit or its app is down.
+    static func followingPreferredApp(_ bundle: LLMProviderBundle, route: LLMRouteID,
+                                      preferred: LocalBackendID) -> LLMProviderBundle {
+        guard followsPreferredApp(bundle, route: route),
+              let pick = LLMProviderDefaults.testedLocalBundle(for: route, on: preferred) else { return bundle }
+        var out = bundle
+        out.modelID = pick.modelID
+        out.localBackend = pick.localBackend
+        return out
     }
 
     /// The preset badge: "STAFF PICK <model>" or "CUSTOM <model>".

@@ -551,4 +551,20 @@ enum LLMProviderDefaults {
         return withTestedMetadata(bundle, route: route)
     }
 
+    /// The route's Local staff pick in ONE local app (D4: the same families on both apps), or nil when that
+    /// app has none for the route. LM Studio's is `testedBundle(for: .local, route:)` itself, byte for byte,
+    /// which is also how the store spells a route that follows the Preferred local app
+    /// (`StaffPicks.followsPreferredApp`). Another app's is that same bundle naming the app and its own tag.
+    static func testedLocalBundle(for route: LLMRouteID, on backend: LocalBackendID) -> LLMProviderBundle? {
+        guard let tested = testedBundle(for: .local, route: route),
+              let modelID = StaffPicks.localModelID(forLMStudioDefault: tested.modelID, on: backend) else {
+            return nil
+        }
+        var out = tested
+        out.modelID = modelID
+        out.localBackend = LLMProviderBundle.local(ref: LocalModelRef(backend: backend, modelID: modelID))
+            .localBackend
+        return out
+    }
+
 }

@@ -393,7 +393,8 @@ extension Preflight {
                 // Keep the execution resolver on the same measured Local state and catalog shown by this
                 // preflight pass. The catalog is runtime-only; no model inventory enters durable settings.
                 Settings.modelsPower.setLocalAvailabilityState(
-                    local.state, models: local.availableLocalModels)
+                    local.state, models: local.availableLocalModels,
+                    installedBackends: local.installedLocalBackends)
             }
             let helperInstalled = WebSearchBackend.isInstalled
             let keySource = SecretStore.resolveSource(.geminiAPIKey)

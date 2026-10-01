@@ -223,9 +223,9 @@ again. The human must then:
      try to bypass it. While ViddyDictate's installer waits, Ollama's row reads "waiting for you to
      approve Ollama's macOS prompt".
 3. On a Mac that will use the cloud path, open Hotkeys and use "Set every route to its staff pick"
-   to select the provider just connected. Fresh routes are selected Local and otherwise expect the
-   optional LM Studio models; with only Ollama running, they run on the largest Ollama model that
-   fits.
+   to select the provider just connected. Fresh routes are selected Local and run the Preferred
+   local app's staff picks (Settings > Setup; Automatic is the installed app, or LM Studio when both
+   or neither are), for example `gemma4:e4b` for email when only Ollama is installed.
 4. Start one dictation and approve the Microphone prompt.
 5. Enable ViddyDictate in System Settings > Privacy & Security > Accessibility and Input Monitoring.
 6. Quit and reopen ViddyDictate after changing Accessibility or Input Monitoring, then click Check

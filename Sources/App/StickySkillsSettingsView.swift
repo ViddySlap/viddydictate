@@ -22,6 +22,10 @@ final class StickySkillsSettingsView: NSView {
     private var codexCatalogCache: CodexModelCatalogCache?
     private var localCatalog: [LMStudioModelOption]?
     private var localCatalogRefreshInFlight = false
+    /// The effective Preferred local app the cards were last built for. An untouched Local staff pick shows
+    /// that app's pick (D1), so a change of Preferred app on the Setup tab rebuilds the cards; no other
+    /// setting does.
+    private var builtForLocalBackend: LocalBackendID?
     private var observers: [NSObjectProtocol] = []
 
     init(
@@ -54,6 +58,12 @@ final class StickySkillsSettingsView: NSView {
         observers.append(nc.addObserver(
             forName: ModelsPowerSettingsStore.didChange, object: settingsStore, queue: .main
         ) { [weak self] _ in self?.rebuild() })
+        observers.append(nc.addObserver(
+            forName: Settings.didChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.builtForLocalBackend != self.settingsStore.effectiveLocalBackend() else { return }
+            self.rebuild()
+        })
         rebuild()
     }
 
@@ -85,6 +95,7 @@ final class StickySkillsSettingsView: NSView {
     // MARK: - Build
 
     private func rebuild() {
+        builtForLocalBackend = settingsStore.effectiveLocalBackend()
         codexCatalogCache = codexCatalogLoader()
         subviews.forEach { $0.removeFromSuperview() }
         var y: CGFloat = 16
@@ -189,7 +200,8 @@ final class StickySkillsSettingsView: NSView {
             "Provider", x: 14, y: 99, width: 56,
             size: 10.5, weight: .regular, color: .secondaryLabelColor))
         card.addSubview(providerPopup(skill: skill, x: 74, y: 94, width: 160))
-        let selected = settingsStore.selectedBundle(for: skill.routeID)
+        // An untouched Local staff pick shows the pick that runs (D1); identical to the stored bundle otherwise.
+        let selected = settingsStore.displayedBundle(for: skill.routeID)
         let availability = settingsStore.availabilityState(for: selected.provider)
         let availableText = availability.canRun
             ? "Available"
@@ -339,9 +351,11 @@ final class StickySkillsSettingsView: NSView {
     /// both apps are in the list (`LocalModelPickerItems`). On one app every title is the pre-Ollama one.
     private func addLocalModelItems(to popup: NSPopUpButton, skill: StickySkill,
                                     selected: LLMProviderBundle) {
+        // The staff pick row is the effective Preferred local app's (D1), the one an untouched route runs.
         LocalModelPickerItems.populate(popup, with: LocalModelPickerItems.stickySkill(
             catalog: localCatalog, pinned: selected,
-            tested: LLMProviderDefaults.testedBundle(for: .local, route: skill.routeID)))
+            tested: LLMProviderDefaults.testedLocalBundle(
+                for: skill.routeID, on: settingsStore.effectiveLocalBackend())))
     }
 
     private func effortPopup(skill: StickySkill, selected: LLMProviderBundle,
@@ -433,7 +447,8 @@ final class StickySkillsSettingsView: NSView {
         // A Local row names its app as well as its id (see `LocalModelPickerItems`).
         let candidate: LLMProviderBundle
         if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
-            candidate = LocalModelPickerItems.applying(ref, to: current)
+            candidate = LocalModelPickerItems.applying(ref, to: current, route: skill.routeID,
+                                                       preferred: settingsStore.effectiveLocalBackend())
             LocalModelPickerItems.showSelectedTitleAsToolTip(sender)
         } else {
             candidate = CodexPickerCatalog.applyingModelSelection(model, to: current)
@@ -464,7 +479,14 @@ final class StickySkillsSettingsView: NSView {
         guard !modelID.isEmpty else { status("Model ID cannot be blank.", error: true); return }
         let rawEffort = effort.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidate = settingsStore.selectedBundle(for: skill.routeID)
-        candidate = CodexPickerCatalog.applyingModelSelection(modelID, to: candidate)
+        if candidate.provider == .local {
+            let shown = settingsStore.displayedBundle(for: skill.routeID)
+            candidate = shown == candidate
+                ? CodexPickerCatalog.applyingModelSelection(modelID, to: candidate)
+                : LocalModelPickerItems.applyingTypedID(modelID, stored: candidate, shown: shown)
+        } else {
+            candidate = CodexPickerCatalog.applyingModelSelection(modelID, to: candidate)
+        }
         candidate = CodexPickerCatalog.applyingEffortSelection(
             candidate.provider == .local ? "" : rawEffort, to: candidate)
         do {

@@ -242,12 +242,15 @@ run on a model on your Mac instead of Claude or Codex. The model runs in one of 
 
 You can use either, or both. The first-run setup window offers one; **Settings > Setup > Local model
 apps** installs, opens, or starts either later, and its **Preferred local app** choice is
-Automatic, LM Studio, or Ollama. Each route picks its own app and model on the Hotkeys tab. When a
-route's app is not running, it runs in the other local app instead, never in the cloud.
+Automatic, LM Studio, or Ollama (Automatic is the installed app, or LM Studio when both or neither
+are). A route you have not changed runs the Preferred app's staff pick, so on an Ollama Mac email
+runs `gemma4:e4b` out of the box. A route can also pick its own app and model on the Hotkeys tab,
+and then keeps them. When a route's app is not running, it runs in the other local app instead,
+never in the cloud.
 
 Every built-in model and prompt, on every provider, is a **Staff pick**: the one we would use, and
 yours to change. "Set every route to its staff pick" on the Hotkeys tab puts every route back on a
-provider's staff picks.
+provider's staff picks; for Local, that is the Preferred local app's.
 
 Local models stay inside the Setup tab's memory budget and unload after they sit idle. See
 [docs/local-model-apps.md](docs/local-model-apps.md) for how the two apps compare, how ViddyDictate

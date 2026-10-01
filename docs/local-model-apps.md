@@ -28,8 +28,16 @@ use Claude or Codex for those routes.
 Local dropdown lists every running app's models. With both apps running, each row is labelled
 `LM Studio · <model>` or `Ollama · <model>`; with one app, the label is left off. Picking a row pins
 that route to that app's copy of the model, so the same model name in both apps is never confused.
-Out of the box, the Local routes point at LM Studio's staff picks. Ollama's copy of a staff-pick
-model is marked "Staff pick" in the dropdown too, so to run a route on Ollama, pick it there.
+
+**Untouched routes follow the Preferred local app.** Out of the box every Local route is on its
+staff pick, and a route stays that way until you pick a model or an app for it. Such a route runs
+the **Preferred local app**'s staff pick (below): `gemma4:e4b` for email on an Ollama Mac,
+`google/gemma-4-e4b` on an LM Studio Mac. Nothing is rewritten when the Preferred app changes, so
+switching it, or installing the other app later, moves every untouched route with it, and the
+dropdowns and the "Local preset" line show the staff pick that will actually run. "Set every route
+to its staff pick" (Local) and **Restore** put routes back in this state. Picking the staff pick
+that runs now leaves the route untouched; picking any other row, including the other app's staff
+pick, pins that app and model, and the route keeps it whichever app is preferred.
 
 **Fallback crosses apps, never to the cloud.** When a route's model is not installed or does not
 fit in memory, ViddyDictate takes the largest model that fits in the same app. When that app is not
@@ -39,9 +47,13 @@ Claude or Codex: if neither app can run it, the transform is off and your raw di
 
 **Preferred local app.** Settings > Setup has a **Preferred local app** choice: Automatic, LM
 Studio, or Ollama. Automatic follows what is installed, and picks LM Studio when both or neither
-are. When Ollama.app is the preferred app, or a Local route is pinned to it, and it is installed but
-not running, ViddyDictate opens it once in the background and waits briefly for it. LM Studio's
-server is started when a model is loaded, as before.
+are. It decides which app's staff picks the untouched routes run, which app the install offer
+suggests on a Mac with neither, and which app ViddyDictate may start: when Ollama.app is the
+preferred app, or a Local route is pinned to it, and it is installed but not running, ViddyDictate
+opens it once in the background and waits briefly for it. LM Studio's server is started when a model
+is loaded, as before. When the preferred app's staff pick is not installed, does not fit, or its app
+is down, the fallback above applies. On a Mac with only LM Studio nothing changes from earlier
+versions: the routes, and the saved settings file, are exactly what they were.
 
 ## Installing
 

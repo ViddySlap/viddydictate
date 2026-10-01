@@ -933,7 +933,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let measured = LLMProviderDetection.observeLocal(starter: .live())
             DispatchQueue.main.async {
                 Settings.modelsPower.setLocalAvailabilityState(
-                    measured.presence.state, models: measured.models)
+                    measured.presence.state, models: measured.models,
+                    installedBackends: measured.presence.installedLocalBackends)
             }
         }
     }

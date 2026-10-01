@@ -161,6 +161,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Ollama lane S7 (G8): every tour page rendered offscreen from stubbed facts, non-blank, unclipped, with its
     // footer and its live rows, plus pages 1 and 6 at the largest UI size. GUI tier.
     case featureTourRender = "--feature-tour-render"
+    // Ollama lane S3d: an untouched Local route runs the effective Preferred local app's staff pick (D1/D4),
+    // decided at resolution time and never written; customized routes keep their (app, model); LM-Studio-only
+    // resolution and models-power.json are 1.1.0's byte for byte. Scratch stores; built-in mutants.
+    case staffPickFollowsAppSelftest = "--staff-pick-follows-app-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -166,14 +166,15 @@ final class ModelsPowerSettingsView: NSView {
     /// other providers remain available for switching, but they are not evidence about the selected model.
     ///
     /// A Local badge names its app by the Local picker's own rule (`LocalModelPickerItems.presetBadge`): only
-    /// when the route's picker over `localCatalog` names apps. With one app the badge is unchanged.
+    /// when the route's picker over `localCatalog` names apps. With one app the badge is unchanged. An
+    /// untouched Local staff pick reads as the pick that runs, the effective Preferred local app's (D1).
     static func provenancePresentation(
         for route: LLMRouteID,
         store: ModelsPowerSettingsStore,
         localCatalog: [LMStudioModelOption]? = nil,
         ratification: (LLMProvider) -> LLMRatificationState
     ) -> ProvenancePresentation {
-        let bundle = store.selectedBundle(for: route)
+        let bundle = store.displayedBundle(for: route)
         let badge = StaffPicks.provenanceRow(bundle: bundle, route: route,
                                              ratification: ratification(bundle.provider))
         return ProvenancePresentation(
@@ -563,7 +564,8 @@ final class ModelsPowerSettingsView: NSView {
 
     private func addModelEffortControls(to card: NSView, route: LLMRouteID, y: CGFloat,
                                         xOffset: CGFloat = 14) {
-        let selected = settingsStore.selectedBundle(for: route)
+        // An untouched Local staff pick shows the pick that runs (D1); identical to the stored bundle otherwise.
+        let selected = settingsStore.displayedBundle(for: route)
         card.addSubview(text("Model", x: xOffset, y: y + 4, width: 44,
                              size: 10.5, weight: .regular, color: .secondaryLabelColor))
         card.addSubview(modelPopup(route: route, selected: selected,
@@ -667,7 +669,7 @@ final class ModelsPowerSettingsView: NSView {
 
     private func addAdvancedBundleEditor(to card: NSView, route: LLMRouteID, y: CGFloat,
                                          xOffset: CGFloat = 14) -> CGFloat {
-        let selected = settingsStore.selectedBundle(for: route)
+        let selected = settingsStore.displayedBundle(for: route)
         card.addSubview(text("Custom ID", x: xOffset, y: y + 4, width: 64,
                              size: 10.5, weight: .regular, color: .secondaryLabelColor))
         let model = NSTextField(string: selected.modelID)
@@ -824,7 +826,8 @@ final class ModelsPowerSettingsView: NSView {
         // from Ollama's.
         let bundle: LLMProviderBundle
         if current.provider == .local, let ref = LocalModelPickerItems.selectedRef(in: sender) {
-            bundle = LocalModelPickerItems.applying(ref, to: current)
+            bundle = LocalModelPickerItems.applying(ref, to: current, route: route,
+                                                    preferred: settingsStore.effectiveLocalBackend())
             LocalModelPickerItems.showSelectedTitleAsToolTip(sender)
         } else {
             bundle = CodexPickerCatalog.applyingModelSelection(id, to: current)
@@ -854,7 +857,12 @@ final class ModelsPowerSettingsView: NSView {
         guard !model.isEmpty else { status("Custom model ID cannot be empty.", error: true); return }
         var bundle = settingsStore.selectedBundle(for: route)
         guard providerCanBeSelected(bundle.provider) else { return }
-        bundle.modelID = model
+        if bundle.provider == .local {
+            bundle = LocalModelPickerItems.applyingTypedID(
+                model, stored: bundle, shown: settingsStore.displayedBundle(for: route))
+        } else {
+            bundle.modelID = model
+        }
         let effort = effortField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         bundle.effort = bundle.provider == .local || effort.isEmpty ? nil : effort
         do {
@@ -1014,7 +1022,7 @@ final class ModelsPowerSettingsView: NSView {
         switch settingsStore.bulkProviderState(routes: spec.routes) {
         case .mixed: return "Mixed per-strength provider/model choices · open Advanced to review."
         case .provider(let provider):
-            let bundles = spec.routes.map { settingsStore.selectedBundle(for: $0) }
+            let bundles = spec.routes.map { settingsStore.displayedBundle(for: $0) }
             let models = Set(bundles.map(\.modelID))
             let effort = Set(bundles.compactMap(\.effort))
             let modelText = models.count == 1 ? compactModelName(models.first!) : "per-strength models"

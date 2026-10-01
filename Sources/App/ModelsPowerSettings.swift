@@ -146,6 +146,9 @@ final class ModelsPowerSettingsStore {
     /// (`liveLocalCapacity`); a self-test injects fixed facts so a fit decision cannot depend on
     /// whatever else happens to be resident on the box running it.
     typealias LocalCapacityProvider = ([LMStudioModelOption]?) -> LLMLocalCapacityFacts?
+    /// The EXPLICIT Preferred local app, nil for automatic. Production reads `Settings.preferredLocalBackend`;
+    /// a self-test injects its own so no live preference reaches a fixture.
+    typealias PreferredLocalBackendProvider = () -> LocalBackendID?
 
     static let shared: ModelsPowerSettingsStore = {
         let url = AppPaths.applicationSupportDirectory()
@@ -157,6 +160,7 @@ final class ModelsPowerSettingsStore {
     private let url: URL
     private let writer: Writer
     private let localCapacity: LocalCapacityProvider
+    private let preferredLocalBackend: PreferredLocalBackendProvider
     private var snapshot: ModelsPowerSnapshot
     private var mutationBlockDetail: String?
     private var pendingLegacyCustomRememberedBundles: [LLMProvider: LLMProviderBundle]
@@ -170,13 +174,18 @@ final class ModelsPowerSettingsStore {
     /// Runtime-only installed Local catalog. nil means discovery has not answered yet; an empty list is a
     /// measured zero-model state and is intentionally different from nil.
     private var localModelOptions: [LMStudioModelOption]?
+    /// Runtime-only: the local apps measured as installed, published with the catalog. nil until measured.
+    /// Only `effectiveLocalBackend` reads it.
+    private var installedLocalBackends: Set<LocalBackendID>?
 
     init(url: URL, legacy: ModelsPowerLegacyState = .empty,
          writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter,
-         localCapacity: @escaping LocalCapacityProvider = ModelsPowerSettingsStore.liveLocalCapacity) {
+         localCapacity: @escaping LocalCapacityProvider = ModelsPowerSettingsStore.liveLocalCapacity,
+         preferredLocalBackend: @escaping PreferredLocalBackendProvider = { Settings.preferredLocalBackend }) {
         self.url = url
         self.writer = writer
         self.localCapacity = localCapacity
+        self.preferredLocalBackend = preferredLocalBackend
         let fileExists = FileManager.default.fileExists(atPath: url.path)
         pendingLegacyCustomRememberedBundles = fileExists
             ? [:] : legacy.sharedCustomRememberedBundles
@@ -332,6 +341,32 @@ final class ModelsPowerSettingsStore {
         lock.withLock { localModelOptions }
     }
 
+    // MARK: the Preferred local app (D1)
+
+    /// The effective Preferred local app right now: the explicit choice, else the one installed app, else LM
+    /// Studio (`LocalBackendPreference.effective`). "Installed" is the last measurement's installed apps plus
+    /// every app its catalog lists (a running app is installed), so a caller that publishes only a catalog
+    /// still gets a true answer. Before any measurement it is the explicit choice or LM Studio, and Local is
+    /// unavailable then anyway.
+    func effectiveLocalBackend() -> LocalBackendID {
+        let (installed, models) = lock.withLock { (installedLocalBackends, localModelOptions) }
+        let measured = (installed ?? []).union((models ?? []).map(\.backend))
+        return LocalBackendPreference.effective(explicit: preferredLocalBackend(), installed: measured)
+    }
+
+    /// `bundle` as it runs on this Mac now: an untouched Local staff pick follows the effective Preferred local
+    /// app (`StaffPicks.followingPreferredApp`); every other bundle, Local or not, is returned unchanged.
+    /// Read-only. With LM Studio effective, the identity.
+    func followingPreferredApp(_ bundle: LLMProviderBundle, route: LLMRouteID) -> LLMProviderBundle {
+        StaffPicks.followingPreferredApp(bundle, route: route, preferred: effectiveLocalBackend())
+    }
+
+    /// What the route's pickers and preset line show: the selected bundle, with an untouched Local staff pick
+    /// shown as the staff pick that will actually run. Writes still go through the stored `selectedBundle`.
+    func displayedBundle(for route: LLMRouteID) -> LLMProviderBundle {
+        followingPreferredApp(selectedBundle(for: route), route: route)
+    }
+
     /// Resolve who actually runs `route` right now (locked decision 4). Read-only by contract: a provider
     /// hop is an execution decision, never a durable one, so `selectedBundle` keeps returning the user's
     /// pin and the route snaps back to it the moment that provider is available again.
@@ -353,12 +388,17 @@ final class ModelsPowerSettingsStore {
                       failedLocalModelID: String? = nil,
                       failedLocalRef: LocalModelRef? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
-        let pin = selectedBundle(for: route, fallback: fallback)
+        // D1: an untouched Local staff pick runs the effective Preferred local app's pick. Decided once per
+        // resolution, before D2's fallback, and never written back.
+        let preferred = effectiveLocalBackend()
+        let pin = StaffPicks.followingPreferredApp(
+            selectedBundle(for: route, fallback: fallback), route: route, preferred: preferred)
         return LLMAvailabilityRouting.resolve(
             pin: pin,
             bundle: { provider in
-                rememberedBundle(for: provider, route: route)
-                    ?? LLMProviderDefaults.testedBundle(for: provider, route: route)
+                (rememberedBundle(for: provider, route: route)
+                    ?? LLMProviderDefaults.testedBundle(for: provider, route: route))
+                    .map { StaffPicks.followingPreferredApp($0, route: route, preferred: preferred) }
             },
             availability: { availabilityState(for: $0) },
             localModels: localModels,
@@ -381,9 +421,11 @@ final class ModelsPowerSettingsStore {
                            failedLocalModelID: String? = nil,
                            failedLocalRef: LocalModelRef? = nil) -> LLMRouteResolution {
         let localModels = availableLocalModelOptions()
-        let pin = rememberedBundle(for: .local, route: route)
-            ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
-            ?? LLMProviderDefaults.testedBundle(for: .local, route: route)!
+        let pin = followingPreferredApp(
+            rememberedBundle(for: .local, route: route)
+                ?? fallback.flatMap { $0.provider == .local ? Self.canonicalBundle($0, route: route) : nil }
+                ?? LLMProviderDefaults.testedBundle(for: .local, route: route)!,
+            route: route)
         return LLMAvailabilityRouting.resolve(
             pin: pin,
             bundle: { $0 == .local ? pin : nil },
@@ -682,8 +724,11 @@ final class ModelsPowerSettingsStore {
 
     func setAvailabilityState(_ state: LLMProviderAvailabilityState, for provider: LLMProvider) {
         let changed = lock.withLock { () -> Bool in
-            let modelsChanged = provider == .local && localModelOptions != nil
-            if provider == .local { localModelOptions = nil }
+            let modelsChanged = provider == .local && (localModelOptions != nil || installedLocalBackends != nil)
+            if provider == .local {
+                localModelOptions = nil
+                installedLocalBackends = nil
+            }
             guard availability[provider] != state || modelsChanged else { return false }
             availability[provider] = state
             return true
@@ -694,14 +739,18 @@ final class ModelsPowerSettingsStore {
 
     /// Publish one measured Local state and its catalog together. The catalog is runtime-only and never
     /// enters Models & Power's durable JSON, while the state drives all execution-time route decisions.
+    /// `installedBackends` is the same measurement's installed apps (`Presence.installedLocalBackends`), which
+    /// the effective Preferred local app needs; nil when the caller did not measure them.
     func setLocalAvailabilityState(_ state: LLMProviderAvailabilityState,
-                                   models: [LMStudioModelOption]?) {
+                                   models: [LMStudioModelOption]?,
+                                   installedBackends: Set<LocalBackendID>? = nil) {
         let changed = lock.withLock { () -> Bool in
             let stateChanged = availability[.local] != state
-            let modelsChanged = localModelOptions != models
+            let modelsChanged = localModelOptions != models || installedLocalBackends != installedBackends
             guard stateChanged || modelsChanged else { return false }
             availability[.local] = state
             localModelOptions = models
+            installedLocalBackends = installedBackends
             return true
         }
         guard changed else { return }
