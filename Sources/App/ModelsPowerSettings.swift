@@ -142,6 +142,10 @@ struct CodexBundleCASResult: Equatable {
 final class ModelsPowerSettingsStore {
     static let didChange = Notification.Name("VDModelsPowerSettingsDidChange")
     typealias Writer = (Data, URL) throws -> Void
+    /// The machine's Local capacity facts for a measured catalog. Production reads the live kernel
+    /// (`liveLocalCapacity`); a self-test injects fixed facts so a fit decision cannot depend on
+    /// whatever else happens to be resident on the box running it.
+    typealias LocalCapacityProvider = ([LMStudioModelOption]?) -> LLMLocalCapacityFacts?
 
     static let shared: ModelsPowerSettingsStore = {
         let url = AppPaths.applicationSupportDirectory()
@@ -152,6 +156,7 @@ final class ModelsPowerSettingsStore {
     private let lock = NSLock()
     private let url: URL
     private let writer: Writer
+    private let localCapacity: LocalCapacityProvider
     private var snapshot: ModelsPowerSnapshot
     private var mutationBlockDetail: String?
     private var pendingLegacyCustomRememberedBundles: [LLMProvider: LLMProviderBundle]
@@ -167,9 +172,11 @@ final class ModelsPowerSettingsStore {
     private var localModelOptions: [LMStudioModelOption]?
 
     init(url: URL, legacy: ModelsPowerLegacyState = .empty,
-         writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter) {
+         writer: @escaping Writer = ModelsPowerSettingsStore.atomicWriter,
+         localCapacity: @escaping LocalCapacityProvider = ModelsPowerSettingsStore.liveLocalCapacity) {
         self.url = url
         self.writer = writer
+        self.localCapacity = localCapacity
         let fileExists = FileManager.default.fileExists(atPath: url.path)
         pendingLegacyCustomRememberedBundles = fileExists
             ? [:] : legacy.sharedCustomRememberedBundles
@@ -350,7 +357,7 @@ final class ModelsPowerSettingsStore {
             },
             availability: { availabilityState(for: $0) },
             localModels: localModels,
-            localCapacity: Self.liveLocalCapacity(models: localModels),
+            localCapacity: localCapacity(localModels),
             localFailure: Self.localCapacityRefusal(
                 in: failedProviders, failedModelID: failedLocalModelID ?? pin.modelID),
             failedProviders: failedProviders)
@@ -375,13 +382,34 @@ final class ModelsPowerSettingsStore {
     /// no process spawn). Any of the three being unreadable, or no local catalog measured yet, means
     /// "do not filter" (nil) rather than a facts struct that would refuse everything with fabricated
     /// zeros.
-    private static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
+    ///
+    /// The resident set comes from `LocalResidentSetCache`, read against the same wired reading: a model
+    /// already resident costs nothing new, exactly as `ModelManager` decides. It is read only after the
+    /// kernel facts, so a Mac whose capacity is unreadable never asks LM Studio, and it never blocks
+    /// resolution: a slow or failed read is an empty set, the old arithmetic.
+    static func liveLocalCapacity(models: [LMStudioModelOption]?) -> LLMLocalCapacityFacts? {
+        liveLocalCapacity(models: models, residents: .shared)
+    }
+
+    /// `liveLocalCapacity` over an explicit resident-set cache, so a gate can drive the whole live path with
+    /// an injected reader.
+    static func liveLocalCapacity(models: [LMStudioModelOption]?,
+                                  residents: LocalResidentSetCache) -> LLMLocalCapacityFacts? {
         guard let models, !models.isEmpty,
               let wired = SystemMemory.wiredBytes,
               let budget = SystemMemory.budgetBytes(forSliderPosition: Settings.modelMemoryBudgetSliderPosition)
         else { return nil }
+        return capacityFacts(models: models, wiredBytes: wired, budgetBytes: budget,
+                             residentModelIDs: residents.residentModelIDs(wiredBytes: wired))
+    }
+
+    /// The pure half of `liveLocalCapacity`, so a gate can check the arithmetic without the kernel.
+    /// `residentModelIDs` defaults to empty: no resident model is exempted, the arithmetic before residency.
+    static func capacityFacts(models: [LMStudioModelOption], wiredBytes: UInt64, budgetBytes: UInt64,
+                              residentModelIDs: Set<String> = []) -> LLMLocalCapacityFacts {
         let sizes = Dictionary(uniqueKeysWithValues: models.compactMap { m in m.sizeBytes.map { (m.modelID, $0) } })
-        return LLMLocalCapacityFacts(sizeBytes: { sizes[$0] }, wiredBytes: wired, budgetBytes: budget)
+        return LLMLocalCapacityFacts(sizeBytes: { sizes[$0] }, wiredBytes: wiredBytes, budgetBytes: budgetBytes,
+                                     residentModelIDs: residentModelIDs)
     }
 
     // MARK: durable mutations

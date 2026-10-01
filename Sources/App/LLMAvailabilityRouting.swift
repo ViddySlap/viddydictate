@@ -70,12 +70,36 @@ enum LLMRouteResolution: Equatable {
 /// Local-model capacity facts needed to judge fit, injected so LLMAvailabilityRouting itself never
 /// spawns a process or reads the kernel. `fits` runs the identical arithmetic
 /// ModelManager.fits/estimatedIncomingBytes already implement rather than a second copy.
+///
+/// `residentModelIDs` is what LM Studio holds RIGHT NOW, by `lms ps` identifier. Live wired memory already
+/// contains every resident model, so charging a resident model's size again on top of it counts it twice:
+/// with qwen3-coder-30b and gemma resident on a 64 GB Mac, neither "fit" the default budget and routing
+/// stepped a working route down or off. `ModelManager.prepareCapacity` never charges a resident model (it
+/// returns `.alreadyResident`), and this agrees with it: a resident model's incoming cost is 0, so it fits
+/// whenever the machine already holds it. The set defaults to empty, which is the old arithmetic exactly,
+/// and an unreadable resident set is empty too, so a failed read can only ever refuse more, never less.
 struct LLMLocalCapacityFacts {
     let sizeBytes: (String) -> Int64?
     let wiredBytes: UInt64
     let budgetBytes: UInt64
+    /// LM Studio identifiers from the same `lms ps` read `ModelManager` matches a request against.
+    let residentModelIDs: Set<String>
+
+    init(sizeBytes: @escaping (String) -> Int64?, wiredBytes: UInt64, budgetBytes: UInt64,
+         residentModelIDs: Set<String> = []) {
+        self.sizeBytes = sizeBytes
+        self.wiredBytes = wiredBytes
+        self.budgetBytes = budgetBytes
+        self.residentModelIDs = residentModelIDs
+    }
+
+    /// Is `modelID` loaded in LM Studio right now? Then it allocates nothing new.
+    func isResident(_ modelID: String) -> Bool {
+        residentModelIDs.contains(modelID)
+    }
 
     func fits(_ modelID: String) -> Bool {
+        if isResident(modelID) { return true }
         guard let size = sizeBytes(modelID), size > 0,
               let incoming = ModelManager.estimatedIncomingBytes(sizeBytes: size)
         else { return true } // unmeasured: do not block a model we cannot size
@@ -127,6 +151,11 @@ enum LLMAvailabilityRouting {
     /// same policy tell "LM Studio is running" from "the preferred model is not installed" and select the
     /// best installed catalog entry without confusing the two states.
     static let fallbackOrder: [LLMProvider] = [.claude, .codex, .local]
+
+    /// A Local pin's off reason when local models ARE installed but none of them fits the memory budget right
+    /// now. Distinct from "local pin has no installed model", which stays the reason for an empty catalog.
+    static let nothingFitsReason =
+        "no installed local model fits the memory budget; free memory or adjust it on the Setup tab"
 
     /// Pure policy. `bundle` supplies a provider's configured bundle for the route (nil when the route has
     /// no bundle for it), `availability` supplies live provider state, and `localModels` is the measured
@@ -193,7 +222,11 @@ enum LLMAvailabilityRouting {
                              bundle: bundle, failedProviders: failedProviders))
             }
             guard let candidate = localCandidate() else {
-                return .off(reason: "local pin has no installed model; automatic cloud fallback is disabled - "
+                // A configured Local arm over a non-empty catalog only comes back empty-handed when nothing
+                // in it fits, so say that rather than claiming nothing is installed.
+                let opening = bundle(.local) != nil && !(localModels ?? []).isEmpty
+                    ? nothingFitsReason : "local pin has no installed model"
+                return .off(reason: opening + "; automatic cloud fallback is disabled - "
                     + detail(for: .local, state: pinState, localModels: localModels,
                              bundle: bundle, failedProviders: failedProviders))
             }

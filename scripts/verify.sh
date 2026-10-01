@@ -549,6 +549,9 @@ tier_deterministic() {
         run_gate deterministic "model-fit retry wiring arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --modelfit-wiring-selftest || true
+        run_gate deterministic "resident models are not charged twice by route fit (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --resident-fit-selftest || true
         run_gate deterministic "app-update compare arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --app-update-selftest --only compare || true
