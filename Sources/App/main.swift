@@ -159,8 +159,14 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // it), the copy, page 6, and the practice box's relaunch state. Pure; built-in mutants.
     case featureTourSelftest = "--feature-tour-selftest"
     // Ollama lane S7 (G8): every tour page rendered offscreen from stubbed facts, non-blank, unclipped, with its
-    // footer and its live rows, plus pages 1 and 6 at the largest UI size. GUI tier.
+    // footer and its live rows, plus pages 1 and 6 at the largest UI size; since S7b under both the light and the
+    // dark system appearance, with every label and button title at 4.5:1, the title present, and all 11 dots
+    // counted in the pixels. GUI tier.
     case featureTourRender = "--feature-tour-render"
+    // Ollama lane S7b: the tour as a REAL on-screen window in the test app, every page held so a Mac worker can
+    // `screencapture -l` it, plus an in-process window capture attempt. Opt-in GUI tier, NOT run by verify.sh.
+    // Named so neither it nor any other flag contains the other.
+    case featureTourOnscreenProof = "--feature-tour-onscreen-proof"
     // Ollama lane S3d: an untouched Local route runs the effective Preferred local app's staff pick (D1/D4),
     // decided at resolution time and never written; customized routes keep their (app, model); LM-Studio-only
     // resolution and models-power.json are 1.1.0's byte for byte; an OLLAMA_HOST on another machine is never

@@ -483,6 +483,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         return FeatureTourRenderCases.run(outDir: arguments[i + 1]) ? 0 : 1
     },
+    // Opt-in and deliberately absent from scripts/verify.sh: it puts the real tour window on screen and holds
+    // each page (default 1 s, or the optional seconds after the directory) for an outside `screencapture -l`.
+    .featureTourOnscreenProof: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--feature-tour-onscreen-proof"), i + 1 < arguments.count else {
+            print("[feature-tour-onscreen-proof] FAIL: an output directory is required")
+            return 2
+        }
+        let hold = i + 2 < arguments.count ? TimeInterval(arguments[i + 2]) : nil
+        return FeatureTourOnscreenProof.run(outDir: arguments[i + 1], hold: max(0, hold ?? 1)) ? 0 : 1
+    },
     // Scratch-only: real ModelsPowerSettingsStores under a fresh temporary directory with injected catalogs,
     // capacity facts and an injected explicit Preferred local app; the real OllamaBackend over a transport that
     // records every request, and a recorder for the app launch. No LM Studio, no Ollama, no live preferences.

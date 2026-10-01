@@ -42,6 +42,14 @@ final class FeatureTourWindowController: NSObject, NSWindowDelegate {
     private var pageHeight: CGFloat = 0
 
     static let contentWidth: CGFloat = 620
+    /// The tour is drawn in the HUD's phosphor language (the point-of-use offer panel's): green type and cells on
+    /// the dark phosphor panel, whatever the Mac is set to. Its own colours are fixed, so the system setting does
+    /// not touch them; this pin covers what AppKit still draws for it - the title bar, the scroller, the practice
+    /// box's text view, and the amber `systemOrange` - so those are the dark variants too. Set on the window AND
+    /// on every page, because the render gate builds pages without the window.
+    static let drawingAppearance = NSAppearance(named: .darkAqua)
+    /// The phosphor panel fill (`Phosphor.panelBG`), opaque: nothing the system draws behind it can show through.
+    static var panelColor: NSColor { Phosphor.panelBG.withAlphaComponent(1) }
     /// The window grows to the tallest page so Back and Next never move between pages, up to this cap; a page
     /// taller than the cap scrolls rather than pushing the window off a small screen.
     static let minimumPageHeight: CGFloat = 520
@@ -181,6 +189,10 @@ final class FeatureTourWindowController: NSObject, NSWindowDelegate {
         w.title = FeatureTour.windowTitle
         w.isReleasedWhenClosed = false
         w.delegate = self
+        w.appearance = Self.drawingAppearance
+        // The title bar sits on the phosphor panel rather than on a grey system strip.
+        w.titlebarAppearsTransparent = true
+        w.backgroundColor = Self.panelColor
         let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -205,8 +217,10 @@ final class FeatureTourWindowController: NSObject, NSWindowDelegate {
 }
 
 /// One tour page, drawn: the step, the title, the body, the "worth knowing" card, the keys card read from the live
-/// map, the page's live readout, its Settings link, and the footer. Flipped, top to bottom, in the setup windows'
-/// `SettingsSectionKit` idiom.
+/// map, the page's live readout, its Settings link, and the footer. Flipped, top to bottom. Drawn in the point-of-use
+/// offer panel's phosphor language, from its own parts: the panel fill, `Phosphor.kerned` headings, the phosphor
+/// font, `Phosphor.styleCell` cards and buttons (Next is the selected, glowing one), and the HUD's glow on the
+/// highlighted values.
 final class FeatureTourPageView: NSView {
     override var isFlipped: Bool { true }
 
@@ -262,6 +276,7 @@ final class FeatureTourPageView: NSView {
         self.facts = facts
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 10))
         identifier = NSUserInterfaceItemIdentifier("feature-tour-page-\(page.id)")
+        appearance = FeatureTourWindowController.drawingAppearance
         build(minimumHeight: minimumHeight)
     }
 
@@ -270,26 +285,29 @@ final class FeatureTourPageView: NSView {
     // MARK: - build
 
     private func build(minimumHeight: CGFloat) {
+        // The phosphor panel, opaque, so no system window colour shows through it under either appearance.
+        wantsLayer = true
+        layer?.backgroundColor = FeatureTourWindowController.panelColor.cgColor
+
         let contentW = W - 2 * L
         let map = facts.hotkeys
         var y: CGFloat = 20
 
-        let step = SettingsSectionKit.label(FeatureTour.stepText(index, of: count), x: L, y: y, width: contentW,
-                                            size: 11, weight: .medium, color: .secondaryLabelColor)
+        let step = Self.kernedLabel(FeatureTour.stepText(index, of: count), x: L, y: y, width: contentW,
+                                    size: 11, kern: 1.5, color: Style.hint)
         step.identifier = NSUserInterfaceItemIdentifier(ID.step)
         addSubview(step)
-        y = step.frame.maxY + 4
+        y = step.frame.maxY + 6
 
-        let title = SettingsSectionKit.label(page.title, x: L, y: y, width: contentW, size: 20,
-                                             weight: .semibold, color: .labelColor)
-        title.frame.size.height = 28
+        // The offers' heading: letter-spaced phosphor green, here at page-title size.
+        let title = Self.kernedLabel(page.title, x: L, y: y, width: contentW, size: 18, kern: 2.5,
+                                     color: Style.heading)
         title.identifier = NSUserInterfaceItemIdentifier(ID.title)
         addSubview(title)
-        y = title.frame.maxY + 10
+        y = title.frame.maxY + 12
 
         for (line, text) in page.renderedBody(map: map).enumerated() {
-            let field = SettingsSectionKit.wrapped(text, x: L, y: y, width: contentW, size: 13,
-                                                   color: .labelColor)
+            let field = Self.wrapped(text, x: L, y: y, width: contentW, size: 13, color: Style.body)
             field.identifier = NSUserInterfaceItemIdentifier(ID.body(line))
             addSubview(field)
             y = field.frame.maxY + 8
@@ -308,12 +326,10 @@ final class FeatureTourPageView: NSView {
         case nil: break
         }
         if let tab = page.settingsLink {
-            let button = NSButton(title: FeatureTour.settingsButtonTitle(tab), target: self,
-                                  action: #selector(openSettingClicked))
-            button.bezelStyle = .rounded
+            let button = Self.button(FeatureTour.settingsButtonTitle(tab), selected: false, target: self,
+                                     action: #selector(openSettingClicked))
             button.identifier = NSUserInterfaceItemIdentifier(ID.openSetting)
-            button.sizeToFit()
-            button.frame = NSRect(x: L - 6, y: y + 12, width: button.frame.width + 16, height: 28)
+            button.frame.origin = NSPoint(x: L, y: y + 12)
             addSubview(button)
             y = button.frame.maxY
         }
@@ -324,13 +340,105 @@ final class FeatureTourPageView: NSView {
         frame = NSRect(x: frame.origin.x, y: frame.origin.y, width: W, height: footerY + Self.footerHeight)
     }
 
-    /// A card with a section header; `fill` lays the contents out from `y` inside it and returns the bottom.
+    /// The tour's phosphor palette: `Phosphor.green` at the offer panel's alphas, raised where the offer's idle
+    /// alphas would fall under 4.5:1 on a card (the offer's 0.42 detail is 3.3:1 there). Amber, the setup
+    /// windows' `systemOrange`, keeps meaning "needs you". Read live, so a changed theme accent recolours it.
+    enum Style {
+        static var heading: NSColor { Phosphor.green.withAlphaComponent(0.92) }
+        static var body: NSColor { Phosphor.green.withAlphaComponent(0.9) }
+        /// Card headings, the step line, secondary readouts: 5:1 or better on a card.
+        static var muted: NSColor { Phosphor.green.withAlphaComponent(0.65) }
+        /// Row names inside a card.
+        static var row: NSColor { Phosphor.green.withAlphaComponent(0.85) }
+        static var hint: NSColor { Phosphor.green.withAlphaComponent(0.6) }
+        /// Highlighted values: chords, GRANTED, RUNNING, the current page dot, the selected button.
+        static var lit: NSColor { Phosphor.green }
+        static var attention: NSColor { .systemOrange }
+        /// The unlit page dots: 4:1 on the panel, clearly dimmer than the lit one.
+        static var dot: NSColor { Phosphor.green.withAlphaComponent(0.5) }
+
+        /// The HUD's phosphor glow on a highlighted value (the Settings heading's: 0.6, 6 pt).
+        static var glow: NSShadow {
+            let shadow = NSShadow()
+            shadow.shadowColor = Phosphor.green.withAlphaComponent(0.6)
+            shadow.shadowBlurRadius = 6
+            shadow.shadowOffset = .zero
+            return shadow
+        }
+
+        static func font(_ size: CGFloat) -> NSFont { NSFont(name: Phosphor.font, size: size) ?? .systemFont(ofSize: size) }
+    }
+
+    /// One line in the offers' kerned phosphor type (`Phosphor.kerned`). Truncates rather than wraps.
+    static func kernedLabel(_ value: String, x: CGFloat, y: CGFloat, width: CGFloat, size: CGFloat, kern: CGFloat,
+                            color: NSColor, glow: Bool = false) -> NSTextField {
+        let field = NSTextField(labelWithString: value)
+        field.lineBreakMode = .byTruncatingTail
+        field.textColor = color
+        let line = NSMutableAttributedString(attributedString: Phosphor.kerned(value, color: color, size: size,
+                                                                               kern: kern))
+        if glow { line.addAttribute(.shadow, value: Style.glow, range: NSRange(location: 0, length: line.length)) }
+        field.attributedStringValue = line
+        field.frame = NSRect(x: x, y: y, width: width, height: ceil(size * 1.25) + 4)
+        return field
+    }
+
+    /// Wrapping text in the offers' body type: the phosphor font, 3 pt line spacing. Sized to what the text needs
+    /// at this width (the larger of AppKit's fit and the laid-out text), so nothing is clipped.
+    static func wrapped(_ value: String, x: CGFloat, y: CGFloat, width: CGFloat, size: CGFloat,
+                        color: NSColor) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: value)
+        field.textColor = color
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        field.attributedStringValue = NSAttributedString(string: value, attributes: [
+            .font: Style.font(size), .foregroundColor: color, .paragraphStyle: paragraph,
+        ])
+        field.preferredMaxLayoutWidth = width
+        let fitted = field.sizeThatFits(NSSize(width: width, height: .greatestFiniteMagnitude))
+        let laid = field.attributedStringValue.boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        field.frame = NSRect(x: x, y: y, width: width, height: ceil(max(fitted.height, laid.height + 2)))
+        return field
+    }
+
+    /// A phosphor button: an offer cell's chrome (`Phosphor.styleCell`: dark cell, green border, and the glow
+    /// when selected) around a kerned phosphor title. `selected` is the one Return presses.
+    static func button(_ title: String, selected: Bool, enabled: Bool = true, target: AnyObject?,
+                       action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: target, action: action)
+        button.isBordered = false
+        button.isEnabled = enabled
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 8
+        button.layer?.borderWidth = 1.5
+        Phosphor.styleCell(button, selected: selected && enabled)
+        let alpha: CGFloat = !enabled ? 0.3 : (selected ? 0.98 : 0.8)
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        button.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: Style.font(13), .kern: 1.2, .paragraphStyle: centred,
+            .foregroundColor: Phosphor.green.withAlphaComponent(alpha),
+        ])
+        let width = max(90, ceil(button.attributedTitle.size().width) + 32)
+        button.frame = NSRect(x: 0, y: 0, width: width, height: 28)
+        return button
+    }
+
+    /// A phosphor card, an offer cell at rest (`Phosphor.styleCell`, unselected), with its kerned heading;
+    /// `fill` lays the contents out from `y` inside it and returns the bottom.
     private func addCard(_ header: String, identifier: String, at originY: CGFloat, width: CGFloat,
                          fill: (NSView, CGFloat, CGFloat) -> CGFloat) -> CGFloat {
-        let card = SettingsSectionKit.card(frame: NSRect(x: L, y: originY, width: width, height: 0),
-                                           identifier: identifier)
+        let card = FlippedSectionView(frame: NSRect(x: L, y: originY, width: width, height: 0))
+        card.identifier = NSUserInterfaceItemIdentifier(identifier)
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 10
+        card.layer?.borderWidth = 1.5
+        Phosphor.styleCell(card, selected: false)
         addSubview(card)
-        let heading = SettingsSectionKit.sectionHeader(header, x: 14, y: 11, width: width - 28)
+        let heading = Self.kernedLabel(header, x: 14, y: 11, width: width - 28, size: 10, kern: 1.2,
+                                       color: Style.muted)
         card.addSubview(heading)
         let bottom = fill(card, heading.frame.maxY + 6, width - 28)
         card.frame.size.height = bottom + 12
@@ -339,21 +447,21 @@ final class FeatureTourPageView: NSView {
 
     private func addNonObvious(_ note: String, at y: CGFloat, width: CGFloat) -> CGFloat {
         addCard(FeatureTour.nonObviousHeader, identifier: ID.nonObvious, at: y, width: width) { card, y, w in
-            let field = SettingsSectionKit.wrapped(note, x: 14, y: y, width: w, size: 12.5, color: .labelColor)
+            let field = Self.wrapped(note, x: 14, y: y, width: w, size: 12.5, color: Style.body)
             card.addSubview(field)
             return field.frame.maxY
         }
     }
 
-    /// Each slot the page teaches, with its key as the Hotkeys tab draws it, and the Hotkeys tab's own row label.
+    /// Each slot the page teaches, with its key as the Hotkeys tab draws it (lit, with the HUD's glow), and the
+    /// Hotkeys tab's own row label.
     private func addKeys(at y: CGFloat, width: CGFloat) -> CGFloat {
         addCard(FeatureTour.keysHeader, identifier: ID.keysCard, at: y, width: width) { card, y, w in
             var row = y
             let chipW: CGFloat = 104
             for slot in page.commands {
-                let chip = SettingsSectionKit.label(FeatureTour.chordLabel(slot, map: facts.hotkeys), x: 14, y: row,
-                                                    width: chipW, size: 12, weight: .medium, color: Phosphor.green)
-                chip.font = NSFont(name: Phosphor.font, size: 12) ?? chip.font
+                let chip = Self.kernedLabel(FeatureTour.chordLabel(slot, map: facts.hotkeys), x: 14, y: row,
+                                            width: chipW, size: 12.5, kern: 0.5, color: Style.lit, glow: true)
                 chip.identifier = NSUserInterfaceItemIdentifier(ID.chord(slot))
                 card.addSubview(chip)
                 let name: String
@@ -361,9 +469,9 @@ final class FeatureTourPageView: NSView {
                 case .wakeup: name = FeatureTour.wakeupRowLabel
                 case .command(let command): name = command.label
                 }
-                card.addSubview(SettingsSectionKit.label(name, x: 14 + chipW + 8, y: row, width: w - chipW - 8,
-                                                         size: 12, weight: .regular, color: .labelColor))
-                row += 20
+                card.addSubview(Self.kernedLabel(name, x: 14 + chipW + 8, y: row, width: w - chipW - 8, size: 12,
+                                                 kern: 0.3, color: Style.row))
+                row += 21
             }
             return row - 4
         }
@@ -375,14 +483,14 @@ final class FeatureTourPageView: NSView {
             var row = y
             for permission in SetupPermission.allCases {
                 let granted = facts.permissions.isGranted(permission)
-                let color: NSColor = granted ? Phosphor.green : .systemOrange
-                card.addSubview(SettingsSectionKit.label(granted ? "\u{2713}" : "\u{2717}", x: 14, y: row,
-                                                         width: 22, size: 13, weight: .bold, color: color))
-                card.addSubview(SettingsSectionKit.label(permission.title, x: 40, y: row, width: w - 146,
-                                                         size: 12.5, weight: .medium, color: .labelColor))
-                let word = SettingsSectionKit.label(
-                    granted ? PermissionsScreen.grantedText : PermissionsScreen.pendingText,
-                    x: w - 100 + 14, y: row + 2, width: 100, size: 10, weight: .semibold, color: color)
+                let color: NSColor = granted ? Style.lit : Style.attention
+                card.addSubview(Self.kernedLabel(granted ? "\u{2713}" : "\u{2717}", x: 14, y: row, width: 22,
+                                                 size: 13, kern: 0, color: color, glow: granted))
+                card.addSubview(Self.kernedLabel(permission.title, x: 40, y: row, width: w - 146, size: 12.5,
+                                                 kern: 0.3, color: Style.row))
+                let word = Self.kernedLabel(granted ? PermissionsScreen.grantedText : PermissionsScreen.pendingText,
+                                            x: w - 100 + 14, y: row + 2, width: 100, size: 10, kern: 1.2,
+                                            color: color)
                 word.alignment = .right
                 word.identifier = NSUserInterfaceItemIdentifier(ID.permission(permission))
                 card.addSubview(word)
@@ -399,17 +507,15 @@ final class FeatureTourPageView: NSView {
             for app in LocalAppRows.build(presence: facts.localPresence) {
                 let running: Bool
                 if case .running = app.state { running = true } else { running = false }
-                let color: NSColor = running ? Phosphor.green
-                    : (app.needsAttention ? .systemOrange : .secondaryLabelColor)
-                card.addSubview(SettingsSectionKit.label(app.title, x: 14, y: row, width: w - 140, size: 12.5,
-                                                         weight: .medium, color: .labelColor))
-                let word = SettingsSectionKit.label(app.stateWord, x: w - 120 + 14, y: row + 2, width: 120,
-                                                    size: 10, weight: .semibold, color: color)
+                let color: NSColor = running ? Style.lit : (app.needsAttention ? Style.attention : Style.muted)
+                card.addSubview(Self.kernedLabel(app.title, x: 14, y: row, width: w - 140, size: 12.5, kern: 0.3,
+                                                 color: Style.row))
+                let word = Self.kernedLabel(app.stateWord, x: w - 120 + 14, y: row + 2, width: 120, size: 10,
+                                            kern: 1.2, color: color)
                 word.alignment = .right
                 word.identifier = NSUserInterfaceItemIdentifier(ID.localState(app.backend))
                 card.addSubview(word)
-                let status = SettingsSectionKit.wrapped(app.status, x: 14, y: row + 19, width: w, size: 11,
-                                                        color: .secondaryLabelColor)
+                let status = Self.wrapped(app.status, x: 14, y: row + 20, width: w, size: 11, color: Style.muted)
                 status.identifier = NSUserInterfaceItemIdentifier(ID.localStatus(app.backend))
                 card.addSubview(status)
                 row = status.frame.maxY + 8
@@ -422,19 +528,30 @@ final class FeatureTourPageView: NSView {
     private func addPractice(at y: CGFloat, width: CGFloat) -> CGFloat {
         addCard(FeatureTour.practiceHeader, identifier: ID.statusCard, at: y, width: width) { card, y, w in
             let ready = facts.practice == .ready
-            let note = SettingsSectionKit.wrapped(FeatureTourPractice.note(facts.practice, map: facts.hotkeys),
-                                                  x: 14, y: y, width: w, size: 12, weight: ready ? .regular : .medium,
-                                                  color: ready ? .secondaryLabelColor : .systemOrange)
+            let note = Self.wrapped(FeatureTourPractice.note(facts.practice, map: facts.hotkeys), x: 14, y: y,
+                                    width: w, size: 12, color: ready ? Style.muted : Style.attention)
             note.identifier = NSUserInterfaceItemIdentifier(ID.practiceNote)
             card.addSubview(note)
 
+            // A selected offer cell's chrome around the box, so it reads as the place the words will land.
             let box = NSScrollView(frame: NSRect(x: 14, y: note.frame.maxY + 8, width: w, height: 58))
-            box.borderType = .bezelBorder
+            box.borderType = .noBorder
+            box.drawsBackground = false
             box.hasVerticalScroller = true
             box.autohidesScrollers = true
+            box.wantsLayer = true
+            box.layer?.cornerRadius = 6
+            box.layer?.borderWidth = 1
+            box.layer?.borderColor = Phosphor.green.withAlphaComponent(ready ? 0.5 : 0.18).cgColor
+            box.layer?.backgroundColor = Phosphor.cellOn.cgColor
             let text = NSTextView(frame: NSRect(origin: .zero, size: box.contentSize))
             text.isRichText = false
-            text.font = .systemFont(ofSize: 13)
+            text.drawsBackground = false
+            text.font = Style.font(13)
+            text.textColor = Style.body
+            text.insertionPointColor = Phosphor.green
+            text.typingAttributes = [.font: Style.font(13), .foregroundColor: Style.body]
+            text.textContainerInset = NSSize(width: 4, height: 4)
             text.isEditable = ready
             text.isSelectable = ready
             text.autoresizingMask = [.width]
@@ -449,34 +566,33 @@ final class FeatureTourPageView: NSView {
     }
 
     /// Skip tour on the left, the page dots in the middle, Back and Next (Done on the last page) on the right.
+    /// Next is the selected, glowing button, the one Return presses.
     private func addFooter(at originY: CGFloat, width: CGFloat) {
         let line = NSBox(frame: NSRect(x: L, y: originY, width: width, height: 1))
-        line.boxType = .separator
+        line.boxType = .custom
+        line.borderWidth = 0
+        line.fillColor = Phosphor.green.withAlphaComponent(0.18)
         addSubview(line)
         let y = originY + 15
 
-        let skip = NSButton(title: FeatureTour.skipTitle, target: self, action: #selector(skipClicked))
-        skip.bezelStyle = .rounded
+        let skip = Self.button(FeatureTour.skipTitle, selected: false, target: self, action: #selector(skipClicked))
         skip.identifier = NSUserInterfaceItemIdentifier(ID.skip)
-        skip.sizeToFit()
-        skip.frame = NSRect(x: L - 6, y: y, width: max(skip.frame.width + 16, 90), height: 28)
+        skip.frame.origin = NSPoint(x: L, y: y)
         addSubview(skip)
 
         let last = index == count - 1
-        let next = NSButton(title: last ? FeatureTour.doneTitle : FeatureTour.nextTitle, target: self,
-                            action: #selector(nextClicked))
-        next.bezelStyle = .rounded
+        let next = Self.button(last ? FeatureTour.doneTitle : FeatureTour.nextTitle, selected: true, target: self,
+                               action: #selector(nextClicked))
         next.identifier = NSUserInterfaceItemIdentifier(ID.next)
         // Return pages forward, except where Return belongs to the practice box.
         if page.liveStatus != .practice { next.keyEquivalent = "\r" }
-        next.frame = NSRect(x: L + width - 90 + 6, y: y, width: 90, height: 28)
+        next.frame.origin = NSPoint(x: L + width - next.frame.width, y: y)
         addSubview(next)
 
-        let back = NSButton(title: FeatureTour.backTitle, target: self, action: #selector(backClicked))
-        back.bezelStyle = .rounded
+        let back = Self.button(FeatureTour.backTitle, selected: false, enabled: index > 0, target: self,
+                               action: #selector(backClicked))
         back.identifier = NSUserInterfaceItemIdentifier(ID.back)
-        back.isEnabled = index > 0
-        back.frame = NSRect(x: next.frame.minX - 90 - 8, y: y, width: 90, height: 28)
+        back.frame.origin = NSPoint(x: next.frame.minX - back.frame.width - 10, y: y)
         addSubview(back)
 
         let dots = FeatureTourDotsView(count: count, current: index)
@@ -495,10 +611,11 @@ final class FeatureTourPageView: NSView {
     }
 }
 
-/// The page dots: one per page, the current one filled in the theme accent.
+/// The page dots: one per page in phosphor green, the current one lit full and glowing, the rest dim.
 final class FeatureTourDotsView: NSView {
-    private let count: Int
-    private let current: Int
+    /// Read by `--feature-tour-render`, which also counts the dots in the rendered pixels.
+    let count: Int
+    let current: Int
     private static let diameter: CGFloat = 7
     private static let gap: CGFloat = 7
 
@@ -514,12 +631,14 @@ final class FeatureTourDotsView: NSView {
 
     required init?(coder: NSCoder) { fatalError("no coder") }
 
+    func dotRect(_ dot: Int) -> NSRect {
+        NSRect(x: CGFloat(dot) * (Self.diameter + Self.gap), y: 0, width: Self.diameter, height: Self.diameter)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         for dot in 0..<count {
-            let x = CGFloat(dot) * (Self.diameter + Self.gap)
-            let circle = NSBezierPath(ovalIn: NSRect(x: x, y: 0, width: Self.diameter, height: Self.diameter))
-            (dot == current ? Phosphor.green : NSColor.tertiaryLabelColor).setFill()
-            circle.fill()
+            (dot == current ? FeatureTourPageView.Style.lit : FeatureTourPageView.Style.dot).setFill()
+            NSBezierPath(ovalIn: dotRect(dot)).fill()
         }
     }
 }
