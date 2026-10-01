@@ -33,7 +33,16 @@ logged and printed by `CodexProviderSmoke`. A standalone CLI keeps the single-fi
 `codex-<sha256>`. The
 bundle CLI is provisioned and bundle-signed, so a lone copy of its executable is killed at launch; it is
 copied whole with `ditto` to `codex-executables/codex-<sha256 of the executable>.app/`, made owner-only
-and read-only, and must pass `codesign --verify --strict` before it is installed or reused. Its receipt
+and read-only, and must pass `codesign --verify --strict` before it is installed or reused. The staged
+copy's root is made owner-writable (0700) immediately before the `rename(2)` that installs it and 0500
+immediately after: APFS refuses to rename a directory that lacks owner write (EACCES), which Linux does
+not enforce, so the original restrict-then-rename order failed every install on the Mac while Docker
+stayed green. A standalone candidate must pass `codesign --verify --strict` on its own; a lone copy of a
+bundle-signed executable is refused with a named cause instead of being killed at launch. The
+deterministic host gate `--codex-bundle-snapshot-host-selftest` drives this install over an ad hoc signed
+fixture bundle in TMPDIR with the real `codesign`, with three negative controls (the restrict-then-rename
+order fails with EACCES, a flipped Info.plist byte fails strict verification, and a lone executable copy is
+refused). Its receipt
 binds the executable's sha256, cdHash, and team id as before, plus the origin path and the sha256 of the
 bundle's `_CodeSignature/CodeResources`. The runner still allows exactly one `process-exec` literal, the
 snapshot's `Contents/MacOS/codex`, and adds only that snapshot bundle's root as a read-only subtree. After

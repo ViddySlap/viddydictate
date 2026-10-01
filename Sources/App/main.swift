@@ -189,6 +189,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // "Codex not found" versus "Codex could not be sandboxed" on every surface: boundary error, HUD
     // allowlist, Setup/Preflight row. Offline: fake ChatGPT.app layouts under TMPDIR only.
     case codexBoundarySentenceSelftest = "--codex-boundary-sentence-selftest"
+    // The real Codex bundle-snapshot install over an ad hoc signed fixture bundle on the host filesystem,
+    // with three negative controls. Host gate: on the Mac it needs codesign and runs on APFS (where the
+    // 74b34e6 rename order failed); without codesign it abstains, and on macOS a missing codesign fails.
+    case codexBundleSnapshotHostSelftest = "--codex-bundle-snapshot-host-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -912,6 +912,7 @@ enum CodexIsolationFoundation {
         originIdentity: StrongFileIdentity,
         originBundle: ExecutableBundleIdentity?,
         paths: Paths,
+        bundleRootOrder: BundleSnapshotRootOrder = .renameThenRestrict,
         fileManager fm: FileManager = .default
     ) throws -> InstalledExecutableSnapshot {
         switch candidate.layout {
@@ -919,6 +920,7 @@ enum CodexIsolationFoundation {
             guard originBundle == nil else {
                 throw CodexIsolationError.failed("standalone Codex candidate carries a bundle seal")
             }
+            try requireStandaloneSignature(at: URL(fileURLWithPath: candidate.executable))
             let snapshot = try installExecutableSnapshot(
                 from: URL(fileURLWithPath: candidate.executable),
                 originIdentity: originIdentity,
@@ -938,8 +940,51 @@ enum CodexIsolationFoundation {
                 originIdentity: originIdentity,
                 originBundle: originBundle,
                 paths: paths,
+                rootOrder: bundleRootOrder,
                 fileManager: fm)
         }
+    }
+
+    /// Named so a single-file snapshot of a bundle-signed executable is refused before it is copied.
+    static let bundleSignedLoneExecutableCause =
+        "Codex executable does not verify as a standalone signed file; a bundle-signed Codex must be snapshotted with its bundle"
+
+    /// A standalone candidate must verify on its own. A Mach-O copied out of its signed bundle still
+    /// carries a signature that binds Info.plist and sealed resources it no longer has, so
+    /// `codesign --verify --strict` rejects it, and the kernel would SIGKILL it at launch anyway (0.158:
+    /// `load code signature error 4`). Refusing here names that cause instead of a later quarantine crash.
+    private static func requireStandaloneSignature(at executable: URL) throws {
+        let bounded: BoundedProcessResult
+        do {
+            bounded = try runBoundedProcess(
+                executable: "/usr/bin/codesign",
+                arguments: ["--verify", "--strict", executable.path],
+                environment: ["PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"],
+                currentDirectory: executable.deletingLastPathComponent(),
+                timeout: 120,
+                stdoutLimit: 4_096,
+                stderrLimit: 65_536)
+        } catch {
+            throw CodexIsolationError.failed(
+                "could not run codesign --verify --strict on the standalone Codex executable")
+        }
+        guard bounded.leaderReaped, !bounded.residualProcessGroup, !bounded.captureFailure,
+              !bounded.timedOut, bounded.status == 0 else {
+            throw CodexIsolationError.failed(bundleSignedLoneExecutableCause)
+        }
+    }
+
+    /// When the staged bundle root becomes read-only relative to the rename that installs it.
+    ///
+    /// APFS refuses `rename(2)` of a directory whose own mode lacks owner write (EACCES), even within one
+    /// parent, because the move rewrites the directory's own `..` entry. Linux does not enforce that, so
+    /// the 74b34e6 order (whole tree 0500, then rename) stayed green in Docker and failed every install on
+    /// the Mac (measured 2026-10-01 on the real 0.158 bundle and on a synthetic 0500 directory).
+    enum BundleSnapshotRootOrder {
+        /// Production: the staged root is made owner-writable for the rename and 0500 right after.
+        case renameThenRestrict
+        /// The 74b34e6 order, reachable only so the host selftest can prove APFS refuses it.
+        case restrictThenRename
     }
 
     static func bundleIdentity(atBundle root: URL) throws -> ExecutableBundleIdentity {
@@ -981,6 +1026,7 @@ enum CodexIsolationFoundation {
         originIdentity: StrongFileIdentity,
         originBundle: ExecutableBundleIdentity,
         paths: Paths,
+        rootOrder: BundleSnapshotRootOrder,
         fileManager fm: FileManager
     ) throws -> InstalledExecutableSnapshot {
         let originExecutable = origin.appendingPathComponent(
@@ -1023,9 +1069,8 @@ enum CodexIsolationFoundation {
                       try bundleIdentity(atBundle: staged) == originBundle else {
                     throw CodexIsolationError.failed("Codex bundle snapshot identity mismatch")
                 }
-                guard rename(staged.path, destination.path) == 0 else {
-                    throw CodexIsolationError.failed("could not install Codex bundle snapshot")
-                }
+                try placeBundleSnapshot(
+                    staged: staged, destination: destination, order: rootOrder, fileManager: fm)
             } catch {
                 if lstat(staged.path, &st) == 0 {
                     do { try CodexSnapshotRetention.removeSnapshotEntry(staged, fileManager: fm) }
@@ -1052,6 +1097,41 @@ enum CodexIsolationFoundation {
         }
         return InstalledExecutableSnapshot(
             url: executable, identity: identity, entryName: entryName, bundle: originBundle)
+    }
+
+    /// Moves a fully verified staged bundle to its content address and leaves its root 0500.
+    ///
+    /// The root is chmodded 0700 immediately before the rename and 0500 immediately after (see
+    /// `BundleSnapshotRootOrder`). The tree below the root stays 0500/0400 throughout, and the root stays
+    /// read-only for the whole codesign and identity verification that precedes this. If the rename
+    /// fails, the staged copy is still in place and the caller's cleanup removes it. If the final chmod
+    /// fails, the entry is already at its content address but writable, so it is taken back out here: a
+    /// later install must never reuse a snapshot whose root is not read-only.
+    private static func placeBundleSnapshot(
+        staged: URL,
+        destination: URL,
+        order: BundleSnapshotRootOrder,
+        fileManager fm: FileManager
+    ) throws {
+        if order == .renameThenRestrict {
+            guard chmod(staged.path, 0o700) == 0 else {
+                throw CodexIsolationError.failed("could not open Codex bundle snapshot root for install")
+            }
+        }
+        guard rename(staged.path, destination.path) == 0 else {
+            let code = errno
+            throw CodexIsolationError.failed(
+                "could not install Codex bundle snapshot (rename errno \(code): "
+                    + "\(String(cString: strerror(code))))")
+        }
+        guard chmod(destination.path, 0o500) == 0 else {
+            do { try CodexSnapshotRetention.removeSnapshotEntry(destination, fileManager: fm) }
+            catch {
+                throw CodexIsolationError.failed(
+                    "Codex bundle snapshot could not be made read-only or removed")
+            }
+            throw CodexIsolationError.failed("could not make the installed Codex bundle snapshot read-only")
+        }
     }
 
     /// Owner-only and read-only, like the single-file snapshot: directories 0500, files 0400 (0500
