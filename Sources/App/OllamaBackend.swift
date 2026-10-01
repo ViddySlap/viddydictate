@@ -89,9 +89,16 @@ final class OllamaBackend: LocalModelBackend {
     private let transport: Transport
     private let homeDirectory: String
 
+    /// The one instance the app's clients and capacity policy share, so the capability cache `chat` reads
+    /// for its `think` decision and the KV geometry cache survive between requests.
+    static let shared = OllamaBackend()
+
     /// `/api/show` capabilities, keyed by model name plus its version (`digest`, else `modified_at`), so
     /// show runs once per model version: a re-pull under the same tag gets a new key and is asked again.
     private var showCache: [String: Set<String>] = [:]
+    /// `/api/show` KV geometry per canonical model name, for `kvCacheBytes`. A model whose show body had no
+    /// usable `model_info` is cached as nil-geometry too, so a cold load does not ask again every time.
+    private var geometryCache: [String: OllamaModelGeometry?] = [:]
     /// The latest capability answer per canonical model name, for `chat`'s `think` decision.
     private var capabilitiesByName: [String: Set<String>] = [:]
     private let cacheLock = NSLock()
@@ -220,31 +227,73 @@ final class OllamaBackend: LocalModelBackend {
 
     // MARK: - Residency
 
-    /// `GET /api/ps`, fail closed (see `OllamaCatalog.parseResident`). Ollama reports no last-use time and
-    /// no idle/busy flag, so both stay nil; the capacity slice stamps its own last use.
+    /// `GET /api/ps` for WHICH models are loaded, with each one's footprint taken from `/api/tags` `size`.
+    ///
+    /// Never ps's own `size`: measured on Ben's Mac it under-reports the wired cost of a loaded model 10-20x
+    /// (0.34 GB for gemma4:e4b, which wired +7.31 GB at 8k; survey section 6). A capacity readout or an
+    /// eviction ranking built on it would call a 7 GB model nearly free. The tags size is the weights on
+    /// disk, which is what the incoming estimate budgets from too, so the readout and the policy agree.
+    ///
+    /// Fails closed, like ps itself: an unreadable ps or tags, or a resident row tags does not list (a
+    /// model removed from disk while loaded), makes the whole list nil, because a partial resident set must
+    /// never pass for the machine's whole one. Ollama reports no last-use time and no idle/busy flag, so both
+    /// stay nil; `ModelManager` stamps ViddyDictate's own use and tracks its own requests in flight.
     func residentModels() -> [LocalResidentModel]? {
-        residentSnapshot()?.map(Self.residentModel(from:))
+        guard let resident = residentSnapshot() else { return nil }
+        guard !resident.isEmpty else { return [] }
+        guard let tagsData = get("api/tags", timeout: Self.catalogTimeout),
+              let tagged = OllamaCatalog.parseTags(tagsData) else { return nil }
+        var sizes: [String: Int64] = [:]
+        for model in tagged {
+            guard let size = model.sizeBytes else { continue }
+            sizes[Self.canonicalModelName(model.name)] = size
+        }
+        var mapped: [LocalResidentModel] = []
+        for model in resident {
+            guard let size = sizes[Self.canonicalModelName(model.name)] else { return nil }
+            mapped.append(Self.residentModel(from: model, catalogSizeBytes: size))
+        }
+        return mapped
     }
 
-    static func residentModel(from model: OllamaResidentModel) -> LocalResidentModel {
+    /// One `/api/ps` row in the backend-neutral shape, its footprint the catalog's `catalogSizeBytes` (see
+    /// `residentModels`). ps's own `size` is deliberately not an input.
+    static func residentModel(from model: OllamaResidentModel, catalogSizeBytes: Int64) -> LocalResidentModel {
         LocalResidentModel(
             ref: LocalModelRef(backend: .ollama, modelID: model.name),
-            residentBytes: UInt64(max(0, model.sizeBytes)),
+            residentBytes: UInt64(max(0, catalogSizeBytes)),
             lastUsed: nil,
             isIdle: nil,
             expiresAt: model.expiresAt,
             contextLength: model.contextLength)
     }
 
-    /// Already resident (in `/api/ps`) is success with NO request, even when it is loaded with a different
-    /// context. A request carrying another `num_ctx` would force a reload, and any request would reset the
-    /// expiry the model was loaded with; spec section 4 reuses the resident context instead.
+    /// Spec D5: a resident instance serves a request when it is loaded with at least the context the request
+    /// needs. A larger one is reused as it is (reloading it smaller would cost a load and evict whoever is
+    /// using it); a smaller one, or one whose context ps does not report, is reloaded at ours. With no
+    /// context asked for, any resident instance serves.
+    ///
+    /// The one copy of the rule: `ensureLoaded` below and `ModelManager`'s resident short-circuit both read
+    /// it, so the policy and the backend cannot disagree about what counts as resident.
+    static func reusesResident(contextLength: Int?, wanted: Int?) -> Bool {
+        guard let wanted else { return true }
+        guard let contextLength else { return false }
+        return contextLength >= wanted
+    }
+
+    /// Already resident (in `/api/ps`) with enough context (`reusesResident`) is success with NO request:
+    /// any request would reset the expiry the model was loaded with, and one carrying another `num_ctx`
+    /// would force a reload. A resident instance with too small a context is reloaded at `contextTokens`.
     ///
     /// An unreadable `/api/ps` is false: without it this cannot tell a cold load from a forced reload of a
     /// model someone else is using. A ref naming another backend is refused.
     func ensureLoaded(_ ref: LocalModelRef, ttlSeconds: Int, contextTokens: Int?) -> Bool {
         guard ref.backend == id, let resident = residentSnapshot() else { return false }
-        if Self.contains(resident, ref.modelID) { return true }
+        let wanted = Self.canonicalModelName(ref.modelID)
+        if let row = resident.first(where: { Self.canonicalModelName($0.name) == wanted }),
+           Self.reusesResident(contextLength: row.contextLength, wanted: contextTokens) {
+            return true
+        }
         return load(ref, ttlSeconds: ttlSeconds, contextTokens: contextTokens)
     }
 
@@ -284,6 +333,43 @@ final class OllamaBackend: LocalModelBackend {
         if post("api/generate", body: body, timeout: Self.unloadTimeout) == nil {
             Log.write("ollama: unload of \(ref.modelID) failed")
         }
+    }
+
+    /// The Setup tab's Unload all for Ollama: every model `/api/ps` lists gets `keep_alive: 0`, whoever loaded
+    /// it. The same semantics as LM Studio's `lms unload --all`, which the same tab offers for LM Studio.
+    /// Nothing is sent when ps cannot be read.
+    func unloadAll() {
+        guard let resident = residentSnapshot() else {
+            Log.write("ollama: unload all skipped, /api/ps could not be read")
+            return
+        }
+        for model in resident {
+            let body: [String: Any] = ["model": model.name, "keep_alive": 0]
+            if post("api/generate", body: body, timeout: Self.unloadTimeout) == nil {
+                Log.write("ollama: unload of \(model.name) failed")
+            }
+        }
+    }
+
+    // MARK: - KV cache (capacity)
+
+    /// The S2 upper bound on the KV cache `ref` needs at `contextTokens`, from `/api/show` `model_info`
+    /// (`OllamaModelGeometry.kvCacheBytes`). Nil when show cannot be read or its geometry is missing; the
+    /// capacity policy then uses its own conservative fallback rather than treating the cache as free.
+    func kvCacheBytes(for ref: LocalModelRef, contextTokens: Int) -> Int64? {
+        guard ref.backend == id else { return nil }
+        let key = Self.canonicalModelName(ref.modelID)
+        cacheLock.lock()
+        let cached = geometryCache[key]
+        cacheLock.unlock()
+        if let cached { return cached?.kvCacheBytes(contextTokens: contextTokens) }
+        guard let showData = post("api/show", body: ["model": ref.modelID], timeout: Self.catalogTimeout)
+        else { return nil }
+        let geometry = OllamaCatalog.parseShowGeometry(showData)
+        cacheLock.lock()
+        geometryCache[key] = .some(geometry)
+        cacheLock.unlock()
+        return geometry?.kvCacheBytes(contextTokens: contextTokens)
     }
 
     // MARK: - Chat

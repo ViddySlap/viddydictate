@@ -455,6 +455,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .staffPicksCopySelftest: .init(tier: .deterministic) { _ in
         StaffPicksCopyFixtureSelfTest.run() ? 0 : 1
     },
+    // Scripted: the real ModelManager over injected capacity facts, LM Studio as an in-memory resident set and
+    // the real OllamaBackend over a scripted transport. No kernel read, no lms, no socket, no preferences.
+    .localCapacityBackendsSelftest: .init(tier: .deterministic) { _ in
+        LocalCapacityBackendsFixtureSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

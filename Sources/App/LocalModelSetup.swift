@@ -119,6 +119,41 @@ enum LocalModelSetup {
         /// `lms ps` could not be read: LM Studio is not installed, its server is not up, or the CLI failed.
         case unavailable
         case models([ModelResidency.ResidentModel])
+        /// Ollama is installed: one reading per app on the Mac, LM Studio first. Only ever built when Ollama
+        /// is installed, so a Mac without it keeps the three cases above and 1.1.0's exact text.
+        case apps([AppResidency])
+    }
+
+    /// One app's resident set, or nil when that app could not be asked.
+    enum AppResidency: Equatable {
+        case lmStudio([ModelResidency.ResidentModel]?)
+        /// Each row's size is the catalog (`/api/tags`) size, never `/api/ps`'s, which under-reports 10-20x.
+        case ollama([LocalResidentModel]?)
+
+        var backend: LocalBackendID {
+            switch self {
+            case .lmStudio: return .lmStudio
+            case .ollama: return .ollama
+            }
+        }
+
+        var modelCount: Int? {
+            switch self {
+            case .lmStudio(let models): return models?.count
+            case .ollama(let models): return models?.count
+            }
+        }
+    }
+
+    /// The readout's state from one reading. Without Ollama on the Mac it is exactly 1.1.0's mapping (`lms ps`
+    /// or unavailable); with Ollama installed it lists each app that is on the Mac.
+    static func residency(lmStudio: [ModelResidency.ResidentModel]?, lmStudioInstalled: Bool,
+                          ollama: [LocalResidentModel]?, ollamaInstalled: Bool) -> Residency {
+        guard ollamaInstalled else { return lmStudio.map { .models($0) } ?? .unavailable }
+        var apps: [AppResidency] = []
+        if lmStudioInstalled { apps.append(.lmStudio(lmStudio)) }
+        apps.append(.ollama(ollama))
+        return .apps(apps)
     }
 
     /// The resident set as one block, biggest first.
@@ -143,7 +178,66 @@ enum LocalModelSetup {
             let nameWidth = sorted.map(\.identifier.count).max() ?? 0
             return sorted.map { residencyRow($0, nameWidth: nameWidth, now: now) }
                 .joined(separator: "\n")
+        case .apps(let apps):
+            return appsResidencyList(apps, now: now)
         }
+    }
+
+    /// Both apps' models as one block, biggest first, each name prefixed with its app only when more than
+    /// one app is listed (the route pickers' "Ollama · id" style). An app that could not be asked gets one
+    /// line saying so after the rows, so the other app's reading is still shown.
+    private static func appsResidencyList(_ apps: [AppResidency], now: Date) -> String {
+        let labelled = apps.count > 1
+        let unread = apps.filter { $0.modelCount == nil }.map(\.backend.displayName)
+        guard unread.count < apps.count else {
+            return "ViddyDictate could not ask \(unread.joined(separator: " or ")) what is loaded, so it cannot "
+                + "say what is holding memory right now. The budget still applies to every load it attempts."
+        }
+        var rows: [(name: String, sizeBytes: UInt64, state: String, ttl: String)] = []
+        for app in apps {
+            let prefix = labelled ? app.backend.displayName + LocalModelPickerItems.appPrefixSeparator : ""
+            switch app {
+            case .lmStudio(let models):
+                for model in models ?? [] {
+                    rows.append((prefix + model.identifier, model.sizeBytes, model.isIdle ? "idle" : "busy",
+                                 residencyTTL(model, now: now)))
+                }
+            case .ollama(let models):
+                for model in models ?? [] {
+                    // Ollama has no idle/busy notion of its own, so the column is left blank rather than
+                    // guessed: another app may be using the model right now.
+                    rows.append((prefix + model.ref.modelID, model.residentBytes, "",
+                                 ollamaResidencyTTL(model, now: now)))
+                }
+            }
+        }
+        guard !rows.isEmpty || !unread.isEmpty else {
+            return "Nothing is loaded right now. The budget applies to the next model load."
+        }
+        rows.sort { $0.sizeBytes == $1.sizeBytes ? $0.name < $1.name : $0.sizeBytes > $1.sizeBytes }
+        let nameWidth = rows.map(\.name.count).max() ?? 0
+        var lines = rows.map { row -> String in
+            let name = row.name.padding(toLength: max(nameWidth, row.name.count), withPad: " ", startingAt: 0)
+            let size = SystemMemory.formatGB(row.sizeBytes)
+            let padded = String(repeating: " ", count: max(0, 8 - size.count)) + size
+            let state = row.state.padding(toLength: 4, withPad: " ", startingAt: 0)
+            return "\(name)  \(padded)  \(state)  \(row.ttl)"
+        }
+        if rows.isEmpty { lines.append("Nothing is loaded in the apps ViddyDictate could ask.") }
+        for app in unread { lines.append("\(app) could not be asked what is loaded.") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// How long Ollama will keep this model, from ps's `expires_at` (Ollama's keep_alive is an expiry, reset
+    /// by each request, so it already counts from the last use). A `keep_alive` of -1 shows as a date
+    /// centuries away and is said plainly, like LM Studio's missing TTL.
+    static func ollamaResidencyTTL(_ model: LocalResidentModel, now: Date) -> String {
+        guard let expiresAt = model.expiresAt else { return "unload time unavailable" }
+        let remaining = expiresAt.timeIntervalSince(now)
+        if remaining > 366 * 24 * 3600 { return "no timeout" }
+        if remaining <= 0 { return "due to unload" }
+        if remaining < 60 { return "unloads in under a minute" }
+        return "unloads in \(Int((remaining / 60).rounded(.up))) min"
     }
 
     /// One model: what it is called, what it costs, whether it is working, and whether anything will take
@@ -219,15 +313,39 @@ enum LocalModelSetup {
     /// dump in one. The view asks this rather than deciding for itself, so the padding and the font that
     /// makes the padding mean anything stay one decision.
     static func residencyIsTabular(_ reading: Residency) -> Bool {
-        guard case .models(let models) = reading else { return false }
-        return !models.isEmpty
+        switch reading {
+        case .models(let models): return !models.isEmpty
+        case .apps(let apps): return apps.contains { ($0.modelCount ?? 0) > 0 }
+        case .pending, .unavailable: return false
+        }
     }
 
     /// Whether Unload all has anything to act on. A button that cannot change the machine is disabled
     /// rather than hidden, so the section does not change shape between two refreshes.
     static func canUnloadAll(_ reading: Residency) -> Bool {
-        guard case .models(let models) = reading else { return false }
-        return !models.isEmpty
+        canUnloadAll(reading, in: .lmStudio)
+    }
+
+    /// The same question for one app's own Unload all.
+    static func canUnloadAll(_ reading: Residency, in backend: LocalBackendID) -> Bool {
+        switch reading {
+        case .models(let models): return backend == .lmStudio && !models.isEmpty
+        case .apps(let apps): return (apps.first { $0.backend == backend }?.modelCount ?? 0) > 0
+        case .pending, .unavailable: return false
+        }
+    }
+
+    /// The Unload all buttons to offer, one per app, LM Studio first. Without Ollama it is LM Studio's one
+    /// "Unload all", exactly as 1.1.0 offered it (`lms unload --all`); with Ollama installed each app on the
+    /// Mac gets its own, unloading everything that app holds, and the titles name the app only when there
+    /// are two.
+    static func unloadAllButtons(_ reading: Residency) -> [(backend: LocalBackendID, title: String)] {
+        guard case .apps(let apps) = reading else { return [(.lmStudio, unloadAllTitle)] }
+        return apps.map { ($0.backend, unloadAllTitle(for: $0.backend, labelled: apps.count > 1)) }
+    }
+
+    static func unloadAllTitle(for backend: LocalBackendID, labelled: Bool) -> String {
+        labelled ? "\(unloadAllTitle) in \(backend.displayName)" : unloadAllTitle
     }
 
     // MARK: - The idle-unload timer
@@ -241,6 +359,14 @@ enum LocalModelSetup {
     static let timerHint =
         "ViddyDictate asks LM Studio to drop a model it loaded once it has gone this long unused. It applies "
         + "to every model ViddyDictate loads, and never to one another app loaded."
+
+    /// The hint for this Mac: 1.1.0's LM Studio sentence unless Ollama is installed, where it names no app,
+    /// because the window rides every Ollama request as `keep_alive` as well as LM Studio's `--ttl`.
+    static func timerHint(ollamaInstalled: Bool) -> String {
+        guard ollamaInstalled else { return timerHint }
+        return "ViddyDictate asks the app running a model to drop it once ViddyDictate has left it this long "
+            + "unused. It applies to every model ViddyDictate loads, and never to one another app loaded."
+    }
 
     // MARK: - LM Studio's own JIT model timeout (LOCKED DECISION 4)
 
@@ -390,6 +516,8 @@ enum LocalModelSetup {
         case residencySummary
         case residencyNote
         case unloadAll
+        /// Ollama's own Unload all, beside LM Studio's when Ollama is installed.
+        case unloadAllOllama
         case timerTitle
         case timerControl
         case timerHint
@@ -403,7 +531,7 @@ enum LocalModelSetup {
         /// clipped; controls are fixed-height by design and would red that check for no reason.
         var isControl: Bool {
             switch self {
-            case .budgetSlider, .timerControl, .unloadAll: return true
+            case .budgetSlider, .timerControl, .unloadAll, .unloadAllOllama: return true
             default: return false
             }
         }

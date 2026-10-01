@@ -418,6 +418,9 @@ tier_deterministic() {
         run_gate deterministic "local model capacity policy fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --model-capacity-selftest || true
+        run_gate deterministic "local capacity across both apps: tags+KV estimate, (app, id) eviction, D5 reuse (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-capacity-backends-selftest || true
         run_gate deterministic "prompt overlay store selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --prompt-overlay-selftest || true

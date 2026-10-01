@@ -143,6 +143,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // labels, pickers, the global control, Codex and cloud update copy), and ratification survives a store
     // round-trip internally. Pure label functions plus one scratch store. Built-in mutants.
     case staffPicksCopySelftest = "--staff-picks-copy-selftest"
+    // Ollama lane S4: ADR 0018's capacity policy across both apps through the real ModelManager and a scripted
+    // OllamaBackend. Tags + KV(num_ctx) estimate (never ps), (app, id) ownership, LRU by ViddyDictate's own
+    // stamps, D5's resident-context reuse, and LM-Studio-only decisions unchanged. Built-in mutants.
+    case localCapacityBackendsSelftest = "--local-capacity-backends-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -411,10 +411,13 @@ enum OllamaBackendScriptedSelfTest {
         let backend = makeBackend(fake)
         let resident = backend.residentModels()
         let thinker = resident?.first
+        // The ps row says 6.1 GB and tags says 5.2 GB: the footprint is the TAGS size (S4), because ps
+        // under-reports a loaded model 10-20x on a real Mac and must never size a budget or a ranking.
         reporter.record(
-            "residentModels maps /api/ps: size, context_length and expires_at; no lastUsed, no idle flag",
+            "residentModels maps /api/ps with the tags size (never ps size), context_length and expires_at; "
+                + "no lastUsed, no idle flag",
             resident?.count == 1 && thinker?.ref == LocalModelRef(backend: .ollama, modelID: thinkerName)
-                && thinker?.residentBytes == 6_100_000_000 && thinker?.contextLength == residentContext
+                && thinker?.residentBytes == 5_200_000_000 && thinker?.contextLength == residentContext
                 && thinker?.expiresAt == OllamaCatalog.parseTimestamp(residentExpiry) && thinker?.expiresAt != nil
                 && thinker?.lastUsed == nil && thinker?.isIdle == nil)
 

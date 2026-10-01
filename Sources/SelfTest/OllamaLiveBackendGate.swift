@@ -106,7 +106,7 @@ enum OllamaLiveBackendGate {
                   + "keep_alive did not reach the wire")
             passed = false
         }
-        print("\(tag) info: loaded in \(String(format: "%.1f", loadSeconds)) s; /api/ps size "
+        print("\(tag) info: loaded in \(String(format: "%.1f", loadSeconds)) s; resident bytes (tags size) "
               + "\(WiredReading.gb(Int64(clamping: row.residentBytes))), context_length "
               + "\(row.contextLength.map(String.init) ?? "unreported") (requested \(contextTokens))")
         print("\(tag) info: wired before \(WiredReading.text(wiredBefore)), after load "

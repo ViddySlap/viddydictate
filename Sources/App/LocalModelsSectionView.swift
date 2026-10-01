@@ -127,13 +127,23 @@ final class LocalModelsSectionView: NSView {
     struct ResidencyReading {
         var models: [ModelResidency.ResidentModel]?
         var wiredBytes: UInt64?
+        /// Ollama's resident set (`OllamaBackend.residentModels`, sized from `/api/tags`), read only when
+        /// Ollama is installed. The defaults describe a Mac without Ollama, which reads exactly as 1.1.0 did.
+        var ollamaModels: [LocalResidentModel]? = nil
+        var ollamaInstalled = false
+        /// Only consulted with Ollama installed, to decide whether LM Studio gets a row of its own.
+        var lmStudioInstalled = true
 
         /// The live reading. `ModelResidency.residentModels()` SHELLS THE LM STUDIO CLI and costs about
-        /// 0.16s; `SystemMemory.wiredBytes` is an in-process `host_statistics64`. Both are taken here, on
-        /// whatever queue the caller is running, so the pair is one snapshot.
+        /// 0.16s; `SystemMemory.wiredBytes` is an in-process `host_statistics64`; Ollama's two reads are
+        /// local HTTP. All are taken here, on whatever queue the caller is running, so they are one snapshot.
         static var live: ResidencyReading {
-            ResidencyReading(models: ModelResidency.residentModels(),
-                             wiredBytes: SystemMemory.wiredBytes)
+            let ollamaInstalled = OllamaBackend.shared.isInstalled()
+            return ResidencyReading(models: ModelResidency.residentModels(),
+                                    wiredBytes: SystemMemory.wiredBytes,
+                                    ollamaModels: ollamaInstalled ? OllamaBackend.shared.residentModels() : nil,
+                                    ollamaInstalled: ollamaInstalled,
+                                    lmStudioInstalled: ModelResidency.isInstalled)
         }
     }
 
@@ -148,8 +158,9 @@ final class LocalModelsSectionView: NSView {
     /// delivered through `onMain` rather than assumed to arrive off it.
     typealias ResidencyReader = (@escaping (ResidencyReading) -> Void) -> Void
 
-    /// Unload everything LM Studio holds, then call back. Same threading contract as `ResidencyReader`,
-    /// for the same reason: `lms unload --all` is a subprocess and takes as long as it takes.
+    /// Unload everything one app holds, then call back. Same threading contract as `ResidencyReader`,
+    /// for the same reason: `lms unload --all` is a subprocess, and Ollama's unloads are one request per
+    /// model; each takes as long as it takes.
     typealias UnloadAll = (@escaping () -> Void) -> Void
 
     /// Everything the section reads from outside itself, in one value so the host's initialiser does not
@@ -163,6 +174,9 @@ final class LocalModelsSectionView: NSView {
         /// Injected so a gate can drive TTL countdowns against a fixed clock instead of racing one.
         var now: () -> Date
         var apps: AppActions
+        /// Ollama's own Unload all, offered only when Ollama is installed: `keep_alive: 0` for every model in
+        /// its `/api/ps`, the same semantics as LM Studio's `unloadAll`.
+        var unloadAllOllama: UnloadAll = { $0() }
 
         static var live: Environment {
             Environment(store: .live,
@@ -174,9 +188,9 @@ final class LocalModelsSectionView: NSView {
                                 DispatchQueue.main.async { completion(reading) }
                             }
                         },
-                        // TODO(S4): "Unload ViddyDictate's models" on both apps, behind a confirmation, once
-                        // ViddyDictate tracks which models it loaded (spec section 5). Until then this stays
-                        // 1.1.0's LM Studio `lms unload --all`, unchanged and not widened to Ollama.
+                        // 1.1.0's LM Studio `lms unload --all`, unchanged. The spec's "Unload ViddyDictate's
+                        // models" was overruled: ownership is process-local, so after a restart that button
+                        // would do nothing. Ollama gets the same per-app semantics below instead.
                         unloadAll: { completion in
                             DispatchQueue.global(qos: .utility).async {
                                 ModelResidency.unloadAll()
@@ -184,7 +198,13 @@ final class LocalModelsSectionView: NSView {
                             }
                         },
                         now: Date.init,
-                        apps: .live)
+                        apps: .live,
+                        unloadAllOllama: { completion in
+                            DispatchQueue.global(qos: .utility).async {
+                                OllamaBackend.shared.unloadAll()
+                                DispatchQueue.main.async { completion() }
+                            }
+                        })
         }
     }
 
@@ -225,6 +245,10 @@ final class LocalModelsSectionView: NSView {
     private var readingInFlight = false
     private var wantsAnotherReading = false
     private var unloading = false
+    private var unloadingOllama = false
+    /// The Unload all buttons the section was last built with, so a reading that adds or removes an app's
+    /// button rebuilds rather than leaving a stale one on screen.
+    private var drawnUnloadBackends: [LocalBackendID] = [.lmStudio]
     /// A refresh that needed to move the layout while a mouse button was down. Taken on the next tick;
     /// see `showResidency`.
     private var needsRelayout = false
@@ -356,7 +380,7 @@ final class LocalModelsSectionView: NSView {
     /// separation is deliberate - it is what keeps a synchronous `lms` call out of the main thread by
     /// construction rather than by remembering to wrap one.
     private func refreshResidency() {
-        guard !unloading else { return }
+        guard !unloading, !unloadingOllama else { return }
         guard !readingInFlight else { wantsAnotherReading = true; return }
         readingInFlight = true
         environment.residency { [weak self] reading in
@@ -364,7 +388,9 @@ final class LocalModelsSectionView: NSView {
                 guard let self = self else { return }
                 self.readingInFlight = false
                 self.lastWired = reading.wiredBytes
-                self.residency = reading.models.map { .models($0) } ?? .unavailable
+                self.residency = LocalModelSetup.residency(
+                    lmStudio: reading.models, lmStudioInstalled: reading.lmStudioInstalled,
+                    ollama: reading.ollamaModels, ollamaInstalled: reading.ollamaInstalled)
                 self.showResidency()
                 if self.wantsAnotherReading {
                     self.wantsAnotherReading = false
@@ -414,19 +440,31 @@ final class LocalModelsSectionView: NSView {
                 position: LocalModelSetup.normalized(environment.store.budgetPosition()),
                 facts: facts, wiredBytes: lastWired) ? .systemOrange : .labelColor
         }
-        if let button = unloadAllButton() {
-            button.title = unloading ? LocalModelSetup.unloadingTitle : LocalModelSetup.unloadAllTitle
-            button.isEnabled = !unloading && LocalModelSetup.canUnloadAll(residency)
+        let buttons = LocalModelSetup.unloadAllButtons(residency)
+        for (backend, title) in buttons {
+            guard let button = unloadAllButton(backend) else { continue }
+            button.title = isUnloading(backend) ? LocalModelSetup.unloadingTitle : title
+            button.isEnabled = !isUnloading(backend) && LocalModelSetup.canUnloadAll(residency, in: backend)
         }
 
-        // A summary that only now became available (or stopped being) changes the block's shape too.
-        guard abs(after - before) > 0.5 || hadSummary != (summary != nil) else { return }
+        // A summary that only now became available (or stopped being) changes the block's shape too, and so
+        // does an app's Unload all appearing or going.
+        guard abs(after - before) > 0.5 || hadSummary != (summary != nil)
+                || buttons.map(\.backend) != drawnUnloadBackends else { return }
         if NSEvent.pressedMouseButtons != 0 { needsRelayout = true; return }
         rebuild(notifyingHost: true)
     }
 
-    private func unloadAllButton() -> NSButton? {
-        let wanted = LocalModelSetup.identifier(.unloadAll)
+    private func isUnloading(_ backend: LocalBackendID) -> Bool {
+        backend == .ollama ? unloadingOllama : unloading
+    }
+
+    private static func unloadPart(_ backend: LocalBackendID) -> LocalModelSetup.Part {
+        backend == .ollama ? .unloadAllOllama : .unloadAll
+    }
+
+    private func unloadAllButton(_ backend: LocalBackendID = .lmStudio) -> NSButton? {
+        let wanted = LocalModelSetup.identifier(Self.unloadPart(backend))
         func search(_ root: NSView) -> NSButton? {
             if root.identifier?.rawValue == wanted { return root as? NSButton }
             for child in root.subviews { if let hit = search(child) { return hit } }
@@ -699,7 +737,10 @@ final class LocalModelsSectionView: NSView {
         // against this card's composited fill, tertiary body copy comes out at 2.26:1 and secondary at
         // 5.72:1, and 2.26:1 is below the 3:1 floor for even large text. This line is what tells you
         // what the control beside it actually does, so it has to be readable.
-        let hint = wrapped(.timerHint, LocalModelSetup.timerHint, x: textX, y: y, width: textW,
+        let hint = wrapped(.timerHint,
+                           LocalModelSetup.timerHint(
+                            ollamaInstalled: LocalAppRows.reading(.ollama, in: appsPresence)?.installed == true),
+                           x: textX, y: y, width: textW,
                            size: 10.5, color: .secondaryLabelColor)
         card.addSubview(hint)
         y = hint.frame.maxY
@@ -715,22 +756,31 @@ final class LocalModelsSectionView: NSView {
     private func buildResidency(in card: NSView, position: Double,
                                 x: CGFloat, width: CGFloat, at originY: CGFloat) -> CGFloat {
         var y = originY
-        let buttonW: CGFloat = 104
+        let buttons = LocalModelSetup.unloadAllButtons(residency)
+        drawnUnloadBackends = buttons.map(\.backend)
+        // 1.1.0's one button keeps its width; two app-named ones need room for "Unload all in LM Studio".
+        let buttonW: CGFloat = buttons.count > 1 ? 150 : 104
+        let buttonsW = CGFloat(buttons.count) * buttonW + CGFloat(buttons.count - 1) * 6
 
         card.addSubview(title(.residencyTitle, LocalModelSetup.residencyTitle,
-                              x: x, y: y + 4, width: width - buttonW - 8))
+                              x: x, y: y + 4, width: width - buttonsW - 8))
 
         // Offered even with nothing to unload, disabled rather than hidden: a button that appears and
         // disappears with the resident set would move every line under it on a five-second timer.
-        let unload = NSButton(title: unloading ? LocalModelSetup.unloadingTitle
-                                               : LocalModelSetup.unloadAllTitle,
-                              target: self, action: #selector(unloadAllClicked))
-        unload.bezelStyle = .rounded
-        unload.font = .systemFont(ofSize: 11)
-        unload.identifier = identifier(.unloadAll)
-        unload.frame = NSRect(x: x + width - buttonW, y: y, width: buttonW, height: 24)
-        unload.isEnabled = !unloading && LocalModelSetup.canUnloadAll(residency)
-        card.addSubview(unload)
+        var buttonX = x + width - buttonsW
+        for (backend, buttonTitle) in buttons {
+            let unload = NSButton(title: isUnloading(backend) ? LocalModelSetup.unloadingTitle : buttonTitle,
+                                  target: self,
+                                  action: backend == .ollama ? #selector(unloadAllOllamaClicked)
+                                                             : #selector(unloadAllClicked))
+            unload.bezelStyle = .rounded
+            unload.font = .systemFont(ofSize: 11)
+            unload.identifier = identifier(Self.unloadPart(backend))
+            unload.frame = NSRect(x: buttonX, y: y, width: buttonW, height: 24)
+            unload.isEnabled = !isUnloading(backend) && LocalModelSetup.canUnloadAll(residency, in: backend)
+            card.addSubview(unload)
+            buttonX += buttonW + 6
+        }
         y += 28
 
         let list = residencyBlock(LocalModelSetup.residencyList(residency, now: environment.now()),
@@ -854,6 +904,23 @@ final class LocalModelsSectionView: NSView {
             Self.onMain {
                 guard let self = self else { return }
                 self.unloading = false
+                self.refreshResidency()
+            }
+        }
+    }
+
+    /// Ollama's Unload all, the same contract as LM Studio's above: everything in `/api/ps` gets
+    /// `keep_alive: 0`, and the readout re-measures afterwards rather than believing the request.
+    @objc private func unloadAllOllamaClicked(_ sender: NSButton) {
+        guard !unloadingOllama else { return }
+        unloadingOllama = true
+        sender.isEnabled = false
+        sender.title = LocalModelSetup.unloadingTitle
+        Log.write("setup tab: unload all in Ollama requested")
+        environment.unloadAllOllama { [weak self] in
+            Self.onMain {
+                guard let self = self else { return }
+                self.unloadingOllama = false
                 self.refreshResidency()
             }
         }
