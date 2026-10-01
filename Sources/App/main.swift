@@ -186,6 +186,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // shim), how a bundle snapshot is addressed in the receipt, and snapshot retention. Offline: fake
     // ChatGPT.app layouts and fake stores under TMPDIR only.
     case codexCLILocationSelftest = "--codex-cli-location-selftest"
+    // "Codex not found" versus "Codex could not be sandboxed" on every surface: boundary error, HUD
+    // allowlist, Setup/Preflight row. Offline: fake ChatGPT.app layouts under TMPDIR only.
+    case codexBoundarySentenceSelftest = "--codex-boundary-sentence-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -130,6 +130,9 @@ enum CodexProviderSelfTest {
         check("provider smoke unavailable state includes its boundary cause",
               completed && output.contains(
                 "[codex-provider-smoke-selftest][PASS] unavailable preserves the generic line and emits the boundary cause"))
+        check("provider smoke unavailable state prints the operator cause, not only the user sentence",
+              completed && output.contains(
+                "[codex-provider-smoke-selftest][PASS] unavailable prints the operator cause beside the user sentence"))
         check("provider smoke rejected runtime outcome includes its exact cause",
               completed && output.contains(
                 "[codex-provider-smoke-selftest][PASS] rejected runtime outcome includes exact classification cause"))

@@ -320,6 +320,9 @@ enum HUDRender {
             ("memory-facts", CleanupClient.memoryFactsUnavailableMessage),
             ("spend-cap", CleanupClient.geminiSpendCapMessage),
             ("rejected-key", CleanupClient.geminiRejectedKeyMessage),
+            // ADR 0020 two-sentence amendment (DRAFT): the not-found sentence rides the same pill. It is
+            // shorter than over-budget. The sandbox sentence predates this contract and is not added here.
+            ("codex-not-found", CodexProviderRuntime.codexNotFoundMessage),
             ("unavailable", TextTransformRetryDescriptor.Failure.unavailable.userMessage),
             ("timed-out", TextTransformRetryDescriptor.Failure.timedOut.userMessage),
             ("bad-output", TextTransformRetryDescriptor.Failure.badOutput.userMessage),

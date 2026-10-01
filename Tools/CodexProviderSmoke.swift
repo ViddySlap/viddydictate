@@ -1,6 +1,12 @@
 import Foundation
 
-private func connectionFailureLines(for state: CodexConnectionState) -> [String] {
+/// `cause` is the user sentence. `operator cause` is what actually refused (BoundaryError.description):
+/// for two weeks this gate printed only "could not be sandboxed" while the real cause, "Codex CLI is not
+/// installed", sat in an async log line that `exit(1)` dropped.
+private func connectionFailureLines(
+    for state: CodexConnectionState,
+    operatorCause: String? = nil
+) -> [String] {
     let generic = "[codex-provider-smoke][FAIL] dedicated ChatGPT subscription connection unavailable"
     switch state {
     case .connected:
@@ -9,6 +15,7 @@ private func connectionFailureLines(for state: CodexConnectionState) -> [String]
         return [generic]
     case .unavailable(let reason):
         return [generic, "[codex-provider-smoke][FAIL] cause: \(reason)"]
+            + (operatorCause.map { ["[codex-provider-smoke][FAIL] operator cause: \($0)"] } ?? [])
     }
 }
 
@@ -158,6 +165,17 @@ private func runDiagnosticsSelfTest() -> Bool {
             [
                 "[codex-provider-smoke][FAIL] dedicated ChatGPT subscription connection unavailable",
                 "[codex-provider-smoke][FAIL] cause: synthetic boundary mismatch",
+            ]
+        ),
+        (
+            "unavailable prints the operator cause beside the user sentence",
+            connectionFailureLines(
+                for: .unavailable(CodexProviderRuntime.codexNotFoundMessage),
+                operatorCause: "Codex CLI not found: synthetic"),
+            [
+                "[codex-provider-smoke][FAIL] dedicated ChatGPT subscription connection unavailable",
+                "[codex-provider-smoke][FAIL] cause: \(CodexProviderRuntime.codexNotFoundMessage)",
+                "[codex-provider-smoke][FAIL] operator cause: Codex CLI not found: synthetic",
             ]
         ),
         (
@@ -336,8 +354,9 @@ private struct CodexProviderSmokeMain {
                 stderr)
             exit(2)
         }
+        let report = CodexProviderRuntime.connectionReport(runnerPath: configuration.runner)
         let connectionFailure = connectionFailureLines(
-            for: CodexProviderRuntime.connectionState(runnerPath: configuration.runner))
+            for: report.state, operatorCause: report.operatorCause)
         guard connectionFailure.isEmpty else {
             for line in connectionFailure { fputs("\(line)\n", stderr) }
             exit(1)

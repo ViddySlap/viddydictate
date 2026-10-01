@@ -26,8 +26,11 @@ write; a first-run failure says explicitly that no last-known-good catalog exist
 The vendor CLI is resolved, in order, from
 `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` (ChatGPT
 26.924 and later) and then the older standalone `/Applications/ChatGPT.app/Contents/Resources/codex`.
-The `codex-cli/bin/codex` shell shim is never a candidate. A standalone CLI keeps the single-file
-snapshot `codex-<sha256>`. The
+The `codex-cli/bin/codex` shell shim is never a candidate. When neither path holds an executable the
+boundary refuses with "Codex was not found in ChatGPT.app"; once a candidate exists, every later refusal
+reads "Codex could not be sandboxed after a Codex update". The operator cause behind either sentence is
+logged and printed by `CodexProviderSmoke`. A standalone CLI keeps the single-file snapshot
+`codex-<sha256>`. The
 bundle CLI is provisioned and bundle-signed, so a lone copy of its executable is killed at launch; it is
 copied whole with `ditto` to `codex-executables/codex-<sha256 of the executable>.app/`, made owner-only
 and read-only, and must pass `codesign --verify --strict` before it is installed or reused. Its receipt
