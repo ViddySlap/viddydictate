@@ -37,8 +37,8 @@ import Cocoa
 ///     behind it, resolved under the appearance it is drawn in, at 4.5:1 or better;
 ///   - the page title, present, non-empty, and 4.5:1 both by colour resolution and in the rendered pixels;
 ///   - every button title, non-empty, and 4.5:1 against its own bezel in the rendered pixels (a bezel's colour is
-///     not readable from AppKit). A disabled button (Back on page 1) is exempt from the ratio, as WCAG exempts
-///     inactive controls, and its ratio is printed;
+///     not readable from AppKit). The tour shows no disabled buttons (page 1 hides Back), so in practice every
+///     visible button meets 4.5:1; the disabled-control exemption below stays only as WCAG's rule for future use;
 ///   - the capture is opaque, so the PNG is what the window shows, and the light and dark renders are the same
 ///     pixels, so the system appearance does not reach the tour;
 ///   - no empty title, body line or button title;
@@ -263,10 +263,15 @@ enum FeatureTourRenderCases {
         let skip = SelfTestRenderCapture.find(ID.skip, in: view) as? NSButton
         let dots = SelfTestRenderCapture.find(ID.dots, in: view)
         let last = index == pages.count - 1
-        check("[\(label)] the footer has Back, \(last ? "Done" : "Next"), Skip tour and the dots",
+        // Page 1 shows no Back (hidden, not dimmed), so every visible label on every page meets 4.5:1 with no
+        // disabled-control exemption; every later page shows an enabled Back.
+        let backShownRight = index == 0
+            ? back?.isHidden == true
+            : (back?.isHidden == false && back?.isEnabled == true && back?.title == FeatureTour.backTitle)
+        check("[\(label)] the footer has \(index == 0 ? "no Back" : "Back"), \(last ? "Done" : "Next"), Skip tour "
+              + "and the dots",
               next?.title == (last ? FeatureTour.doneTitle : FeatureTour.nextTitle)
-                && back?.title == FeatureTour.backTitle && back?.isEnabled == (index > 0)
-                && skip?.title == FeatureTour.skipTitle && dots != nil)
+                && backShownRight && skip?.title == FeatureTour.skipTitle && dots != nil)
         if let next {
             let footerParts: Set<String> = [ID.next, ID.back, ID.skip, ID.dots]
             let contentBottom = view.subviews

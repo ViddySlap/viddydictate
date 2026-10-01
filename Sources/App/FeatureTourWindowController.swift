@@ -589,10 +589,13 @@ final class FeatureTourPageView: NSView {
         next.frame.origin = NSPoint(x: L + width - next.frame.width, y: y)
         addSubview(next)
 
+        // Page 1 has nowhere to go back to, so it shows no Back at all rather than a dimmed one: a disabled
+        // control is the one label on the page that could not meet the tour's 4.5:1 rule, and it says nothing.
         let back = Self.button(FeatureTour.backTitle, selected: false, enabled: index > 0, target: self,
                                action: #selector(backClicked))
         back.identifier = NSUserInterfaceItemIdentifier(ID.back)
         back.frame.origin = NSPoint(x: next.frame.minX - back.frame.width - 10, y: y)
+        back.isHidden = index == 0
         addSubview(back)
 
         let dots = FeatureTourDotsView(count: count, current: index)
