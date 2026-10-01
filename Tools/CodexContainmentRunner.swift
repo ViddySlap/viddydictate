@@ -148,19 +148,63 @@ private func expectedExecutableIdentity(_ arguments: [String]) throws
         modifiedNanoseconds: modifiedNanoseconds)
 }
 
-private func receiptBoundExecutable(_ arguments: [String]) throws -> String {
-    guard let path = value("--binary-path", in: arguments),
-          path.hasPrefix("/"),
-          URL(fileURLWithPath: path).lastPathComponent.range(
-            of: #"^codex-[0-9a-f]{64}$"#,
+/// The two receipt-addressable snapshot shapes. A flat `codex-<sha256>` file is a standalone CLI. A
+/// bundle-signed CLI is snapshotted whole as `codex-<sha256>.app`, and only its
+/// `Contents/MacOS/codex` may be executed; its bundle root is the one extra read-only subtree the
+/// policy grants, because the kernel will not run that executable without its sealed bundle.
+private let bundleSnapshotExecutableSuffix = "/Contents/MacOS/codex"
+
+private func snapshotBundleRoot(_ executable: String) -> String? {
+    guard executable.hasSuffix(bundleSnapshotExecutableSuffix) else { return nil }
+    let root = String(executable.dropLast(bundleSnapshotExecutableSuffix.count))
+    guard root.hasPrefix("/"),
+          URL(fileURLWithPath: root).lastPathComponent.range(
+            of: #"^codex-[0-9a-f]{64}\.app$"#,
             options: .regularExpression) != nil else {
+        return nil
+    }
+    return root
+}
+
+private func receiptBoundExecutable(_ arguments: [String]) throws -> String {
+    guard let path = value("--binary-path", in: arguments), path.hasPrefix("/") else {
         throw RunnerError.failed("missing receipt-bound executable snapshot")
+    }
+    let flat = URL(fileURLWithPath: path).lastPathComponent.range(
+        of: #"^codex-[0-9a-f]{64}$"#,
+        options: .regularExpression) != nil
+    let bundleRoot = snapshotBundleRoot(path)
+    guard flat || bundleRoot != nil else {
+        throw RunnerError.failed("missing receipt-bound executable snapshot")
+    }
+    if let bundleRoot {
+        // The bundle is named by its executable's content address; a mismatch is a different build.
+        guard let sha256 = value("--binary-sha256", in: arguments),
+              URL(fileURLWithPath: bundleRoot).lastPathComponent == "codex-\(sha256).app" else {
+            throw RunnerError.failed("receipt-bound bundle snapshot is not content-addressed")
+        }
+        var rootStat = stat()
+        guard lstat(bundleRoot, &rootStat) == 0, (rootStat.st_mode & S_IFMT) == S_IFDIR else {
+            throw RunnerError.failed("missing receipt-bound executable snapshot")
+        }
     }
     var st = stat()
     guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
         throw RunnerError.failed("missing receipt-bound executable snapshot")
     }
-    return try canonicalExistingPath(path)
+    let canonical = try canonicalExistingPath(path)
+    if let bundleRoot {
+        // No link inside the bundle may redirect the executable: the canonical executable must sit at
+        // the canonical bundle root plus the fixed suffix, so the read grant and the exec literal
+        // describe the same tree.
+        guard canonical == (try canonicalExistingPath(bundleRoot)) + bundleSnapshotExecutableSuffix,
+              snapshotBundleRoot(canonical) != nil else {
+            throw RunnerError.failed("receipt-bound executable snapshot changed shape")
+        }
+    } else if snapshotBundleRoot(canonical) != nil {
+        throw RunnerError.failed("receipt-bound executable snapshot changed shape")
+    }
+    return canonical
 }
 
 private func validateExecutableIdentity(
@@ -214,6 +258,10 @@ private enum SandboxPolicy {
             roots: asPassedRoots, executable: executable)
             .map { "            (literal \(literal($0)))" }
             .joined(separator: "\n")
+        // Empty for a flat snapshot, so its policy bytes (and the pinned golden hashes) are unchanged.
+        let bundleRead = snapshotBundleRoot(executable).map {
+            "\n            (subpath \(literal($0)))"
+        } ?? ""
         return """
         (version 1)
         (deny default)
@@ -247,7 +295,7 @@ private enum SandboxPolicy {
             (subpath "/Library/Apple/System")
             (subpath \(literal(roots.home)))
             (subpath \(literal(roots.cwd)))
-            (subpath \(literal(roots.temp))))
+            (subpath \(literal(roots.temp)))\(bundleRead))
         (allow file-read*
             (literal "/")
             (literal "/etc")
@@ -265,7 +313,7 @@ private enum SandboxPolicy {
             (subpath "/Library/Apple/System")
             (subpath \(literal(roots.home)))
             (subpath \(literal(roots.cwd)))
-            (subpath \(literal(roots.temp))))
+            (subpath \(literal(roots.temp)))\(bundleRead))
         (allow file-write*
             (literal "/dev/null")
             (subpath \(literal(roots.home)))
@@ -307,6 +355,7 @@ private enum SandboxPolicy {
             throw RunnerError.failed(
                 "quarantine containment policy is not deny-network exact")
         }
+        try auditBundleRead(policy, executable: executable)
         for ancestor in try metadataAncestors(
             roots: asPassedRoots, executable: executable) {
             guard policy.contains("(literal \(literal(ancestor)))") else {
@@ -347,11 +396,38 @@ private enum SandboxPolicy {
         guard networkRules == 1 else { throw RunnerError.failed("containment has ambiguous network rules") }
         let rootLiteralRules = policy.components(separatedBy: "(literal \"/\")").count - 1
         guard rootLiteralRules == 2 else { throw RunnerError.failed("containment root literal is ambiguous") }
+        try auditBundleRead(policy, executable: executable)
         for ancestor in try metadataAncestors(
             roots: asPassedRoots, executable: executable) {
             guard policy.contains("(literal \(literal(ancestor)))") else {
                 throw RunnerError.failed("containment is missing exact ancestor metadata")
             }
+        }
+    }
+
+    /// A bundle snapshot adds exactly its own root, read-only, to the metadata and read rules: never a
+    /// write rule, never a second bundle, and never for a flat snapshot. process-exec stays the one
+    /// literal executable either way.
+    static func auditBundleRead(_ policy: String, executable: String) throws {
+        guard let pattern = try? NSRegularExpression(pattern: #"\(subpath "[^"]*\.app"\)"#) else {
+            throw RunnerError.failed("bundle-snapshot audit pattern is invalid")
+        }
+        let bundleRules = pattern.matches(
+            in: policy, range: NSRange(policy.startIndex..<policy.endIndex, in: policy)
+        ).compactMap { Range($0.range, in: policy).map { String(policy[$0]) } }
+        guard let root = snapshotBundleRoot(executable) else {
+            guard bundleRules.isEmpty else {
+                throw RunnerError.failed("flat-snapshot containment carries a bundle subtree")
+            }
+            return
+        }
+        let rule = "(subpath \(literal(root)))"
+        guard bundleRules == [rule, rule],
+              let write = policy.range(of: "(allow file-write*"),
+              !policy[write.lowerBound...].contains(rule),
+              policy.components(separatedBy: "(allow process-exec").count - 1 == 1,
+              policy.contains("(allow process-exec (literal \(literal(executable))))") else {
+            throw RunnerError.failed("bundle-snapshot containment is not exactly one read-only bundle")
         }
     }
 
@@ -1522,6 +1598,85 @@ private func runSelftest(arguments: [String]) throws {
         throw RunnerError.failed("same-path executable replacement race was accepted")
     }
     print("[containment-selftest][PASS] exact executable identity rejects replacement races")
+
+    // Bundle-signed CLI (ChatGPT 26.924, codex-cli 0.158): the snapshot is a whole
+    // `codex-<sha256>.app`. Only its Contents/MacOS/codex may execute and only its own root is added,
+    // read-only. A flat snapshot's policy bytes stay pinned by the golden hashes below.
+    let bundleFixtureBytes = Data("SYNTHETIC_BUNDLE_SNAPSHOT_EXECUTABLE".utf8)
+    let bundleFixtureSHA256 = SHA256.hash(data: bundleFixtureBytes)
+        .map { String(format: "%02x", $0) }.joined()
+    let bundleFixtureStore = root + "/codex-executables"
+    let bundleFixtureRoot = bundleFixtureStore + "/codex-\(bundleFixtureSHA256).app"
+    try FileManager.default.createDirectory(
+        atPath: bundleFixtureRoot + "/Contents/MacOS", withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+    try FileManager.default.createDirectory(
+        atPath: bundleFixtureStore + "/bin", withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+    let bundleFixtureExecutable = bundleFixtureRoot + "/Contents/MacOS/codex"
+    let bundleFixtureSibling = bundleFixtureRoot + "/Contents/MacOS/codex-helper"
+    let bundleFixtureShim = bundleFixtureStore + "/bin/codex"
+    for path in [bundleFixtureExecutable, bundleFixtureSibling] {
+        try bundleFixtureBytes.write(to: URL(fileURLWithPath: path))
+        _ = chmod(path, 0o500)
+    }
+    try Data("#!/bin/sh\nexec \"$0\" \"$@\"\n".utf8).write(to: URL(fileURLWithPath: bundleFixtureShim))
+    _ = chmod(bundleFixtureShim, 0o500)
+    func refusesBoundExecutable(_ arguments: [String]) -> Bool {
+        do { _ = try receiptBoundExecutable(["fixture"] + arguments); return false } catch { return true }
+    }
+    let boundBundleExecutable = try receiptBoundExecutable([
+        "fixture", "--binary-path", bundleFixtureExecutable, "--binary-sha256", bundleFixtureSHA256,
+    ])
+    guard boundBundleExecutable == (try canonicalExistingPath(bundleFixtureExecutable)),
+          refusesBoundExecutable(["--binary-path", bundleFixtureExecutable]),
+          refusesBoundExecutable([
+            "--binary-path", bundleFixtureExecutable,
+            "--binary-sha256", String(repeating: "0", count: 64)]),
+          refusesBoundExecutable([
+            "--binary-path", bundleFixtureSibling, "--binary-sha256", bundleFixtureSHA256]),
+          refusesBoundExecutable([
+            "--binary-path", bundleFixtureShim, "--binary-sha256", bundleFixtureSHA256]) else {
+        throw RunnerError.failed(
+            "bundle snapshot executable binding admitted a shim, sibling, or unaddressed bundle")
+    }
+    let bundleNetworkPolicy = try SandboxPolicy.build(
+        roots: roots, executable: boundBundleExecutable, proxyPort: 43117)
+    try SandboxPolicy.audit(
+        bundleNetworkPolicy, roots: roots, executable: boundBundleExecutable, proxyPort: 43117)
+    let bundleQuarantinePolicy = try SandboxPolicy.buildQuarantine(
+        roots: roots, executable: boundBundleExecutable)
+    try SandboxPolicy.auditQuarantine(
+        bundleQuarantinePolicy, roots: roots, executable: boundBundleExecutable)
+    let bundleReadRule = "(subpath \"\(try canonicalExistingPath(bundleFixtureRoot))\")"
+    let widenedBundlePolicy = bundleNetworkPolicy.replacingOccurrences(
+        of: "(allow file-write*\n",
+        with: "(allow file-write*\n            \(bundleReadRule)\n")
+    var widenedBundleRejected = false
+    do {
+        try SandboxPolicy.audit(
+            widenedBundlePolicy, roots: roots, executable: boundBundleExecutable, proxyPort: 43117)
+    } catch {
+        widenedBundleRejected = true
+    }
+    var bundleRuleOnFlatRejected = false
+    do {
+        try SandboxPolicy.auditBundleRead(
+            placeholder.replacingOccurrences(
+                of: "(allow file-write*\n",
+                with: "(allow file-write*\n            \(bundleReadRule)\n"),
+            executable: executable)
+    } catch {
+        bundleRuleOnFlatRejected = true
+    }
+    guard bundleNetworkPolicy.components(separatedBy: bundleReadRule).count - 1 == 2,
+          bundleQuarantinePolicy.components(separatedBy: bundleReadRule).count - 1 == 2,
+          bundleNetworkPolicy.contains(
+            "(allow process-exec (literal \"\(boundBundleExecutable)\"))"),
+          widenedBundleRejected, bundleRuleOnFlatRejected else {
+        throw RunnerError.failed("bundle snapshot policy is not exactly one read-only bundle subtree")
+    }
+    print("[containment-selftest][PASS] bundle snapshot: exec pinned to Contents/MacOS/codex, one read-only bundle subtree, shim/sibling/unaddressed bundle refused")
 
     let watchdogPIDFile = root + "/watchdog-descendant.pid"
     let watchdogPID = try spawnProcess(

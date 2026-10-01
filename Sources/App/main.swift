@@ -100,6 +100,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // The restrictive Codex config parsed as TOML, with a dotted feature name and the 1.1.0 bare-key
     // writer as its negative control. Offline: a fixture inventory and a scratch directory only.
     case codexConfigTOMLSelftest = "--codex-config-toml-selftest"
+    // Where the Codex CLI is found (CodexCLI.app first, the old standalone path second, never the sh
+    // shim), how a bundle snapshot is addressed in the receipt, and snapshot retention. Offline: fake
+    // ChatGPT.app layouts and fake stores under TMPDIR only.
+    case codexCLILocationSelftest = "--codex-cli-location-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

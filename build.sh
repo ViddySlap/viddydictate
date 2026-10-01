@@ -288,6 +288,7 @@ swiftc -O \
 echo "[build] compiling authenticated Codex isolation audit"
 swiftc -O \
   "$ROOT/Sources/Shared/CodexIsolationFoundation.swift" \
+  "$ROOT/Sources/Shared/CodexCLILocation.swift" \
   "$ROOT/Sources/App/AppPaths.swift" \
   "$ROOT/Sources/App/UserDataWriteFailure.swift" \
   "$ROOT/Sources/App/Log.swift" \
@@ -299,6 +300,7 @@ echo "[build] compiling production Codex provider smoke"
 swiftc -O \
   "$ROOT/Sources/Shared/CodexShippedDefaults.swift" \
   "$ROOT/Sources/Shared/CodexIsolationFoundation.swift" \
+  "$ROOT/Sources/Shared/CodexCLILocation.swift" \
   "$ROOT/Sources/App/AppPaths.swift" \
   "$ROOT/Sources/App/UserDataWriteFailure.swift" \
   "$ROOT/Sources/App/Log.swift" \
