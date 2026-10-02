@@ -1,0 +1,5 @@
+# One historical finding, accepted by its exact fingerprint (not a rule or path allowlist).
+# Tools/CodexProviderSmoke.swift line 280 at cf8fb34 holds SYNTHETIC token-shaped strings that the
+# smoke's --diagnostics-selftest feeds its redactor to prove it hides real tokens. They are not
+# credentials. Every other generic-api-key finding, in this file or anywhere else, stays active.
+cf8fb34d59e44439a92e416ecae540d4123444b3:Tools/CodexProviderSmoke.swift:generic-api-key:280
