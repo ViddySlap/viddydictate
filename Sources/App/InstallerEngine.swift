@@ -275,8 +275,13 @@ enum BootstrapInstallPlan {
     /// The user-facing entry point for installing a component. Keep this beside the descriptors so
     /// remedies name the same component the in-app installer presents, rather than drifting into a
     /// repository-only command that a DMG user cannot run.
+    ///
+    /// It names the Setup tab's real button by its constant, never a copied literal: the Setup tab has no
+    /// per-row "Install now" for the core. True for the mandatory core only (its callers: the transcription
+    /// engine and web search), because first-run setup always queues the core whatever else is picked (B2).
     static func installPrompt(for component: InstallerComponentDescriptor) -> String {
-        "open Settings > Setup and choose Install now for \(component.title)"
+        "open Settings > Setup, choose \"\(FirstRunSetupPresenter.rerunTitle)\" and then "
+            + "\(ComponentPicker.continueTitle) to install \(component.title)"
     }
 }
 

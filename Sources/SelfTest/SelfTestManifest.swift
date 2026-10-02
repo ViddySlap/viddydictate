@@ -530,6 +530,16 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .codexBundleSnapshotHostSelftest: .init(tier: .deterministic) { _ in
         CodexBundleSnapshotHostSelfTest.run() ? 0 : 1
     },
+    // Pure: WhisperdAgentLoader over a fake launchctl that models one gui/<uid> domain, plus a read of the
+    // two production call sites. The real /bin/launchctl is never run and no launchd domain is touched.
+    .whisperdAgentLoadSelftest: .init(tier: .deterministic) { _ in
+        WhisperdAgentLoadSelfTest.run() ? 0 : 1
+    },
+    // Pure: the remedy strings and a read of SetupSettingsView.swift. No view, no window. The AppKit half
+    // (the button on screen, clicked once) is --setup-render.
+    .setupRemedyCopySelftest: .init(tier: .deterministic) { _ in
+        SetupRemedyCopySelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

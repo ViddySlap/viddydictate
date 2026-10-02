@@ -248,7 +248,8 @@ enum WebSearchSelfTest {
     private static func runOutputTests() -> (Bool, [OutputResult]) {
         print("--- end-to-end output test (real SearchClient local pipeline -> LM Studio + DuckDuckGo) ---")
         guard WebSearchBackend.isInstalled else {
-            print("  search backend NOT installed — open Settings > Setup and choose Install now for Web search. Cannot run E2E.")
+            print("  search backend NOT installed — "
+                + BootstrapInstallPlan.installPrompt(for: BootstrapInstallPlan.webSearch) + ". Cannot run E2E.")
             return (false, [])
         }
         var results: [OutputResult] = []

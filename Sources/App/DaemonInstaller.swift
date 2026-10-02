@@ -217,16 +217,14 @@ extension DaemonInstaller {
         return result
     }
 
-    /// The production restart action, styled after `DaemonClient.kickstart`. `-k` restarts an agent
-    /// that is already loaded; a fresh plist that is not yet loaded is picked up on the next kickstart.
+    /// The production restart action. A kickstart alone cannot start a fresh plist: launchd has not
+    /// loaded it yet (it would on the next login), so kickstart answers 113 and transcription waits for
+    /// a logout. `WhisperdAgentLoader` bootstraps the agent when it is not loaded and restarts it (`-k`)
+    /// when it is. Runs on the installer's own background queue, never the main thread.
     private static func restartDaemonAgent() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(DaemonClient.agentLabel)"]
-        do {
-            try process.run()
-        } catch {
-            Log.write("daemon-install: launchctl restart failed — \(error.localizedDescription)")
+        let outcome = WhisperdAgentLoader.forCurrentUser().loadAndStart(restartIfLoaded: true)
+        if case .failed(let detail) = outcome {
+            Log.write("daemon-install: launchctl restart failed — \(detail)")
         }
     }
 }

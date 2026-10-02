@@ -74,8 +74,9 @@ enum DaemonClient {
         }
     }
 
-    /// Ensure the daemon is up + warm: if /health isn't ready, `launchctl kickstart` the agent
-    /// and poll /health until ready (bounded ~20 s for the cold model load).
+    /// Ensure the daemon is up + warm: if /health isn't ready, load the agent if launchd does not have
+    /// it yet and `launchctl kickstart` it, then poll /health until ready (bounded ~20 s for the cold
+    /// model load).
     static func ensureUp(_ completion: @escaping (Bool) -> Void) {
         health { ready, _ in
             if ready { completion(true); return }
@@ -84,11 +85,14 @@ enum DaemonClient {
         }
     }
 
+    /// The same load-if-needed path the installer uses, so an agent that was never loaded (a fresh
+    /// account before its next login) is bootstrapped here too. Plain kickstart, no `-k`: a daemon that
+    /// is still loading its model is left alone. launchctl blocks, so it runs on its own queue and the
+    /// poll starts at once, as it did when this was fire-and-forget.
     private static func kickstart() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = ["kickstart", "gui/\(getuid())/\(agentLabel)"]
-        try? p.run()
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = WhisperdAgentLoader.forCurrentUser().loadAndStart(restartIfLoaded: false)
+        }
     }
 
     private static func pollReady(deadline: Date, completion: @escaping (Bool) -> Void) {

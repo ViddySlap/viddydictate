@@ -193,6 +193,13 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // with three negative controls. Host gate: on the Mac it needs codesign and runs on APFS (where the
     // 74b34e6 rename order failed); without codesign it abstains, and on macOS a missing codesign fails.
     case codexBundleSnapshotHostSelftest = "--codex-bundle-snapshot-host-selftest"
+    // A fresh account's whisperd LaunchAgent is bootstrapped when launchd has not loaded it, and a loaded one
+    // is never bootstrapped twice. A fake launchctl domain, the old kickstart-only strategy as its negative
+    // control. Named so neither it nor --daemon-install-selftest contains the other.
+    case whisperdAgentLoadSelftest = "--whisperd-agent-load-selftest"
+    // The Setup install remedy names the Setup tab's real button (FirstRunSetupPresenter.rerunTitle), never
+    // the nonexistent "Install now"; the old wording is its negative control.
+    case setupRemedyCopySelftest = "--setup-remedy-copy-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

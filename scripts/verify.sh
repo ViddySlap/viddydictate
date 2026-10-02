@@ -703,6 +703,12 @@ tier_deterministic() {
         run_gate deterministic "daemon-install absent arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --daemon-install-selftest --only absent || true
+        run_gate deterministic "whisperd agent bootstrapped when not loaded, never twice (kickstart-only control)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --whisperd-agent-load-selftest || true
+        run_gate deterministic "Setup install remedy names the real first-run setup button (old wording control)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --setup-remedy-copy-selftest || true
         run_gate deterministic "daemon warming HUD phase fixture selftest (ignore-phase mutant caught)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --daemon-warming-hud-selftest || true
