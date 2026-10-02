@@ -153,11 +153,18 @@ enum InstallerReworkSelfTest {
 
         var relaunchCalls = 0
         let relauncher = AppRelauncher(relaunch: { relaunchCalls += 1 })
-        if response == .offerRelaunch {
+        switch response {
+        case .offerRelaunch:
             relauncher.relaunch()
+            reporter.record(
+                "offerRelaunch invokes the injected relauncher exactly once",
+                relaunchCalls == 1, "calls=\(relaunchCalls)")
+        case .reArmTap:
+            reporter.record(
+                "reArmTap never calls the relauncher", relaunchCalls == 0, "calls=\(relaunchCalls)")
+        case .none:
+            break
         }
-        reporter.record(
-            "(context) AppRelauncher is spy-able and calls nothing on its own", relaunchCalls == 0)
 
         // Once already live, nothing further should be offered - the control half of this arm.
         let alreadyLive = PostLaunchGrantPolicy.respond(
