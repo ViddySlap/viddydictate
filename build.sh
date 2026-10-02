@@ -327,6 +327,7 @@ cp "$ROOT/viddydictate_whisperd.py" "$ROOT/com.viddydictate.whisperd.plist" "$RE
 
 echo "[build] writing Info.plist"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/AppIcon.icns" "$RES/AppIcon.icns"
 
 # release.sh stamps a version here rather than committing one, so the source Info.plist stays the
 # single development value and a release is not a dirty tree. Stamped BEFORE signing, because the
@@ -531,6 +532,7 @@ cp "$ROOT/viddydictate_whisperd.py" "$ROOT/com.viddydictate.whisperd.plist" "$TE
 
 echo "[build][tests] writing Info.plist"
 cp "$ROOT/Info-Tests.plist" "$TEST_APP/Contents/Info.plist"
+cp "$ROOT/AppIcon.icns" "$TEST_RES/AppIcon.icns"
 
 # The verification bundle gets the same runtime as the shipped one. Two bundles that differ in what
 # they contain is how a gate goes green over an app that is broken: every selftest that reaches for
