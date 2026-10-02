@@ -804,11 +804,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func requestPermissions() {
-        let ax = Permissions.accessibility(prompt: true)
-        let im = Permissions.inputMonitoring(prompt: true)
-        Permissions.microphone { granted in Log.write("mic permission granted=\(granted)") }
-        Log.write("perms ax=\(ax) im=\(im)")
-        if ax && im {
+        guard let result = LaunchPermissionSequence.run(
+            shouldRequest: LaunchPermissionPolicy.shouldRequestAtLaunch(
+                setupWindowWillShow: FirstRunSetupPresenter.shared.launchShowsWindow))
+        else { return }
+        if result.accessibility && result.inputMonitoring {
             startController()
         } else {
             statusLabel.title = "Dictation: grant Accessibility + Input Monitoring, then relaunch"

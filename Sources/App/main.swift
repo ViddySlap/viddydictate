@@ -200,6 +200,12 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // The Setup install remedy names the Setup tab's real button (FirstRunSetupPresenter.rerunTitle), never
     // the nonexistent "Install now"; the old wording is its negative control.
     case setupRemedyCopySelftest = "--setup-remedy-copy-selftest"
+    // vdinga G1's protected gate arms (chain/installer-rework-20261002): launch-window, no-launch-prompts,
+    // im-request, relaunch, no-bootstrap-before-venv, plist-associated, unchanged-still-loads,
+    // setup-choice, ready-step, preference-control.
+    case installerReworkSelftest = "--installer-rework-selftest"
+    // vdinga G1's render gate, NOT protected: every installer screen that exists, light and dark.
+    case installerReworkRender = "--installer-rework-render"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

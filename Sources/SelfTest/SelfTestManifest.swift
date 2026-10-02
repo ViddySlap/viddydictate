@@ -540,6 +540,22 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .setupRemedyCopySelftest: .init(tier: .deterministic) { _ in
         SetupRemedyCopySelfTest.run() ? 0 : 1
     },
+    // vdinga G1: ten protected arms over scratch state and injected seams. No network, no real
+    // launchctl, no real TCC, no on-screen window. Tier `.excluded` for now (not `.deterministic`) so
+    // the selftest-flag manifest drift check does not require it in verify.sh before vdinwire wires it
+    // in by name - house rule for this link: "do not wire any new flag into scripts/verify.sh".
+    .installerReworkSelftest: .init(tier: .excluded) { arguments in
+        InstallerReworkSelfTest.run(arguments: arguments)
+    },
+    // vdinga G1: every installer screen that exists today, light and dark. Not wired into verify.sh yet.
+    .installerReworkRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--installer-rework-render"), i + 1 < arguments.count
+        else {
+            print("[installer-rework-render] FAIL: an output directory is required")
+            return 2
+        }
+        return InstallerReworkRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

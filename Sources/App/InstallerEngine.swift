@@ -547,6 +547,12 @@ final class InstallerEngine {
     /// reaches the real home or the real launchd domain: production supplies `DaemonInstaller`,
     /// tests leave it nil.
     typealias DaemonInstallPerforming = () -> DaemonInstallResult
+    /// Seam only (gap G-UNCHANGED): a hook that would ensure the whisperd agent is loaded and running,
+    /// independent of what `daemonInstaller` reports. `install()` does not call it yet, so a
+    /// `daemonInstaller` result of `.unchanged` still means exactly what it means at 42eec8e - the
+    /// post-setup install path never re-arms an agent a launch-time write may have left unstarted. A
+    /// later link wires this in for the `.unchanged` case.
+    typealias DaemonAgentEnsureLoaded = () -> Void
 
     private struct CommandOutcome {
         let result: InstallerCommandResult
@@ -564,6 +570,7 @@ final class InstallerEngine {
     private let sleep: Sleep
     private let fileManager: FileManager
     private let daemonInstaller: DaemonInstallPerforming?
+    private let daemonAgentEnsureLoaded: DaemonAgentEnsureLoaded?
     private let environment: [String: String]
 
     init(paths: InstallerPaths = .live,
@@ -571,7 +578,8 @@ final class InstallerEngine {
          local: InstallerLocalPerforming? = nil,
          sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
          fileManager: FileManager = .default,
-         daemonInstaller: DaemonInstallPerforming? = nil) {
+         daemonInstaller: DaemonInstallPerforming? = nil,
+         daemonAgentEnsureLoaded: DaemonAgentEnsureLoaded? = nil) {
         self.paths = paths
         self.runner = runner
         self.local = local ?? LiveInstallerLocalPerformer(
@@ -581,6 +589,7 @@ final class InstallerEngine {
         self.sleep = sleep
         self.fileManager = fileManager
         self.daemonInstaller = daemonInstaller
+        self.daemonAgentEnsureLoaded = daemonAgentEnsureLoaded
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HOME"] = paths.modelCache.path
         environment["HUGGINGFACE_HUB_CACHE"] = paths.modelCache.appendingPathComponent("hub").path
