@@ -13,6 +13,6 @@ enum ReopenRoutingPolicy {
     }
 
     static func route(setupComplete: Bool) -> Route {
-        .openSettings
+        setupComplete ? .openSettings : .openSetupWindow
     }
 }

@@ -40,6 +40,7 @@ enum InstallerReworkRender {
             app.appearance = NSAppearance(named: appearance)
             renderWelcome(outDir: outDir, suffix: suffix)
             renderPermissions(outDir: outDir, suffix: suffix)
+            renderPermissionsRelaunch(outDir: outDir, suffix: suffix)
             renderProgress(outDir: outDir, suffix: suffix)
         }
 
@@ -80,6 +81,41 @@ enum InstallerReworkRender {
 
         none.apply(status: PermissionsStatus(microphone: true, accessibility: true, inputMonitoring: true))
         capture(none, to: outDir + "/permissions-all-\(suffix).png", name: "permissions, all granted - \(suffix)")
+    }
+
+    // MARK: - permissions relaunch (spec item 5)
+
+    private static func renderPermissionsRelaunch(outDir: String, suffix: String) {
+        let sampler = InstallerReworkRenderByteSampler()
+        sampler.package = (ComponentPicker.SizeCatalog.measured.transcriptionEngine ?? 0) * 2 / 3
+        let granted = PermissionsStatus(microphone: true, accessibility: true, inputMonitoring: true)
+
+        // Waiting: the install queue is still running, so the Relaunch button renders disabled with the
+        // "becomes available when setup finishes" caption.
+        var installingState = InstallProgressState(plan: corePlan())
+        let installing = snapshot([BootstrapInstallPlan.sttDaemon.id: .installing])
+        installingState.apply(snapshot: installing, sampler: sampler, at: 0)
+        let waiting = PermissionsSetupView(width: 620, status: granted,
+                                           progressRows: installingState.rows,
+                                           aggregate: installingState.aggregate)
+        host(waiting)
+        waiting.apply(status: granted, relaunchOffer: true)
+        capture(waiting, to: outDir + "/permissions-relaunch-waiting-\(suffix).png",
+                name: "permissions, relaunch offered while installing - \(suffix)")
+
+        // Enabled: every component installed, so aggregate.anyRunning is false and the button is live.
+        var doneState = InstallProgressState(plan: corePlan())
+        doneState.apply(
+            snapshot: snapshot([BootstrapInstallPlan.sttDaemon.id: .installed,
+                              BootstrapInstallPlan.webSearch.id: .installed]),
+            sampler: sampler, at: 1)
+        let enabled = PermissionsSetupView(width: 620, status: granted,
+                                           progressRows: doneState.rows,
+                                           aggregate: doneState.aggregate)
+        host(enabled)
+        enabled.apply(status: granted, relaunchOffer: true)
+        capture(enabled, to: outDir + "/permissions-relaunch-\(suffix).png",
+                name: "permissions, relaunch offered and enabled - \(suffix)")
     }
 
     // MARK: - progress (B7)

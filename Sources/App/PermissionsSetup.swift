@@ -165,6 +165,7 @@ enum PermissionsGrant {
             request { granted in completion(granted) }
             return true
         case .openSettings(let permission):
+            if permission == .inputMonitoring { _ = requestInputMonitoring() }
             let opened = opener(permission.settingsURL)
             completion(false)
             return opened

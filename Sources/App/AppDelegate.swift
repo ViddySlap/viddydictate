@@ -549,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             Log.write("notes-control: FAILED to bind a loopback port (8766..) — control endpoint unavailable")
         }
+        FirstRunSetupPresenter.shared.hotkeyTapLive = { [weak self] in self?.hotkeyTapLive ?? false }
         requestPermissions()
         startBatteryAdvisoryMonitoring()
         // An app update carries its daemon update: the script and LaunchAgent template ship inside the
@@ -671,6 +672,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         return .terminateNow
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        let setupComplete = BootstrapInstallCoordinator.shared.snapshot.mandatoryCoreComplete
+        switch ReopenRoutingPolicy.route(setupComplete: setupComplete) {
+        case .openSetupWindow: FirstRunSetupPresenter.shared.presentAgain()
+        case .openSettings: settingsWC.show()
+        }
+        return true
     }
 
     private func routeOpenedPath(_ url: URL, preferredWindowId: String? = nil) {

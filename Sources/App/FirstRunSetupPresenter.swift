@@ -21,6 +21,10 @@ final class FirstRunSetupPresenter {
     static let rerunIdentifier = "setup-rerun-first-run"
 
     private let coordinator: BootstrapInstallCoordinator
+    /// Whether this launch's global key tap is live, asked by the permissions screen to decide whether
+    /// to offer a relaunch (`PostLaunchGrantPolicy`). Defaults false, so a presenter built without a
+    /// host (or in a selftest) never claims the tap is live.
+    var hotkeyTapLive: () -> Bool = { false }
     private var controller: FirstRunSetupWindowController?
     private var tokens: [NSObjectProtocol] = []
     private var measuring = false
@@ -101,6 +105,7 @@ final class FirstRunSetupPresenter {
         controller.onRetry = { [weak self] _ in self?.retry() }
         controller.onSetUpLater = { [weak self] in self?.setUpLater() }
         controller.onClose = { [weak self] in self?.closed() }
+        controller.tapLive = hotkeyTapLive
         self.controller = controller
         startWatching()
         // Activates first (the app is an accessory), then makeKeyAndOrderFront.

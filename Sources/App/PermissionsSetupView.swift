@@ -13,10 +13,14 @@ final class PermissionsSetupView: NSView {
     /// opens anything itself, so what a press does is decided in one place and testable there.
     var onGrant: ((SetupPermission) -> Void)?
     var onContinue: (() -> Void)?
+    /// Fired by the Relaunch button. The host performs the relaunch (`AppRelauncher`), so the view
+    /// neither spawns a process nor terminates the app itself.
+    var onRelaunch: (() -> Void)?
 
     private(set) var status: PermissionsStatus
     private var progressRows: [InstallProgress.Row]
     private var aggregate: InstallProgress.Aggregate
+    private var relaunchOffer: Bool = false
 
     private let W: CGFloat
     private let L: CGFloat = 20
@@ -40,12 +44,14 @@ final class PermissionsSetupView: NSView {
     required init?(coder: NSCoder) { fatalError("no coder") }
 
     @discardableResult
-    func apply(status: PermissionsStatus? = nil, progress: InstallProgressState? = nil) -> CGFloat {
+    func apply(status: PermissionsStatus? = nil, progress: InstallProgressState? = nil,
+               relaunchOffer: Bool? = nil) -> CGFloat {
         if let status { self.status = status }
         if let progress {
             progressRows = progress.rows
             aggregate = progress.aggregate
         }
+        if let relaunchOffer { self.relaunchOffer = relaunchOffer }
         rebuild()
         return frame.height
     }
@@ -74,6 +80,30 @@ final class PermissionsSetupView: NSView {
 
         for permission in SetupPermission.allCases {
             y = addRow(permission, at: y, width: contentW) + 8
+        }
+
+        // Spec item 5: once Accessibility and Input Monitoring are both granted but this launch's tap
+        // never started, the only thing that revives the hotkey is a restart. Shown between the rows
+        // and Continue so it reads as part of the permission walkthrough, never overlapped by it.
+        if relaunchOffer {
+            let caption = SettingsSectionKit.wrapped(
+                aggregate.anyRunning
+                    ? "Relaunch becomes available when setup finishes"
+                    : "macOS needs ViddyDictate to restart before the keyboard shortcut works",
+                x: L, y: y, width: contentW, size: 11, color: .secondaryLabelColor)
+            caption.identifier = NSUserInterfaceItemIdentifier("permissions-relaunch-caption")
+            addSubview(caption)
+            y = caption.frame.maxY + 8
+
+            let relaunch = NSButton(title: "Relaunch ViddyDictate", target: self,
+                                    action: #selector(relaunchClicked))
+            relaunch.bezelStyle = .rounded
+            // SAFETY: never relaunch while the install queue is running - it would kill a download.
+            relaunch.isEnabled = !aggregate.anyRunning
+            relaunch.frame = NSRect(x: L, y: y, width: 180, height: 26)
+            relaunch.identifier = NSUserInterfaceItemIdentifier("permissions-relaunch-button")
+            addSubview(relaunch)
+            y = relaunch.frame.maxY + 16
         }
 
         y += 6
@@ -169,4 +199,6 @@ final class PermissionsSetupView: NSView {
     }
 
     @objc private func continueClicked() { onContinue?() }
+
+    @objc private func relaunchClicked() { onRelaunch?() }
 }

@@ -17,7 +17,8 @@ enum PostLaunchGrantResponse: Equatable {
 enum PostLaunchGrantPolicy {
     static func respond(accessibilityGranted: Bool, inputMonitoringGranted: Bool,
                         tapLive: Bool) -> PostLaunchGrantResponse {
-        .none
+        guard accessibilityGranted, inputMonitoringGranted, !tapLive else { return .none }
+        return .offerRelaunch
     }
 }
 

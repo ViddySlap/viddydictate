@@ -11,7 +11,7 @@ import Foundation
 /// permissions walkthrough instead.
 enum LaunchPermissionPolicy {
     static func shouldRequestAtLaunch(setupWindowWillShow: Bool) -> Bool {
-        true
+        !setupWindowWillShow
     }
 }
 

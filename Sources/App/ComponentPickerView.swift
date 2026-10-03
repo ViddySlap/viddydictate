@@ -487,6 +487,9 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// What a running row last reported, by descriptor id (`BootstrapInstallCoordinator.activity(for:)`). Read
     /// on every progress refresh, so an Ollama pull shows its bytes and the approval wait its own words.
     var activity: (String) -> InstallerLocalActivity? = { _ in nil }
+    /// Whether this launch's global key tap is live, read by the permissions poll to decide whether to
+    /// offer a relaunch once Accessibility and Input Monitoring both read granted.
+    var tapLive: () -> Bool = { false }
 
     enum Step: Equatable {
         case picker
@@ -511,6 +514,7 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     private(set) var progress: InstallProgressState?
     private(set) var permissions: PermissionsStatus
     private var lastSnapshot: BootstrapSnapshot?
+    private var lastRelaunchOffer = false
 
     private let contentWidth: CGFloat = 620
 
@@ -632,6 +636,7 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
                                             ?? InstallProgress.aggregate([]))
         view.onGrant = { [weak self] in self?.grantTapped($0) }
         view.onContinue = { [weak self] in self?.showProgress() }
+        view.onRelaunch = { AppRelauncher().relaunch() }
         permissionsView = view
         return view
     }
@@ -681,9 +686,14 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
 
     func refreshPermissions() {
         let current = readPermissions()
-        guard current != permissions else { return }
+        let offerRelaunch = PostLaunchGrantPolicy.respond(
+            accessibilityGranted: current.accessibility,
+            inputMonitoringGranted: current.inputMonitoring,
+            tapLive: tapLive()) == .offerRelaunch
+        guard current != permissions || offerRelaunch != lastRelaunchOffer else { return }
         permissions = current
-        permissionsView?.apply(status: current)
+        lastRelaunchOffer = offerRelaunch
+        permissionsView?.apply(status: current, relaunchOffer: offerRelaunch)
         resize()
     }
 
