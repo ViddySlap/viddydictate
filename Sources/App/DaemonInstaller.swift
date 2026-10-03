@@ -25,6 +25,10 @@ enum DaemonInstallResult: Equatable {
     case installed
     case upgraded(preservedBackup: URL?)
     case unchanged
+    /// The daemon script was staged, but `stt-venv/bin/python` does not exist yet, so the LaunchAgent
+    /// plist was NOT written and no agent was bootstrapped or kickstarted. First-run setup builds that
+    /// environment and calls the STT row again, which then completes the install.
+    case stagedWithoutAgent
     case failed(DaemonInstallFailure)
 }
 
@@ -136,16 +140,36 @@ struct DaemonInstaller {
 
         let plistText = plistTemplate.replacingOccurrences(of: Self.homePlaceholder,
                                                            with: homeDirectory.path)
+
+        // The LaunchAgent's program is `stt-venv/bin/python`, which first-run setup creates. Until that
+        // interpreter exists, writing the plist and bootstrapping the agent would load a service whose
+        // program is missing and make macOS announce a spurious "Background Items Added: python". The
+        // daemon script is always staged; the plist and launchd are touched only once python exists.
+        let venvPython = homeDirectory.appendingPathComponent(
+            "Library/Application Support/ViddyDictate/stt-venv/bin/python", isDirectory: false)
+        let venvPythonExists = fileManager.isExecutableFile(atPath: venvPython.path)
         do {
             try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-            try fileManager.createDirectory(at: launchAgentsDirectory, withIntermediateDirectories: true)
             try scriptData.write(to: installedScriptURL, options: .atomic)
-            guard let plistData = plistText.data(using: .utf8) else {
-                return .failed(.writeFailed("the LaunchAgent plist could not be encoded as UTF-8"))
+            if venvPythonExists {
+                try fileManager.createDirectory(at: launchAgentsDirectory,
+                                                withIntermediateDirectories: true)
+                guard let plistData = plistText.data(using: .utf8) else {
+                    return .failed(.writeFailed("the LaunchAgent plist could not be encoded as UTF-8"))
+                }
+                try plistData.write(to: installedPlistURL, options: .atomic)
             }
-            try plistData.write(to: installedPlistURL, options: .atomic)
         } catch {
             return .failed(.writeFailed(String(describing: error)))
+        }
+
+        guard venvPythonExists else {
+            if let preservedBackup {
+                Log.write("daemon-install: staged the daemon and preserved the previous build at "
+                    + "\(preservedBackup.path); the speech-to-text environment is not built yet, so no "
+                    + "LaunchAgent was installed or loaded")
+            }
+            return .stagedWithoutAgent
         }
 
         restartAgent()
@@ -211,6 +235,9 @@ extension DaemonInstaller {
             Log.write("daemon-install: upgraded the transcription daemon\(detail)")
         case .unchanged:
             break
+        case .stagedWithoutAgent:
+            Log.write("daemon-install: staged the transcription daemon; the speech-to-text "
+                + "environment is not built yet, so the LaunchAgent was not installed or loaded")
         case .failed(let failure):
             Log.write("daemon-install: failed — \(failure.message)")
         }

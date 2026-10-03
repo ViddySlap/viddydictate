@@ -368,7 +368,10 @@ final class BootstrapInstallCoordinator {
     // Production supplies the daemon installer so the STT row also stages the bundled daemon into the
     // user's home. Tests pass their own engine (or none) and never reach the real home via this path.
     init(engine: InstallerEngine = InstallerEngine(
-             daemonInstaller: { DaemonInstaller.installForCurrentUser() }),
+             daemonInstaller: { DaemonInstaller.installForCurrentUser() },
+             daemonAgentEnsureLoaded: {
+                 _ = WhisperdAgentLoader.forCurrentUser().loadAndStart(restartIfLoaded: true)
+             }),
          store: BootstrapStateStore = BootstrapStateStore(),
          onChange: SnapshotHandler? = nil) {
         self.engine = engine

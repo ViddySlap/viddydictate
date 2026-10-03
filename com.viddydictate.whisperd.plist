@@ -4,6 +4,11 @@
 <dict>
   <key>Label</key>
   <string>com.viddydictate.whisperd</string>
+  <!-- Attribute the background item to ViddyDictate in System Settings rather than to "python". -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.viddydictate.app</string>
+  </array>
   <!-- Both paths are created by install-daemon.sh: the venv is ViddyDictate's own (never a venv
        shared with another project), and the daemon is the repo copy staged out of any
        TCC-protected location. __HOME__ is substituted at install time. -->

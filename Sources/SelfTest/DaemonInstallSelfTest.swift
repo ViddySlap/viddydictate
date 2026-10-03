@@ -93,6 +93,14 @@ enum DaemonInstallSelfTest {
             return finish(reporter, prefix: "daemon-install installs")
         }
 
+        // The LaunchAgent's program is `stt-venv/bin/python`; production only writes the plist and
+        // restarts the agent once first-run setup has created it. Stage an executable stand-in so this
+        // arm exercises the venv-present path it is about.
+        guard stageVenvPython(in: home) else {
+            reporter.record("a fixture stt-venv/bin/python can be staged", false)
+            return finish(reporter, prefix: "daemon-install installs")
+        }
+
         let spy = DaemonInstallRestartSpy()
         let installer = DaemonInstaller(homeDirectory: home, resourceDirectory: resources,
                                         restartAgent: { spy.restart() })
@@ -159,6 +167,12 @@ enum DaemonInstallSelfTest {
         let resources = scratch.appendingPathComponent("res", isDirectory: true)
         guard stageBundledDaemon(into: resources) else {
             reporter.record("the real bundled daemon copies into the scratch resource directory", false)
+            return finish(reporter, prefix: "daemon-install upgrade")
+        }
+
+        // See the installs arm: production needs `stt-venv/bin/python` before it writes the plist.
+        guard stageVenvPython(in: home) else {
+            reporter.record("a fixture stt-venv/bin/python can be staged", false)
             return finish(reporter, prefix: "daemon-install upgrade")
         }
 
@@ -313,6 +327,26 @@ enum DaemonInstallSelfTest {
             try fm.createDirectory(at: resourceDirectory, withIntermediateDirectories: true)
             try fm.copyItem(at: bundled,
                             to: resourceDirectory.appendingPathComponent("daemon", isDirectory: true))
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// The LaunchAgent's program is `stt-venv/bin/python`. Production only writes the plist and restarts
+    /// the agent once first-run setup has built that interpreter, so these arms stage an executable
+    /// stand-in to exercise the venv-present path; the no-venv path is owned by the protected
+    /// installer-rework `no-bootstrap-before-venv` arm.
+    private static func stageVenvPython(in home: URL) -> Bool {
+        let fm = FileManager.default
+        let python = home.appendingPathComponent(
+            "Library/Application Support/ViddyDictate/stt-venv/bin/python", isDirectory: false)
+        do {
+            try fm.createDirectory(at: python.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            fm.createFile(atPath: python.path, contents: Data("#!/bin/sh\nexit 0\n".utf8))
+            try fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o700))],
+                                 ofItemAtPath: python.path)
             return true
         } catch {
             return false

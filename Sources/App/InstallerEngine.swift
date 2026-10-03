@@ -684,6 +684,10 @@ final class InstallerEngine {
             if descriptor.id == BootstrapInstallPlan.sttDaemon.id, let daemonInstaller {
                 switch daemonInstaller() {
                 case .installed, .upgraded, .unchanged:
+                    daemonAgentEnsureLoaded?()
+                case .stagedWithoutAgent:
+                    // The venv did not exist, so there is deliberately no plist to load yet. First-run
+                    // setup builds the environment and calls this row again.
                     break
                 case .failed(let daemonFailure):
                     throw InstallerFailure(category: .process, message: daemonFailure.message)
