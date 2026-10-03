@@ -88,8 +88,10 @@ final class ReadyStepView: NSView {
 
         let done = NSButton(title: ReadyStep.doneTitle, target: self, action: #selector(doneClicked))
         done.bezelStyle = .rounded
+        done.bezelColor = .controlAccentColor
         done.keyEquivalent = "\r"
-        done.frame = NSRect(x: L, y: y, width: 100, height: 28)
+        done.font = .systemFont(ofSize: 13, weight: .semibold)
+        done.frame = NSRect(x: L, y: y, width: 110, height: 30)
         done.identifier = NSUserInterfaceItemIdentifier(ReadyStep.doneIdentifier)
         addSubview(done)
         y = done.frame.maxY + 16
@@ -110,8 +112,8 @@ final class ReadyStepView: NSView {
                                                 size: 13, weight: .semibold,
                                                 color: failed ? .systemRed : .systemGreen)
             card.addSubview(mark)
-            let title = SettingsSectionKit.label(row.title, x: 38, y: y + 1, width: width - 160, size: 12.5,
-                                                 weight: .semibold, color: .labelColor)
+            let title = SettingsSectionKit.label(row.title, x: 38, y: y + 1, width: width - 174,
+                                                 size: 12.5, weight: .semibold, color: .labelColor)
             title.identifier = NSUserInterfaceItemIdentifier(ReadyStep.identifier(.status, row.id))
             card.addSubview(title)
             if failed {

@@ -152,10 +152,9 @@ enum PermissionsGrant {
     @discardableResult
     static func perform(_ action: Action, opener: (URL) -> Bool = { NSWorkspace.shared.open($0) },
                         request: @escaping (@escaping (Bool) -> Void) -> Void = Permissions.microphone,
-                        // Seam only (gap G-IM): nothing below calls this yet, so 42eec8e's behaviour -
-                        // Input Monitoring is only ever deep-linked, never asked for directly - is
-                        // unchanged. A later link wires this in once Grant is taught to call the
-                        // listen-event request API before (or instead of) opening System Settings.
+                        // Pressing Grant on Input Monitoring calls the listen-event request API first,
+                        // then still deep-links the exact pane: the prompt may hand the grant over
+                        // directly, and the pane is the route left when it cannot.
                         requestInputMonitoring: @escaping () -> Bool = {
                             Permissions.inputMonitoring(prompt: true)
                         },

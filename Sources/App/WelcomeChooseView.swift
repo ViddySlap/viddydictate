@@ -64,28 +64,24 @@ final class WelcomeChooseView: NSView {
         frame = NSRect(x: frame.origin.x, y: frame.origin.y, width: W, height: y)
     }
 
-    /// One choice, as a card: its badge (recommended only), its title as a one-click button so the
-    /// whole card is the hit target, and its one-line why.
+    /// One choice, as a card: its title as a one-click button so the whole card is the hit target, a
+    /// one-line why, and - for the default choice only - a small DEFAULT badge beside the title. Every
+    /// card shares the same title row and the same detail row, so the three read as a deck of equal
+    /// choices rather than one that is taller than the others.
     private func addCard(_ choice: FirstRunSetupFlow.SetupChoice, at originY: CGFloat,
                          width: CGFloat) -> CGFloat {
         let card = SettingsSectionKit.card(frame: NSRect(x: L, y: originY, width: width, height: 0),
                                            identifier: WelcomeChoose.cardIdentifier(choice))
+        // The default is marked twice: a DEFAULT badge beside the title and a stronger border, so the
+        // card reads as the one to pick even before its words are read.
+        if choice == .recommended {
+            card.layer?.borderWidth = 1.5
+            card.layer?.borderColor = Phosphor.green.withAlphaComponent(0.5).cgColor
+        }
         addSubview(card)
         let textX: CGFloat = 14
-        let textW = width - textX - 24
+        let textW = width - textX - 14
         var y: CGFloat = 12
-
-        if choice == .recommended {
-            let badge = SettingsSectionKit.label(WelcomeChoose.recommendedBadge, x: textX, y: y,
-                                                 width: textW, size: 9, weight: .semibold,
-                                                 color: .systemGreen)
-            badge.attributedStringValue = NSAttributedString(string: WelcomeChoose.recommendedBadge,
-                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .semibold), .kern: 1.2,
-                            .foregroundColor: NSColor.systemGreen])
-            badge.identifier = NSUserInterfaceItemIdentifier(WelcomeChoose.identifier(.badge, choice))
-            card.addSubview(badge)
-            y += 15
-        }
 
         let button = NSButton(title: WelcomeChoose.title(choice), target: self,
                               action: #selector(cardClicked(_:)))
@@ -93,10 +89,24 @@ final class WelcomeChooseView: NSView {
         button.font = .systemFont(ofSize: 13, weight: .semibold)
         button.tag = tag(for: choice)
         button.sizeToFit()
-        button.frame = NSRect(x: textX, y: y, width: max(button.frame.width + 24, 140), height: 26)
+        let buttonW = max(button.frame.width + 24, 140)
+        button.frame = NSRect(x: textX, y: y, width: buttonW, height: 26)
         button.identifier = NSUserInterfaceItemIdentifier(WelcomeChoose.identifier(.title, choice))
         card.addSubview(button)
-        y += 32
+
+        if choice == .recommended {
+            let badge = SettingsSectionKit.label(WelcomeChoose.recommendedBadge, x: 0, y: 0,
+                                                 width: textW, size: 9, weight: .semibold,
+                                                 color: .systemGreen)
+            badge.attributedStringValue = NSAttributedString(string: WelcomeChoose.recommendedBadge,
+                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .semibold), .kern: 1.2,
+                            .foregroundColor: NSColor.systemGreen])
+            badge.sizeToFit()
+            badge.frame.origin = NSPoint(x: textX + buttonW + 12, y: y + 6)
+            badge.identifier = NSUserInterfaceItemIdentifier(WelcomeChoose.identifier(.badge, choice))
+            card.addSubview(badge)
+        }
+        y = button.frame.maxY + 8
 
         let detail = SettingsSectionKit.wrapped(WelcomeChoose.detail(choice), x: textX, y: y, width: textW,
                                                 size: 10.5, color: .secondaryLabelColor)

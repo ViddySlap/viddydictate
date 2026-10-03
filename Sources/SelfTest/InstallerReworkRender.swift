@@ -38,12 +38,19 @@ enum InstallerReworkRender {
         }
 
         for (suffix, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            app.appearance = NSAppearance(named: appearance)
-            renderWelcome(outDir: outDir, suffix: suffix)
-            renderPermissions(outDir: outDir, suffix: suffix)
-            renderPermissionsRelaunch(outDir: outDir, suffix: suffix)
-            renderProgress(outDir: outDir, suffix: suffix)
-            renderReady(outDir: outDir, suffix: suffix)
+            let forced = NSAppearance(named: appearance)!
+            app.appearance = forced
+            // Force every dynamic NSColor resolved during this pass's render+capture (window background,
+            // label colour, button bezels, ...) to use this pass's own appearance. Otherwise cacheDisplay
+            // draws under whatever appearance happened to be ambient, which is effectively always light,
+            // so the *-dark.png files came out identical to the light ones.
+            forced.performAsCurrentDrawingAppearance {
+                renderWelcome(outDir: outDir, suffix: suffix)
+                renderPermissions(outDir: outDir, suffix: suffix)
+                renderPermissionsRelaunch(outDir: outDir, suffix: suffix)
+                renderProgress(outDir: outDir, suffix: suffix)
+                renderReady(outDir: outDir, suffix: suffix)
+            }
         }
 
         print("[installer-rework-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
@@ -233,11 +240,14 @@ enum InstallerReworkRender {
         // Captured on its own the view has neither its window backdrop nor a layer, which renders a
         // bezelled control's title onto transparency; same fix as every other render gate.
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: max(200, view.frame.height)),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSApplication.shared.appearance
         window.contentView?.addSubview(view)
+        // Read the dynamic window-background colour only after the view has a window, so it has an
+        // appearance context. Combined with run(outDir:)'s performAsCurrentDrawingAppearance block this
+        // resolves to the pass's own appearance instead of ambient light.
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         hosts.append(window)
     }
 

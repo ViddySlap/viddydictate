@@ -11,9 +11,10 @@ enum PostLaunchGrantResponse: Equatable {
     case offerRelaunch
 }
 
-/// Seam only (gap G-RELAUNCH). No production call site reads this yet - `AppDelegate` still does nothing
-/// when a grant lands mid-session - so the stub always answers `.none`, reproducing 42eec8e exactly. A
-/// later link wires this into the permissions walkthrough's poll.
+/// The production decision the permissions walkthrough's poll reads (`ComponentPickerView.refreshPermissions`):
+/// when Accessibility and Input Monitoring both read granted after launch while this launch's own hotkey
+/// tap is not live, answer `.offerRelaunch` - which the walkthrough turns into its one-click Relaunch
+/// button - and otherwise `.none`. `.reArmTap` is reserved for a future in-process re-arm.
 enum PostLaunchGrantPolicy {
     static func respond(accessibilityGranted: Bool, inputMonitoringGranted: Bool,
                         tapLive: Bool) -> PostLaunchGrantResponse {
@@ -24,8 +25,8 @@ enum PostLaunchGrantPolicy {
 
 /// Relaunching ViddyDictate in place (spec item 5's one-click "Relaunch ViddyDictate" button). Injectable
 /// so a selftest can spy on it without ever spawning a second process; production's default actually
-/// does it. No production call site invokes this yet - it is wired up once `PostLaunchGrantPolicy` ever
-/// answers `.offerRelaunch`.
+/// does it. The walkthrough's Relaunch button (`ComponentPickerView.makePermissionsView` /
+/// `makeReadyView`) invokes it once `PostLaunchGrantPolicy` answers `.offerRelaunch`.
 struct AppRelauncher {
     var relaunch: () -> Void = AppRelauncher.liveRelaunch
 
