@@ -491,11 +491,9 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// offer a relaunch once Accessibility and Input Monitoring both read granted.
     var tapLive: () -> Bool = { false }
 
-    enum Step: Equatable {
-        case picker
-        case permissions
-        case progress
-    }
+    /// The window's own screens ARE `FirstRunSetupFlow`'s steps, not a second list that happens to agree
+    /// with it: picker/permissions/progress/ready, the same four `steps()` returns.
+    typealias Step = FirstRunSetupFlow.StepKind
 
     private let facts: ComponentPicker.MachineFacts
     private let environment: ComponentPicker.Environment
@@ -504,9 +502,11 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     private let readPermissions: () -> PermissionsStatus
     private let now: () -> TimeInterval
     private var window: NSWindow?
+    private var welcome: WelcomeChooseView?
     private var picker: ComponentPickerView?
     private var permissionsView: PermissionsSetupView?
     private var progressView: InstallProgressView?
+    private var readyView: ReadyStepView?
     private var scroll: NSScrollView?
     private var poll: Timer?
 
@@ -567,7 +567,9 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     }
 
     private func build() {
-        let content = makeContentView()
+        // Built (and gate-wired via makeContentView) even though the welcome card deck is what the
+        // window shows first: `showPicker()` needs an already-live instance, not a second one later.
+        _ = makeContentView()
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: contentWidth, height: 640),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = ComponentPicker.headline
@@ -578,7 +580,15 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
         scroll.autoresizingMask = [.width, .height]
-        scroll.documentView = content
+        let welcome = WelcomeChooseView(width: contentWidth)
+        // Consumes `FirstRunSetupFlow.setupChoices()` rather than a parallel list of card callbacks:
+        // Advanced swaps to the existing picker page, Recommended/Dictation-only start the install.
+        welcome.onChoose = { [weak self] choice in
+            if choice == .advanced { self?.showPicker() } else { self?.choose(choice) }
+        }
+        welcome.onSetUpLater = { [weak self] in self?.laterTapped() }
+        self.welcome = welcome
+        scroll.documentView = welcome
         let host = NSView(frame: scroll.frame)
         host.addSubview(scroll)
         w.contentView = host
@@ -605,6 +615,22 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     private func waitTapped() {
         let plan = plan()
         _ = gate.waitForWiFi { [weak self] in self?.begin(plan) }
+    }
+
+    /// The welcome screen's "Advanced" card swaps the SAME `.picker` step to the existing picker page:
+    /// the instance `makeContentView()` already built and gate-wired, not a second one.
+    private func showPicker() {
+        guard let picker else { return }
+        scroll?.documentView = picker
+        resize()
+    }
+
+    /// A welcome card's one-click choice. The plan comes from the pure flow seam, and the bytes start
+    /// through the exact `gate.startDownload` -> `begin(plan)` path `continueTapped()` uses, so metered
+    /// handling, the queue and the Permissions step behave identically.
+    private func choose(_ choice: FirstRunSetupFlow.SetupChoice) {
+        let plan = FirstRunSetupFlow.plan(for: choice, facts: facts, environment: environment)
+        _ = gate.startDownload { [weak self] in self?.begin(plan) }
     }
 
     /// The moment bytes are allowed to start. The host is told first, so the download is genuinely
@@ -655,7 +681,43 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     func showProgress() {
         step = .progress
         permissionsView = nil
+        readyView = nil
         install(makeProgressView())
+    }
+
+    /// Spec's final screen: per-component checks, a permissions summary, the Feature Tour's own
+    /// practice-box state (never a second copy of it), Relaunch when offered, and Done.
+    @discardableResult
+    func makeReadyView() -> ReadyStepView {
+        let view = ReadyStepView(width: contentWidth, rows: progress?.rows ?? [],
+                                 permissions: permissions, practice: practiceState(),
+                                 offerRelaunch: lastRelaunchOffer)
+        view.onRelaunch = { AppRelauncher().relaunch() }
+        view.onResumeSetup = { [weak self] in self?.resumeSetupTapped() }
+        view.onDone = { [weak self] in self?.window?.close() }
+        readyView = view
+        return view
+    }
+
+    private func showReady() {
+        step = .ready
+        permissionsView = nil
+        progressView = nil
+        install(makeReadyView())
+    }
+
+    private func practiceState() -> FeatureTourPractice.State {
+        FeatureTourPractice.state(tapLive: tapLive(), accessibility: permissions.accessibility,
+                                  inputMonitoring: permissions.inputMonitoring)
+    }
+
+    /// B10's Retry, re-entered from Ready rather than invented twice: the same queue restarts, and the
+    /// window drops back to Progress so the user sees it running before `checkReadyTransition` brings
+    /// it back here.
+    private func resumeSetupTapped() {
+        guard let failed = progress?.failedRows.first else { return }
+        onRetry?(failed.id)
+        showProgress()
     }
 
     private func grantTapped(_ permission: SetupPermission) {
@@ -694,6 +756,7 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         permissions = current
         lastRelaunchOffer = offerRelaunch
         permissionsView?.apply(status: current, relaunchOffer: offerRelaunch)
+        refreshReadyView()
         resize()
     }
 
@@ -706,7 +769,24 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         progress = state
         permissionsView?.apply(progress: state)
         progressView?.apply(state)
+        refreshReadyView()
+        checkReadyTransition()
         resize()
+    }
+
+    private func refreshReadyView() {
+        readyView?.apply(rows: progress?.rows ?? [], permissions: permissions,
+                         practice: practiceState(), offerRelaunch: lastRelaunchOffer)
+    }
+
+    /// Spec item "Ready": the moment every row has settled - landed or failed, nothing left waiting or
+    /// running - the window shows Ready, whether that moment arrives while Permissions or Progress is
+    /// up, exactly as the baton's locked flow describes it.
+    private func checkReadyTransition() {
+        guard step != .ready, let progress, !progress.rows.isEmpty,
+              progress.rows.allSatisfy({ $0.phase == .done || $0.phase == .failed })
+        else { return }
+        showReady()
     }
 
     /// Fed by whatever runs the queue, so this controller still starts nothing and owns no installer.

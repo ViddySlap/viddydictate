@@ -12,9 +12,10 @@ import Cocoa
 /// real Mac shows it rather than only the pinned dark fixture the other two render gates use.
 ///
 /// PNGs written, `-light` and `-dark` each:
-///   - `welcome-picker` - today's first screen (there is no welcome/choose screen yet - gap G-CHOICE).
+///   - `welcome-choose` - the first screen (welcome/choose, in front of the picker).
 ///   - `permissions-none` / `permissions-partial` / `permissions-all` - B19's three rows.
 ///   - `progress-early` / `progress-mid` / `progress-failed` / `progress-done` - B7's list.
+///   - `ready-ok` / `ready-degraded` / `ready-relaunch` - the final screen (gap G-READY).
 enum InstallerReworkRender {
     private static var failures = 0
     private static var hosts: [NSWindow] = []
@@ -42,23 +43,20 @@ enum InstallerReworkRender {
             renderPermissions(outDir: outDir, suffix: suffix)
             renderPermissionsRelaunch(outDir: outDir, suffix: suffix)
             renderProgress(outDir: outDir, suffix: suffix)
+            renderReady(outDir: outDir, suffix: suffix)
         }
 
         print("[installer-rework-render] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
         return failures == 0
     }
 
-    // MARK: - welcome / choose (today: the picker, directly - gap G-CHOICE)
+    // MARK: - welcome / choose
 
     private static func renderWelcome(outDir: String, suffix: String) {
-        let facts = ComponentPicker.MachineFacts(physicalBytes: 68_719_476_736, budgetBytes: 33_000_000_000,
-                                                 maxBudgetBytes: 46_000_000_000, wiredBytes: 5_000_000_000)
-        let view = ComponentPickerView(
-            width: 620, selection: ComponentPicker.defaultSelection(facts: facts, environment: .init()),
-            facts: facts, environment: .init())
+        let view = WelcomeChooseView(width: 620)
         host(view)
-        capture(view, to: outDir + "/welcome-picker-\(suffix).png",
-               name: "welcome/choose (today: the picker directly) - \(suffix)")
+        capture(view, to: outDir + "/welcome-choose-\(suffix).png",
+               name: "welcome/choose - \(suffix)")
     }
 
     // MARK: - permissions (B19)
@@ -159,6 +157,46 @@ enum InstallerReworkRender {
         host(done)
         done.apply(doneState)
         capture(done, to: outDir + "/progress-done-\(suffix).png", name: "progress, done - \(suffix)")
+    }
+
+    // MARK: - ready (gap G-READY)
+
+    private static func renderReady(outDir: String, suffix: String) {
+        let sampler = InstallerReworkRenderByteSampler()
+        let granted = PermissionsStatus(microphone: true, accessibility: true, inputMonitoring: true)
+
+        var okState = InstallProgressState(plan: corePlan())
+        okState.apply(
+            snapshot: snapshot([BootstrapInstallPlan.sttDaemon.id: .installed,
+                              BootstrapInstallPlan.webSearch.id: .installed]),
+            sampler: sampler, at: 0)
+        let ok = ReadyStepView(width: 620, rows: okState.rows, permissions: granted, practice: .ready,
+                              offerRelaunch: false)
+        host(ok)
+        capture(ok, to: outDir + "/ready-ok-\(suffix).png", name: "ready, ok - \(suffix)")
+
+        let vendorText = "Could not resolve huggingface.co (temporary failure in name resolution)"
+        var degradedState = InstallProgressState(plan: corePlan())
+        degradedState.apply(
+            snapshot: snapshot([BootstrapInstallPlan.sttDaemon.id: .failed,
+                              BootstrapInstallPlan.webSearch.id: .installed],
+                              failure: [BootstrapInstallPlan.sttDaemon.id: vendorText]),
+            sampler: sampler, at: 1)
+        let degraded = ReadyStepView(width: 620, rows: degradedState.rows,
+                                     permissions: PermissionsStatus(microphone: true), practice: .grantFirst,
+                                     offerRelaunch: false)
+        host(degraded)
+        capture(degraded, to: outDir + "/ready-degraded-\(suffix).png", name: "ready, degraded - \(suffix)")
+
+        var relaunchState = InstallProgressState(plan: corePlan())
+        relaunchState.apply(
+            snapshot: snapshot([BootstrapInstallPlan.sttDaemon.id: .installed,
+                              BootstrapInstallPlan.webSearch.id: .installed]),
+            sampler: sampler, at: 2)
+        let relaunch = ReadyStepView(width: 620, rows: relaunchState.rows, permissions: granted,
+                                     practice: .relaunchNeeded, offerRelaunch: true)
+        host(relaunch)
+        capture(relaunch, to: outDir + "/ready-relaunch-\(suffix).png", name: "ready, relaunch - \(suffix)")
     }
 
     // MARK: - helpers (mirrors InstallProgressRender's small fixtures)

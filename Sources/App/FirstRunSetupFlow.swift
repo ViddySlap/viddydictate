@@ -1,13 +1,12 @@
 import Foundation
 
 /// A pure description of the first-run setup window's flow (the baton's "Locked flow spec"): the screens
-/// it shows, in order, and what a welcome screen in front of the existing picker would offer.
+/// it shows, in order, and what the welcome screen in front of the existing picker offers.
 ///
-/// Seam only, for gaps G-CHOICE and G-READY. 42eec8e has no welcome/choose screen at all -
-/// `ComponentPickerView` IS the first screen, by way of `FirstRunSetupWindowController.Step` (picker,
-/// permissions, progress) - and no Ready step at the end. This stub reproduces that exactly: three
-/// steps, no choices. Nothing in `FirstRunSetupWindowController` reads this type yet; a later link wires
-/// it in once the welcome screen and the Ready step exist.
+/// Closes gaps G-CHOICE and G-READY. `FirstRunSetupWindowController` consumes this directly - its own
+/// `Step` is a `typealias` for `StepKind`, `WelcomeChooseView` draws one card per `setupChoices()` entry,
+/// and `choose(_:)` calls `plan(for:facts:environment:)` through the same `begin(_:)` path Continue uses -
+/// so there is one list of screens and one list of choices, not a production copy beside this pure one.
 enum FirstRunSetupFlow {
     enum StepKind: Equatable, CaseIterable {
         case picker
@@ -23,17 +22,17 @@ enum FirstRunSetupFlow {
         case dictationOnly
     }
 
-    /// The screens shown, in order. 42eec8e's three, with no welcome/choose step in front and no Ready
-    /// step at the end.
-    static func steps() -> [StepKind] { [.picker, .permissions, .progress] }
+    /// The screens shown, in order: the welcome/choose card deck and the existing picker share `.picker`
+    /// (spec: the welcome screen is the FIRST PAGE of that step, not a step of its own), then Permissions,
+    /// Progress, and the Ready step the window reaches once the queue settles.
+    static func steps() -> [StepKind] { [.picker, .permissions, .progress, .ready] }
 
-    /// The choices a welcome screen would offer before the picker. Empty today, because there is no such
-    /// screen: the existing picker is reached directly, which is what `.advanced` will eventually mean.
-    static func setupChoices() -> [SetupChoice] { [] }
+    /// The choices the welcome screen offers before the picker, in the order its cards are drawn.
+    static func setupChoices() -> [SetupChoice] { [.recommended, .advanced, .dictationOnly] }
 
-    /// What choosing `choice` would install, once a welcome screen exists to make the choice. Unreachable
-    /// from production today (`setupChoices()` is empty) and kept total only so a selftest can already
-    /// pin its SHAPE, and assert that no choice's plan ever contains a Codex component.
+    /// What choosing `choice` installs. Recommended and Advanced both default to today's picker
+    /// selection (Advanced then lets the user change it on the picker page itself); Dictation only skips
+    /// every local-model app. No branch ever reaches a Codex component.
     static func plan(for choice: SetupChoice, facts: ComponentPicker.MachineFacts,
                      environment: ComponentPicker.Environment) -> ComponentPicker.InstallPlan {
         let selection: ComponentPicker.Selection
