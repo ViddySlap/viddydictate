@@ -541,10 +541,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         SetupRemedyCopySelfTest.run() ? 0 : 1
     },
     // vdinga G1: ten protected arms over scratch state and injected seams. No network, no real
-    // launchctl, no real TCC, no on-screen window. Tier `.excluded` for now (not `.deterministic`) so
-    // the selftest-flag manifest drift check does not require it in verify.sh before vdinwire wires it
-    // in by name - house rule for this link: "do not wire any new flag into scripts/verify.sh".
-    .installerReworkSelftest: .init(tier: .excluded) { arguments in
+    // launchctl, no real TCC, no on-screen window. Wired into scripts/verify.sh's deterministic
+    // tier by vdinwire, one gate per arm.
+    .installerReworkSelftest: .init(tier: .deterministic) { arguments in
         InstallerReworkSelfTest.run(arguments: arguments)
     },
     // vdinga G1: every installer screen that exists today, light and dark. Not wired into verify.sh yet.

@@ -725,6 +725,36 @@ tier_deterministic() {
         run_gate deterministic "service-gate classifier: an abstaining gate is never PASS" \
             service_gate_classifier_selftest "$SCRATCH/service-gate-classifier" \
             "$ROOT/Sources/SelfTest/SelfTestAbstain.swift" "$ROOT/Tools/CodexProviderSmoke.swift" || true
+        run_gate deterministic "installer rework: launch-window arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only launch-window || true
+        run_gate deterministic "installer rework: no-launch-prompts arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only no-launch-prompts || true
+        run_gate deterministic "installer rework: im-request arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only im-request || true
+        run_gate deterministic "installer rework: relaunch arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only relaunch || true
+        run_gate deterministic "installer rework: no-bootstrap-before-venv arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only no-bootstrap-before-venv || true
+        run_gate deterministic "installer rework: plist-associated arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only plist-associated || true
+        run_gate deterministic "installer rework: unchanged-still-loads arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only unchanged-still-loads || true
+        run_gate deterministic "installer rework: setup-choice arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only setup-choice || true
+        run_gate deterministic "installer rework: ready-step arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only ready-step || true
+        run_gate deterministic "installer rework: preference-control arm (control)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --installer-rework-selftest --only preference-control || true
     else
         record_failure deterministic "selftests skipped because the verification build did not succeed"
     fi
@@ -1091,6 +1121,7 @@ tier_gui() {
         run_gui_gate "point-of-use install offer offscreen render" "${gui_env[@]}" "$TEST_APP" --point-of-use-render "$SCRATCH/point-of-use-render" || true
         run_gui_gate "first-run progress and permissions offscreen render" "${gui_env[@]}" "$TEST_APP" --install-progress-render "$SCRATCH/install-progress-render" || true
         run_gui_gate "Feature Tour pages offscreen render" "${gui_env[@]}" "$TEST_APP" --feature-tour-render "$SCRATCH/feature-tour-render" || true
+        run_gui_gate "installer rework screens offscreen render" "${gui_env[@]}" "$TEST_APP" --installer-rework-render "$SCRATCH/installer-rework-render" || true
         run_gui_gate "Models & Power settings UI probe" "${gui_env[@]}" "$TEST_APP" --models-power-ui-probe || true
         run_gui_gate "Models & Power prompt-override offscreen render" "${gui_env[@]}" "$TEST_APP" --models-power-render "$SCRATCH/models-power-render" || true
         run_gui_gate "consolidated Hotkeys tab offscreen render" "${gui_env[@]}" "$TEST_APP" --hotkeys-tab-render "$SCRATCH/hotkeys-tab-render" || true
@@ -1099,6 +1130,8 @@ tier_gui() {
         run_gui_gate "HUD layout probe" "${gui_env[@]}" "$TEST_APP" --hud-probe || true
         run_gui_gate "HUD offscreen render" "${gui_env[@]}" "$TEST_APP" --hud-render "$SCRATCH/hud-render" || true
         run_gui_gate "non-capture input-device diagnostic" "${gui_env[@]}" "$TEST_APP" --mic-probe || true
+        run_gui_gate "app icon (white mic glyph on gray background)" \
+            "$ROOT/scripts/gates/app-icon.sh" "$ROOT/build/ViddyDictate.app" || true
     fi
     finish_tier gui "$failures_before" "$unverified_before"
 }
