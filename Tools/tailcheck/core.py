@@ -6,11 +6,9 @@ Boxx-side prototype for the end-of-recording-hallucination semantic judge
 section 2A (trigger), section 2B (accept-cut rules), section 4 (eval/acceptance
 bar), and the 2026-10-05 UPDATE (local judge, judge-agnostic client).
 
-Every function below is a STUB: the signature is FINAL, the behaviour is NOT.
-Each stub returns a wrong or neutral answer on purpose, so that
-`test_core.py` is red for a named reason rather than erroring on import.
-Later links implement against this contract; they must not change these
-signatures, and must not touch `test_core.py` (protected).
+Every function below implements that contract: the signature is FINAL.
+Nothing here reads a file, opens a socket, or carries dictation text in a
+log record; `test_core.py` (protected) is the definition of done.
 
 Background a later implementer must respect, from the project's locked
 history (`specs/2026-08-14-tail-hallucination.md`,
@@ -59,6 +57,9 @@ On a take the cleanup LLM did not touch, `raw_text == final_text`.
 from __future__ import annotations
 
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, Optional, Protocol
 
 # --- trigger reason vocabulary (design note S1 / S2A) -----------------------
@@ -162,11 +163,61 @@ def _depunctuate(text: str) -> str:
     return re.sub(r"[^\w\s]", "", text).strip().lower()
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _has_repeat_run(tokens: list[str], min_run: int) -> bool:
+    """True if any one token repeats `min_run` or more times consecutively
+    (case-insensitive), e.g. a `repeat_loop` tail."""
+    run = 1
+    for i in range(1, len(tokens)):
+        if tokens[i].lower() == tokens[i - 1].lower():
+            run += 1
+            if run >= min_run:
+                return True
+        else:
+            run = 1
+    return False
+
+
+def _bound_context(preceding: str) -> str:
+    """Bound the judge's context to the last `MAX_CONTEXT_SENTENCES`
+    sentences, then to the trailing `MAX_CONTEXT_CHARS` characters. The END
+    nearest the suspicious tail is kept; the START is dropped (design S2B /
+    gate review vdtga-GJ finding (a))."""
+    preceding = preceding.strip()
+    if not preceding:
+        return ""
+    sentences = [s for s in _SENTENCE_SPLIT.split(preceding) if s]
+    if not sentences:
+        return ""
+    context = " ".join(sentences[-MAX_CONTEXT_SENTENCES:])
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[-MAX_CONTEXT_CHARS:]
+    return context
+
+
+def _segment_boundaries(text: str, segments: list[dict]) -> list[int]:
+    """Character offsets in `text` where each segment's `raw_text` starts,
+    i.e. candidate segment cut points for `accept_cut`'s rule 3."""
+    boundaries: list[int] = []
+    cursor = 0
+    for seg in segments or []:
+        raw = seg.get("raw_text", "") if isinstance(seg, dict) else ""
+        if not raw:
+            continue
+        idx = text.find(raw, cursor)
+        if idx == -1:
+            continue
+        boundaries.append(idx)
+        cursor = idx + len(raw)
+    return boundaries
+
+
 def trigger(segments: list[dict], raw_text: str, final_text: str) -> list[str]:
     """Decide whether the tail is worth asking a judge about. Never a verdict.
 
-    Real contract (to implement against; current body is a stub returning
-    `[]` unconditionally):
+    Real contract:
 
     Returns the subset of `ALL_REASONS` that fire, in no particular order,
     `[]` if none do. `segments` is the ordered, pre-collapse per-segment
@@ -201,7 +252,49 @@ def trigger(segments: list[dict], raw_text: str, final_text: str) -> list[str]:
     An ordinary, unremarkable, single-segment clean take -- the hard safety
     case from the locked spec's Corpus B -- must trigger none of the above.
     """
-    return []
+    reasons: list[str] = []
+    last = segments[-1] if segments else None
+    last_text = last.get("raw_text", "") if isinstance(last, dict) else ""
+
+    # Signals that need the single-segment safety floor (>= 2 segments):
+    # outro_filler_after_gap and low_confidence_tail both compare the LAST
+    # segment against its predecessor, so a promptly-ended one-segment take
+    # can never fire either.
+    if segments and len(segments) >= 2:
+        prev = segments[-2]
+        gap = last.get("start", 0.0) - prev.get("end", 0.0)
+        if gap > GAP_THRESHOLD_S and _depunctuate(last_text) in OUTRO_PHRASES:
+            reasons.append(REASON_OUTRO_FILLER_AFTER_GAP)
+        if (
+            last.get("no_speech_prob", 0.0) > NOSPEECH_TRIGGER
+            or last.get("avg_logprob", 0.0) < LOGPROB_TRIGGER
+        ):
+            reasons.append(REASON_LOW_CONFIDENCE_TAIL)
+
+    if isinstance(last, dict):
+        tokens = last_text.split()
+        if (
+            len(tokens) >= 2
+            and len(tokens) <= DOUBLED_TOKEN_MAX_WORDS
+            and tokens[-1].lower() == tokens[-2].lower()
+        ):
+            reasons.append(REASON_DOUBLED_TOKEN)
+        if _has_repeat_run(tokens, REPEAT_LOOP_MIN_RUN):
+            reasons.append(REASON_REPEAT_LOOP)
+        stripped = last_text.strip()
+        if stripped and _PUNCT_ONLY.match(stripped):
+            reasons.append(REASON_LONE_PUNCTUATION_TAIL)
+
+    # cleanup_added_suffix is segment-independent: the cleanup LLM appended
+    # trailing content whisper never produced, so no segment covers it.
+    if (
+        final_text != raw_text
+        and final_text.startswith(raw_text)
+        and len(final_text) > len(raw_text)
+    ):
+        reasons.append(REASON_CLEANUP_ADDED_SUFFIX)
+
+    return reasons
 
 
 def accept_cut(
@@ -213,8 +306,7 @@ def accept_cut(
 ) -> tuple[bool, str]:
     """App-enforced cut-acceptance rules (design note S2B). The judge only
     proposes `junk_suffix`; this function is the only thing allowed to
-    decide whether the proposal is safe to act on. Current body is a stub
-    that always refuses with reason `"stub"`.
+    decide whether the proposal is safe to act on.
 
     Real contract: returns `(True, ACCEPTED)` only if ALL of the following
     hold, checked in this order (earlier checks take priority, so each
@@ -253,7 +345,49 @@ def accept_cut(
     whitespace/punctuation form of the boundary check is still available
     and is independent of `boundaries`.
     """
-    return False, "stub"
+    # Rule 1: cutting the whole take is never allowed.
+    if junk_suffix == text:
+        return False, REFUSAL_WHOLE_TEXT
+
+    # Rule 2: the proposal must be an exact trailing suffix. A substring that
+    # occurs anywhere else is an attempted body edit, which is a stronger
+    # violation than unrelated non-suffix noise.
+    if not text.endswith(junk_suffix):
+        if junk_suffix and junk_suffix in text:
+            return False, REFUSAL_BODY_EDIT
+        return False, REFUSAL_NOT_SUFFIX
+
+    cut_point = len(text) - len(junk_suffix)
+
+    # Rule 3: the cut must land on a token/word boundary, unless it is a known
+    # segment boundary from the daemon's diagnostics.
+    splits_token = (
+        cut_point > 0
+        and cut_point < len(text)
+        and text[cut_point - 1].isalnum()
+        and text[cut_point].isalnum()
+    )
+    on_boundary = (not splits_token) or (
+        boundaries is not None and cut_point in boundaries
+    )
+    if not on_boundary:
+        return False, REFUSAL_MID_WORD
+
+    # Rule 4: a suffix is short by definition.
+    junk_words = len(junk_suffix.split())
+    if junk_words > max_words:
+        return False, REFUSAL_TOO_MANY_WORDS
+
+    # Rule 5: never remove a large share of the take.
+    if junk_words / max(1, len(text.split())) > max_share:
+        return False, REFUSAL_SHARE_TOO_HIGH
+
+    # Rule 6: at least one non-empty, word-bearing sentence must remain.
+    remainder = text[:cut_point].strip()
+    if not remainder or not any(ch.isalnum() for ch in remainder):
+        return False, REFUSAL_NO_SENTENCE_REMAINS
+
+    return True, ACCEPTED
 
 
 def observe_record(
@@ -266,7 +400,7 @@ def observe_record(
 ) -> dict:
     """Build the observe-only log record. MUST NEVER contain dictation
     text or any substring of it (design note S4, observe-only mode: "no
-    text leaves the Mac"). Current body is a stub that always returns `{}`.
+    text leaves the Mac").
 
     Real contract: returns a dict with ONLY lengths, flags, and timings,
     for example (exact key set is this implementation's choice to make,
@@ -287,7 +421,14 @@ def observe_record(
     derived from `text`'s content. `judge_name` is a class name, never the
     judge's actual answer payload (which could echo dictation content back).
     """
-    return {}
+    return {
+        "text_len": len(text),
+        "reasons": list(reasons),
+        "verdict": verdict,
+        "junk_suffix_len": len(junk_suffix),
+        "latency_ms": latency_ms,
+        "judge_name": type(judge).__name__,
+    }
 
 
 class Judge(Protocol):
@@ -345,7 +486,7 @@ class KevClient:
         self.base_url = base_url
 
     def request_body(self, context: str, tail: str) -> dict:
-        """Stub: returns `{}`. Real contract: returns exactly
+        """Real contract: returns exactly
 
             {
                 "context": context,
@@ -356,7 +497,12 @@ class KevClient:
 
         -- a plain JSON-serializable dict, no network call involved in
         building it."""
-        return {}
+        return {
+            "context": context,
+            "tail": tail,
+            "task": "tail_check",
+            "response_schema": {"tail": "clean|junk", "junk_suffix": "string"},
+        }
 
 
 def check(
@@ -367,9 +513,7 @@ def check(
     mode: str = "observe",
     timeout_ms: int = 400,
 ) -> dict:
-    """The whole pipeline for one dictation, right before paste. Current
-    body is a stub: always returns `text` unchanged, never flagged, with an
-    empty record.
+    """The whole pipeline for one dictation, right before paste.
 
     Real contract:
 
@@ -437,4 +581,92 @@ def check(
     third mode: the HUD-flag-only rollout (2026-10-05 UPDATE) ships
     `"observe"` first.
     """
-    return {"paste_text": text, "flagged": False, "record": {}}
+    reasons = trigger(segments, raw_text, text)
+    if not reasons:
+        # No structural doubt: never bother the judge, never touch the paste.
+        return {
+            "paste_text": text,
+            "flagged": False,
+            "record": observe_record(text, [], "no_trigger", "", 0.0, judge),
+        }
+
+    # Derive the suspicious tail and the text that precedes it. Only the
+    # cleanup-added case has no segment covering the junk.
+    if reasons == [REASON_CLEANUP_ADDED_SUFFIX]:
+        tail = text[len(raw_text):]
+        preceding = raw_text
+    else:
+        tail = segments[-1].get("raw_text", "") if segments else ""
+        preceding = text[: max(0, len(text) - len(tail))]
+
+    context = _bound_context(preceding)
+
+    # Hard wall-clock bound: the judge may raise or overrun; either way the
+    # paste is left exactly as it was (fail open).
+    started = time.perf_counter()
+    answer: Any = None
+    timed_out = False
+    errored = False
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(judge.answer, context, tail, timeout_ms)
+        try:
+            answer = future.result(timeout=max(0, timeout_ms) / 1000.0)
+        except FuturesTimeoutError:
+            timed_out = True
+        except Exception:
+            errored = True
+    finally:
+        executor.shutdown(wait=False)
+    latency_ms = (time.perf_counter() - started) * 1000.0
+
+    if timed_out:
+        return {
+            "paste_text": text,
+            "flagged": False,
+            "record": observe_record(text, reasons, "timeout", "", latency_ms, judge),
+        }
+    if errored:
+        return {
+            "paste_text": text,
+            "flagged": False,
+            "record": observe_record(text, reasons, "error", "", latency_ms, judge),
+        }
+
+    # Anything that is not a well-formed junk answer is treated as clean.
+    if not (
+        isinstance(answer, dict)
+        and answer.get("tail") == "junk"
+        and isinstance(answer.get("junk_suffix"), str)
+    ):
+        return {
+            "paste_text": text,
+            "flagged": False,
+            "record": observe_record(text, reasons, "clean", "", latency_ms, judge),
+        }
+
+    junk_suffix = answer["junk_suffix"]
+    accepted, _refusal = accept_cut(
+        text,
+        junk_suffix,
+        boundaries=_segment_boundaries(text, segments),
+    )
+    if not accepted:
+        # The judge said junk, but the app rules do not trust the proposal.
+        return {
+            "paste_text": text,
+            "flagged": False,
+            "record": observe_record(
+                text, reasons, "junk", junk_suffix, latency_ms, judge
+            ),
+        }
+
+    # Flag independent of mode; edit the paste only in trim mode.
+    paste_text = text
+    if mode == "trim":
+        paste_text = text[: len(text) - len(junk_suffix)]
+    return {
+        "paste_text": paste_text,
+        "flagged": True,
+        "record": observe_record(text, reasons, "junk", junk_suffix, latency_ms, judge),
+    }
