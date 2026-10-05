@@ -260,8 +260,16 @@ class CheckTests(unittest.TestCase):
         """`paste_text == text` already holds against the stub (it always
         echoes `text` back). Red is in `flagged`/`record`: a validated junk
         verdict must set `flagged = True` and a non-empty record, which the
-        stub never does."""
-        text = "I approve. Thank you."
+        stub never does.
+
+        Fixture note (gate repair vdtcorefix-GC): the dictation is a longer,
+        real-shaped sentence so the proposed junk_suffix is a 15% share, well
+        under accept_cut's 40% default cap -- the original 4-word/2-word
+        fixture here was an exact 50% share, which the cap must REFUSE, so it
+        could never exercise an accepted cut without a test-only loosening of
+        the cap (see `test_check_refuses_the_known_50_percent_share_fixture_even_in_trim_mode`
+        below, which pins the original fixture's correct, refused outcome)."""
+        text = "I approve the plan for Monday and the budget we discussed. Thank you."
         segments = self._triggering_segments()
         judge = core.MockJudge({"tail": "junk", "junk_suffix": " Thank you."})
         result = core.check(text, segments, text, judge, mode="observe", timeout_ms=400)
@@ -270,13 +278,75 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(result["record"])
 
     def test_trim_mode_cuts_an_accepted_junk_suffix(self):
-        """Red: stub never trims, `paste_text` stays the full text."""
+        """Red: stub never trims, `paste_text` stays the full text.
+
+        Fixture note (gate repair vdtcorefix-GC): see the sibling observe-mode
+        test above -- same longer dictation, same 15% share, so the cut is
+        legitimately acceptable under the 40% default cap with no override."""
+        text = "I approve the plan for Monday and the budget we discussed. Thank you."
+        segments = self._triggering_segments()
+        judge = core.MockJudge({"tail": "junk", "junk_suffix": " Thank you."})
+        result = core.check(text, segments, text, judge, mode="trim", timeout_ms=400)
+        self.assertEqual(
+            result["paste_text"],
+            "I approve the plan for Monday and the budget we discussed.",
+        )
+        self.assertTrue(result["flagged"])
+
+    def test_check_refuses_the_known_50_percent_share_fixture_even_in_trim_mode(self):
+        """Gate review vdtcorej-J.md REJECT, pinned directly: "I approve.
+        Thank you." (4 words) with a judge-proposed junk_suffix " Thank
+        you." (2 words) is an exact 50% share, over accept_cut's locked 0.4
+        default max_share. check() must refuse this cut under its own
+        default caps, in trim mode, with no override -- a prior
+        implementation only passed this exact fixture by introducing a
+        CHECK_MAX_SHARE=0.5 constant that loosened the cap specifically for
+        check()'s own call site; that constant does not exist in the real
+        contract and must never reappear. Red: stub never flags/records."""
         text = "I approve. Thank you."
         segments = self._triggering_segments()
         judge = core.MockJudge({"tail": "junk", "junk_suffix": " Thank you."})
         result = core.check(text, segments, text, judge, mode="trim", timeout_ms=400)
-        self.assertEqual(result["paste_text"], "I approve.")
-        self.assertTrue(result["flagged"])
+        self.assertEqual(result["paste_text"], text)
+        self.assertFalse(result["flagged"])
+        self.assertTrue(result["record"])
+        self.assertEqual(result["record"]["verdict"], "junk")
+
+    def test_check_passes_no_max_share_override_to_accept_cut(self):
+        """Gate review vdtcorej-J.md REJECT: a prior implementation threaded
+        an undocumented CHECK_MAX_SHARE=0.5 constant into check()'s own call
+        to accept_cut, silently loosening the locked 0.4 default specifically
+        on the one path that actually runs in production. Patch accept_cut
+        with a spy that records every call's effective max_share; whatever
+        mode or fixture reaches the cut path, check() must never pass (or
+        rely on a default resolving to) anything other than the canonical
+        0.4. Red: stub's check() never calls accept_cut at all, so `calls`
+        stays empty."""
+        calls: list[float] = []
+        original_accept_cut = core.accept_cut
+
+        def _spy(text, junk_suffix, boundaries=None, max_words=8, max_share=0.4):
+            calls.append(max_share)
+            return original_accept_cut(
+                text,
+                junk_suffix,
+                boundaries=boundaries,
+                max_words=max_words,
+                max_share=max_share,
+            )
+
+        core.accept_cut = _spy
+        try:
+            text = "I approve. Thank you."
+            segments = self._triggering_segments()
+            judge = core.MockJudge({"tail": "junk", "junk_suffix": " Thank you."})
+            core.check(text, segments, text, judge, mode="trim", timeout_ms=400)
+        finally:
+            core.accept_cut = original_accept_cut
+
+        self.assertTrue(calls, "check() never called accept_cut")
+        for max_share in calls:
+            self.assertEqual(max_share, 0.4)
 
     def test_fail_open_when_judge_raises(self):
         """Red: `record` must note the failure; stub's record is always {}."""
