@@ -55,6 +55,49 @@ def _fixture() -> dict:
     }
 
 
+def _second_fixture() -> dict:
+    return {
+        "corpus_a": {
+            "take2": {
+                "full": {
+                    "segments": [{"start": 0.0, "end": 3.0, "text": "body"}],
+                    "speech_end_s": 3.0,
+                },
+                "short": {
+                    "segments": [
+                        {"start": 0.0, "end": 3.0, "text": "body"},
+                        {"start": 3.0, "end": 3.4, "text": "Bye."},
+                    ],
+                    "speech_end_s": 3.0,
+                },
+                "none": {
+                    "segments": [
+                        {"start": 0.0, "end": 3.0, "text": "body"},
+                        {"start": 3.0, "end": 3.2, "text": "um"},
+                    ],
+                    "speech_end_s": 3.0,
+                },
+            }
+        },
+        "corpus_b": {
+            "take2": {
+                "full": {
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "Confirmed."}],
+                    "expected_last_text": "Confirmed.",
+                },
+                "short": {
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "Confirme"}],
+                    "expected_last_text": "Confirmed.",
+                },
+                "none": {
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "Confirmed."}],
+                    "expected_last_text": "Confirmed.",
+                },
+            }
+        },
+    }
+
+
 class RunTests(unittest.TestCase):
     def test_per_variant_metrics_on_a_fake_decodes_fixture(self):
         """Red: stub returns {}, missing every variant/key.
@@ -82,6 +125,41 @@ class RunTests(unittest.TestCase):
                 },
                 "none": {
                     "fabricated_tail_present": 0,
+                    "fabricated_tail_total": 1,
+                    "last_segment_preserved": 1,
+                    "last_segment_total": 1,
+                },
+            },
+        )
+
+    def test_per_variant_metrics_on_a_second_fake_decodes_fixture(self):
+        """Hard-coding risk (gate review vdtga-GJ §4): the test above alone
+        passes for a `run()` that returns its expected dict unconditionally,
+        ignoring `decodes_json`. This SECOND, differently-shaped fixture
+        (`full` is clean on corpus A here; `short` loses the tail this
+        time; corpus B's `short` variant, not `full`, is the one that
+        truncates) has a per-variant result that differs from the first
+        fixture's for every variant, so it catches that hard-coded return.
+
+        Red: stub returns {} regardless of fixture."""
+        result = prompt_ablation.run(_second_fixture())
+        self.assertEqual(
+            result,
+            {
+                "full": {
+                    "fabricated_tail_present": 0,
+                    "fabricated_tail_total": 1,
+                    "last_segment_preserved": 1,
+                    "last_segment_total": 1,
+                },
+                "short": {
+                    "fabricated_tail_present": 1,
+                    "fabricated_tail_total": 1,
+                    "last_segment_preserved": 0,
+                    "last_segment_total": 1,
+                },
+                "none": {
+                    "fabricated_tail_present": 1,
                     "fabricated_tail_total": 1,
                     "last_segment_preserved": 1,
                     "last_segment_total": 1,

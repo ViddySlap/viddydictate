@@ -27,6 +27,23 @@ def _confident_segment(start: float, end: float, raw_text: str) -> dict:
     }
 
 
+class SpyJudge:
+    """Test double that records every (context, tail) pair it is actually
+    asked about, then answers a fixed `answer` dict. Lets a test assert on
+    what `check()` hands the judge, not just on `check()`'s own return
+    value (gate review vdtga-GJ finding (a) / hard-coding risk: none of
+    `MockJudge`/`OracleJudge`/`AdversarialJudge` could previously notice an
+    oversized or wrong `context`/`tail` pair)."""
+
+    def __init__(self, answer: dict) -> None:
+        self._answer = answer
+        self.calls: list[tuple[str, str]] = []
+
+    def answer(self, context: str, tail: str, timeout_ms: int) -> dict:
+        self.calls.append((context, tail))
+        return dict(self._answer)
+
+
 class TriggerTests(unittest.TestCase):
     def test_does_not_fire_on_clean_single_segment(self):
         """Stub returns [] always -> this happens to already match the
@@ -281,6 +298,52 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(result["flagged"])
         self.assertTrue(result["record"])
 
+    def test_check_bounds_context_to_last_two_sentences_and_a_char_cap(self):
+        """Gate review vdtga-GJ finding (a): `check()`'s own contract must
+        bound `context` to at most the last two sentences before the
+        suspicious tail, AND to `core.MAX_CONTEXT_CHARS`, never the whole
+        note -- the exact failure mode the project history treats as
+        hardest-won (long audio, a repeat-loop tail). A spy judge records
+        the (context, tail) it is actually asked about; this fixture
+        makes any two consecutive sentences alone exceed the char cap, so
+        passing requires BOTH bounds to be enforced for real, not just
+        coincidentally satisfied by short fixture text.
+
+        Red: the stub never calls the judge at all, so `spy.calls` stays
+        empty and the first assertion fails."""
+        padding_word = "stakeholder "
+        words_needed = (core.MAX_CONTEXT_CHARS // 2) // len(padding_word) + 5
+
+        def _long_sentence(marker: str) -> str:
+            return f"{marker} " + padding_word * words_needed + "done."
+
+        sentences = [_long_sentence(f"Sentence{i}") for i in range(40)]
+        body = " ".join(sentences)
+        tail_text = " ".join(["primarily"] * 8)
+        text = f"{body} {tail_text}"
+        segments = [
+            _confident_segment(0.0, 200.0, body),
+            {
+                "start": 200.1,
+                "end": 210.0,
+                "raw_text": tail_text,
+                "no_speech_prob": 0.05,
+                "avg_logprob": -0.2,
+                "compression_ratio": 1.0,
+            },
+        ]
+        spy = SpyJudge({"tail": "clean"})
+        core.check(text, segments, text, spy, mode="observe", timeout_ms=400)
+        self.assertEqual(len(spy.calls), 1)
+        context, tail = spy.calls[0]
+        self.assertEqual(tail, tail_text)
+        context_sentences = [
+            s for s in re.split(r"(?<=[.!?])\s+", context.strip()) if s
+        ]
+        self.assertLessEqual(len(context_sentences), core.MAX_CONTEXT_SENTENCES)
+        self.assertLessEqual(len(context), core.MAX_CONTEXT_CHARS)
+        self.assertTrue(context.endswith(sentences[-1]))
+
     def test_no_trigger_means_no_judge_call(self):
         """A clean single-segment take must never even reach the judge.
         Stub already returns the input text unchanged with flagged False,
@@ -298,6 +361,37 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(result["flagged"])
 
 
+class BareSingleSegmentTrapTests(unittest.TestCase):
+    """Gate review vdtga-GJ finding (d): the sharpest false-trim case the
+    locked spec and this module's own docstring single out -- a bare
+    repeated-word or outro-sounding phrase that is the WHOLE dictation,
+    not softened into a longer sentence. `trigger` may or may not fire on
+    these (not asserted either way -- the false-trim guarantee comes from
+    `accept_cut`/`check`, per core.py's own module docstring); the one
+    thing that must never happen is a cut, because the only possible cut
+    here IS the whole text."""
+
+    BARE_TRAPS = ("No, no, no.", "Very, very good.", "Yes.", "Thank you.", "Bye.")
+
+    def test_accept_cut_refuses_the_whole_text_for_every_bare_trap(self):
+        """Red: stub always returns (False, 'stub'), never
+        (False, REFUSAL_WHOLE_TEXT)."""
+        for bare in self.BARE_TRAPS:
+            result = core.accept_cut(bare, bare)
+            self.assertEqual(result, (False, core.REFUSAL_WHOLE_TEXT), bare)
+
+    def test_check_never_cuts_a_bare_single_segment_trap_even_in_trim_mode(self):
+        """Not stub-caused red today (the stub's `trigger` never fires, so
+        `check` never even reaches `accept_cut`) -- stands as a standing
+        guardrail against a later implementation that fires on these and
+        then trusts a judge's whole-text cut proposal."""
+        for bare in self.BARE_TRAPS:
+            segments = [_confident_segment(0.0, 1.0, bare)]
+            judge = core.MockJudge({"tail": "junk", "junk_suffix": bare})
+            result = core.check(bare, segments, bare, judge, mode="trim", timeout_ms=400)
+            self.assertEqual(result["paste_text"], bare, bare)
+
+
 class KevClientTests(unittest.TestCase):
     def test_request_body_shape(self):
         """Red: stub returns {}, missing every documented key."""
@@ -308,6 +402,24 @@ class KevClientTests(unittest.TestCase):
             {
                 "context": "I approve.",
                 "tail": "Thank you.",
+                "task": "tail_check",
+                "response_schema": {"tail": "clean|junk", "junk_suffix": "string"},
+            },
+        )
+
+    def test_request_body_varies_with_its_arguments(self):
+        """Hard-coding risk (gate review vdtga-GJ §4): the test above alone
+        passes for a `request_body` that returns its expected dict
+        verbatim, ignoring `context`/`tail` entirely. A SECOND, different
+        pair must produce a correspondingly different body. Red: stub
+        returns {} for every call."""
+        client = core.KevClient("http://127.0.0.1:0")
+        body = client.request_body("Let's ship it today.", "mmstuff")
+        self.assertEqual(
+            body,
+            {
+                "context": "Let's ship it today.",
+                "tail": "mmstuff",
                 "task": "tail_check",
                 "response_schema": {"tail": "clean|junk", "junk_suffix": "string"},
             },

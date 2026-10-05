@@ -119,6 +119,25 @@ low confidence on the LAST segment only matters when there is more than one
 segment, which is exactly the single-segment safety floor this prototype
 must not cross."""
 
+MAX_CONTEXT_SENTENCES = 2
+"""Design note S2B: the judge gets "the last two sentences plus the
+suspicious tail, never the whole note." `check()` must never hand the
+judge `text` with only the tail span removed -- for an ordinary trigger
+that is the entire note minus one segment, unbounded in length, which is
+a contract defect in itself (gate review vdtga-GJ, finding (a)): it blows
+the §3 latency/token budget and the "never the whole note" privacy intent
+on exactly the failure mode (long audio, the 204s/36x-repeat take) the
+project history treats as hardest-won."""
+
+MAX_CONTEXT_CHARS = 600
+"""Second, independent bound on `context`, applied AFTER the sentence cap
+(design S3's "~100-200 tokens in" assumption; ~600 chars is a generous
+superset of that in characters). If the last `MAX_CONTEXT_SENTENCES`
+sentences are still longer than this, keep only the trailing
+`MAX_CONTEXT_CHARS` characters -- the end nearest the tail, not the
+start -- since this is a context window for a judge call, not a
+transcript to preserve."""
+
 OUTRO_PHRASES = frozenset(
     {
         "thank you",
@@ -372,13 +391,29 @@ def check(
     2. Otherwise, derive `context` and `tail` from `text` (== `final_text`
        in `trigger`'s sense). When `reasons` contains anything other than
        only `REASON_CLEANUP_ADDED_SUFFIX`, the suspicious tail is the last
-       segment's span: `tail = segments[-1]["raw_text"]`, `context = text`
-       with that span removed from the end. When `reasons ==
+       segment's span: `tail = segments[-1]["raw_text"]`; the text that
+       precedes it is `text` with that span removed from the end
+       (`preceding = text[:len(text) - len(tail)]`). When `reasons ==
        [REASON_CLEANUP_ADDED_SUFFIX]` (the cleanup LLM added trailing
        content whisper never produced, so no segment covers it), `tail =
-       text[len(raw_text):]` and `context = raw_text`. Either way, bounded
-       by the time budget: call `judge.answer(context, tail, timeout_ms)`
-       inside a hard wall-clock bound of `timeout_ms` (stdlib-only, e.g.
+       text[len(raw_text):]` and `preceding = raw_text`.
+
+       `context` is NEVER `preceding` in full (design S2B: "the last two
+       sentences plus the suspicious tail, never the whole note"; S3's
+       latency budget assumes ~100-200 input tokens) -- it is bounded by
+       TWO independent caps, applied in order:
+       (i) split `preceding` into sentences and keep at most the LAST
+       `MAX_CONTEXT_SENTENCES` of them, joined back with a single space
+       (fewer than that if `preceding` has fewer sentences, or empty if
+       the suspicious tail is the very first thing said);
+       (ii) if that is still longer than `MAX_CONTEXT_CHARS`, truncate it
+       to its own trailing `MAX_CONTEXT_CHARS` characters (keep the END,
+       nearest the tail; drop the START -- a context window, not a
+       transcript).
+
+       Either way, bounded by the time budget: call `judge.answer(context,
+       tail, timeout_ms)` inside a hard wall-clock bound of `timeout_ms`
+       (stdlib-only, e.g.
        `concurrent.futures.ThreadPoolExecutor(1).submit(...).result(timeout=...)`).
        On `TimeoutError` or any exception from the judge: FAIL OPEN --
        `paste_text = text` (unchanged, regardless of `mode`), `flagged =

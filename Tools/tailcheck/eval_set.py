@@ -85,6 +85,21 @@ _TRAP_FAMILIES: dict[str, tuple[str, ...]] = {
         "I was going to mention the deploy window, but never mind, so",
         "We can revisit the pricing page later, so",
     ),
+    # Gate review vdtga-GJ finding (d): the sharpest false-trim case the
+    # locked spec and core.py's own docstring single out by name is a BARE
+    # repeated-word or outro-sounding phrase as the WHOLE dictation, not
+    # softened into a longer sentence the way `real_repetition` above is.
+    # Deliberately overlaps, by content, with `one_word_affirmative`
+    # ("Yes.") and with the outro_filler_after_gap fabrication suffix
+    # ("Thank you.", stripped) -- see test_eval_set.py's collision guard
+    # for why that overlap is expected, not a defect, for this one family.
+    "bare_single_segment": (
+        "No, no, no.",
+        "Very, very good.",
+        "Yes.",
+        "Thank you.",
+        "Bye.",
+    ),
 }
 
 # fabrication suffixes per S1 family: appended to a clean body to build a
