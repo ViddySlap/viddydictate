@@ -419,6 +419,10 @@ def _clean_segments(result: dict, do_clean: bool,
             "text": segment.get("text") or "",
             "kept": True,
             "drop_reason": None,
+            "raw_text": segment.get("text") or "",
+            "no_speech_prob": segment.get("no_speech_prob"),
+            "avg_logprob": segment.get("avg_logprob"),
+            "compression_ratio": segment.get("compression_ratio"),
         }
         diagnostics.append(record)
 
