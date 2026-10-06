@@ -83,4 +83,61 @@ def run(decodes_json: dict) -> dict:
     last segment (excluded from `last_segment_total`, since there is
     nothing to compare).
     """
-    return {}
+    corpus_a = decodes_json.get("corpus_a") or {}
+    corpus_b = decodes_json.get("corpus_b") or {}
+
+    # A variant is "present" if any take in either corpus carries it.
+    present: set[str] = set()
+    for corpus in (corpus_a, corpus_b):
+        for take in corpus.values():
+            if not isinstance(take, dict):
+                continue
+            for variant in VARIANTS:
+                if variant in take:
+                    present.add(variant)
+
+    result: dict[str, dict[str, int]] = {}
+    for variant in VARIANTS:
+        if variant not in present:
+            continue
+
+        # Corpus A: structural fabricated-tail presence. A segment that
+        # starts at or after the measured speech end is a fabricated tail.
+        fabricated_tail_present = 0
+        fabricated_tail_total = 0
+        for take in corpus_a.values():
+            if not isinstance(take, dict) or variant not in take:
+                continue
+            payload = take[variant]
+            fabricated_tail_total += 1
+            segments = payload.get("segments") or []
+            speech_end_s = payload.get("speech_end_s")
+            if speech_end_s is not None and any(
+                seg.get("start", 0.0) >= speech_end_s for seg in segments
+            ):
+                fabricated_tail_present += 1
+
+        # Corpus B: the last KEPT segment's text must survive byte-exact.
+        # An empty segment list has nothing to compare, so it contributes
+        # to neither the numerator nor the denominator.
+        last_segment_preserved = 0
+        last_segment_total = 0
+        for take in corpus_b.values():
+            if not isinstance(take, dict) or variant not in take:
+                continue
+            payload = take[variant]
+            segments = payload.get("segments") or []
+            if not segments:
+                continue
+            last_segment_total += 1
+            if segments[-1].get("text") == payload.get("expected_last_text"):
+                last_segment_preserved += 1
+
+        result[variant] = {
+            "fabricated_tail_present": fabricated_tail_present,
+            "fabricated_tail_total": fabricated_tail_total,
+            "last_segment_preserved": last_segment_preserved,
+            "last_segment_total": last_segment_total,
+        }
+
+    return result

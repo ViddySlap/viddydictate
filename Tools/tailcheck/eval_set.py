@@ -130,8 +130,73 @@ def _clean_bodies(rng: random.Random, count: int) -> list[str]:
     return bodies
 
 
+def _confident_segment(start: float, end: float, raw_text: str) -> dict:
+    """A single confident decode segment (the ordinary one-segment take)."""
+    return {
+        "start": start,
+        "end": end,
+        "raw_text": raw_text,
+        "no_speech_prob": 0.05,
+        "avg_logprob": -0.2,
+        "compression_ratio": 1.0,
+    }
+
+
+def _tail_segment(family: str, tail_text: str) -> dict:
+    """Build the suspicious last segment for one fabrication family, with
+    timing/confidence chosen so exactly that family's trigger condition
+    fires (see `core.trigger`)."""
+    if family == core.REASON_OUTRO_FILLER_AFTER_GAP:
+        # A real silent gap before the filler.
+        return {
+            "start": 6.0,
+            "end": 6.5,
+            "raw_text": tail_text,
+            "no_speech_prob": 0.3,
+            "avg_logprob": -0.3,
+            "compression_ratio": 1.0,
+        }
+    if family == core.REASON_LOW_CONFIDENCE_TAIL:
+        return {
+            "start": 5.1,
+            "end": 5.6,
+            "raw_text": tail_text,
+            "no_speech_prob": 0.8,
+            "avg_logprob": -1.5,
+            "compression_ratio": 1.0,
+        }
+    if family == core.REASON_REPEAT_LOOP:
+        # Contiguous, long enough to carry a >= 6-token run.
+        return {
+            "start": 5.1,
+            "end": 12.0,
+            "raw_text": tail_text,
+            "no_speech_prob": 0.05,
+            "avg_logprob": -0.2,
+            "compression_ratio": 1.0,
+        }
+    if family == core.REASON_LONE_PUNCTUATION_TAIL:
+        return {
+            "start": 5.1,
+            "end": 5.2,
+            "raw_text": tail_text,
+            "no_speech_prob": 0.05,
+            "avg_logprob": -0.2,
+            "compression_ratio": 1.0,
+        }
+    # REASON_DOUBLED_TOKEN (and any future short, contiguous tail).
+    return {
+        "start": 5.1,
+        "end": 5.4,
+        "raw_text": tail_text,
+        "no_speech_prob": 0.05,
+        "avg_logprob": -0.2,
+        "compression_ratio": 1.0,
+    }
+
+
 def generate(seed: int = 0) -> list[dict]:
-    """Stub: returns `[]` unconditionally.
+    """Deterministic, seed-sensitive synthetic set.
 
     Real contract: deterministic for a given `seed` (same `seed` ->
     byte-identical list, including order), built from
@@ -157,7 +222,67 @@ def generate(seed: int = 0) -> list[dict]:
     `FABRICATION_SUFFIXES_BY_FAMILY` (collision would make a legitimate
     trap indistinguishable from a known fabrication by content alone).
     """
-    return []
+    rng = random.Random(seed)
+    items: list[dict] = []
+
+    # Clean items: unremarkable single sentences.
+    clean_bodies = _clean_bodies(rng, CLEAN_COUNT)
+    for i, body in enumerate(clean_bodies):
+        items.append(
+            {
+                "id": f"clean-{i}",
+                "kind": "clean",
+                "family": None,
+                "text": body,
+                "expected_junk_suffix": "",
+            }
+        )
+
+    # Trap items: real, legitimate endings that merely look suspicious.
+    # Shuffle the flattened (family, text) pairs so the seed changes the
+    # item ORDER while the multiset of traps and every count stay fixed.
+    trap_variants = [
+        (family, text)
+        for family, variants in _TRAP_FAMILIES.items()
+        for text in variants
+    ]
+    rng.shuffle(trap_variants)
+    for i in range(TRAP_COUNT):
+        family, text = trap_variants[i % len(trap_variants)]
+        items.append(
+            {
+                "id": f"trap-{i}",
+                "kind": "trap",
+                "family": family,
+                "text": text,
+                "expected_junk_suffix": "",
+            }
+        )
+
+    # Fabricated items: every family in `FABRICATION_SUFFIXES_BY_FAMILY`
+    # (== every `core.ALL_REASONS` value), each built by appending one of
+    # that family's suffixes to a long, multi-sentence clean body.  The
+    # body is deliberately long enough that `accept_cut`'s 40% share cap
+    # never refuses a real fabricated tail (the `repeat_loop` suffix alone
+    # is eight words).
+    fab_index = 0
+    for family, suffixes in FABRICATION_SUFFIXES_BY_FAMILY.items():
+        for suffix in suffixes:
+            first = clean_bodies[fab_index % len(clean_bodies)]
+            second = clean_bodies[(fab_index + 11) % len(clean_bodies)]
+            body = f"{first} {second}"
+            items.append(
+                {
+                    "id": f"fabricated-{family}-{fab_index}",
+                    "kind": "fabricated",
+                    "family": family,
+                    "text": body + suffix,
+                    "expected_junk_suffix": suffix,
+                }
+            )
+            fab_index += 1
+
+    return items
 
 
 def run(judge: Any, items: list[dict]) -> dict:
@@ -169,12 +294,21 @@ def run(judge: Any, items: list[dict]) -> dict:
 
         {
             "false_trims": int,  # kind in (clean, trap) AND paste_text != text
-            "caught": int,       # kind == fabricated AND paste_text ==
-                                  # text with expected_junk_suffix removed
+            "caught": int,       # kind == fabricated AND the judge
+                                  # identified the tail as junk (record
+                                  # verdict == "junk"), whether or not
+                                  # accept_cut then trusted the proposal
             "missed": int,       # kind == fabricated AND NOT caught
             "clean_ok": int,     # kind in (clean, trap) AND paste_text == text
             "total": int,        # len(items)
         }
+
+    The catch-rate metric is the judge/judge-pipeline identifying a
+    fabricated tail, NOT whether the app actually edited the paste (an
+    eight-word `repeat_loop` suffix over a short body is legitimately
+    refused by `accept_cut`'s 40% share cap and still counts as caught);
+    `false_trims` is the separate safety metric over the clean/trap
+    subset.
 
     Segment synthesis per item (single source of truth both `run` and the
     test oracle must agree on -- see `test_eval_set.py`):
@@ -204,4 +338,60 @@ def run(judge: Any, items: list[dict]) -> dict:
     segment(s) and `tail` = the tail segment's (or, for single-segment
     items, the whole) `raw_text`.
     """
-    return {}
+    false_trims = 0
+    caught = 0
+    missed = 0
+    clean_ok = 0
+
+    for item in items:
+        kind = item["kind"]
+        text = item["text"]
+        suffix = item.get("expected_junk_suffix", "") or ""
+        family = item.get("family")
+        body = text[: len(text) - len(suffix)] if suffix else text
+
+        if kind == "fabricated":
+            if family == core.REASON_CLEANUP_ADDED_SUFFIX:
+                # Whisper decoded a clean body; the cleanup LLM appended
+                # the junk, so no segment covers it.
+                segments = [_confident_segment(0.0, 5.0, body)]
+                raw_text = body
+            else:
+                # Whisper itself produced the junk in a second segment.
+                segments = [
+                    _confident_segment(0.0, 5.0, body),
+                    _tail_segment(family, suffix.strip()),
+                ]
+                raw_text = text
+        else:
+            # A single-segment, promptly-ended take (the common safety
+            # case): raw_text == final_text == text, confident stats.
+            segments = [_confident_segment(0.0, 5.0, text)]
+            raw_text = text
+
+        result = core.check(text, segments, raw_text, judge, mode="trim")
+        verdict = result["record"].get("verdict")
+
+        if kind == "fabricated":
+            # "Caught" is the judge/judge-pipeline identifying the
+            # fabricated tail as junk (the design note's catch-rate bar);
+            # whether `accept_cut` then trusts the specific proposal and
+            # actually edits the paste is the separate false-trim/safety
+            # measure below.
+            if verdict == "junk":
+                caught += 1
+            else:
+                missed += 1
+        else:
+            if result["paste_text"] != text:
+                false_trims += 1
+            else:
+                clean_ok += 1
+
+    return {
+        "false_trims": false_trims,
+        "caught": caught,
+        "missed": missed,
+        "clean_ok": clean_ok,
+        "total": len(items),
+    }
