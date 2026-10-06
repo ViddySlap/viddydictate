@@ -87,6 +87,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // this once the arms pass; wiring a deliberately-red test into deterministic now would fail
     // check_selftest_flag_drift and make verify.sh red at HEAD.
     case modelFitSelftest = "--modelfit-selftest"
+    // GP of chain `vdtpga`: the five Phase-1 tailcheck arms (`--only <arm>`). Excluded tier on
+    // purpose -- every arm is deliberately red against today's stub port in Sources/App/TailCheck.swift;
+    // a later wire link promotes this once the real port lands, same as --modelfit-selftest above.
+    case tailCheckSelftest = "--tailcheck-selftest"
     // RTY1: the same defect graded through the seam production dispatches on, rather than through the
     // pure policy function. Its own flag because ModelFitSelfTest is protected by chain vdfit.
     case modelFitRetryWiringSelftest = "--modelfit-wiring-selftest"

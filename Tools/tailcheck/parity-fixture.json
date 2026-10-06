@@ -1,0 +1,410 @@
+{
+  "schema": "tailcheck-parity-fixture/1",
+  "source": "exported from Tools/tailcheck/core.py by export_parity_fixture.py",
+  "trigger_cases": [
+    {
+      "label": "clean_single_segment_never_fires",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "The fix that landed for the sticky note tabs looks pretty good.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "The fix that landed for the sticky note tabs looks pretty good.",
+      "final_text": "The fix that landed for the sticky note tabs looks pretty good.",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "outro_filler_after_gap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "I approve.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        },
+        {
+          "start": 6.5,
+          "end": 7.0,
+          "raw_text": "Thank you.",
+          "no_speech_prob": 0.3,
+          "avg_logprob": -0.3,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "I approve. Thank you.",
+      "final_text": "I approve. Thank you.",
+      "expected_reasons_sorted": [
+        "outro_filler_after_gap"
+      ]
+    },
+    {
+      "label": "doubled_token",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "Send it over.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        },
+        {
+          "start": 5.1,
+          "end": 5.4,
+          "raw_text": "fuck fuck",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Send it over. fuck fuck",
+      "final_text": "Send it over. fuck fuck",
+      "expected_reasons_sorted": [
+        "doubled_token"
+      ]
+    },
+    {
+      "label": "repeat_loop",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "Checking in now.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        },
+        {
+          "start": 5.1,
+          "end": 12.0,
+          "raw_text": "primarily primarily primarily primarily primarily primarily primarily primarily",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Checking in now. primarily primarily primarily primarily primarily primarily primarily primarily",
+      "final_text": "Checking in now. primarily primarily primarily primarily primarily primarily primarily primarily",
+      "expected_reasons_sorted": [
+        "repeat_loop"
+      ]
+    },
+    {
+      "label": "lone_punctuation_tail",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "That's the plan.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        },
+        {
+          "start": 5.1,
+          "end": 5.2,
+          "raw_text": "...",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "That's the plan. ...",
+      "final_text": "That's the plan. ...",
+      "expected_reasons_sorted": [
+        "lone_punctuation_tail"
+      ]
+    },
+    {
+      "label": "low_confidence_tail",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "Let's wrap up.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        },
+        {
+          "start": 5.1,
+          "end": 5.6,
+          "raw_text": "mmstuff",
+          "no_speech_prob": 0.8,
+          "avg_logprob": -1.5,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Let's wrap up. mmstuff",
+      "final_text": "Let's wrap up. mmstuff",
+      "expected_reasons_sorted": [
+        "low_confidence_tail"
+      ]
+    },
+    {
+      "label": "cleanup_added_suffix",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "raw_text": "The release is ready.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "The release is ready.",
+      "final_text": "The release is ready. We'll be right back.",
+      "expected_reasons_sorted": [
+        "cleanup_added_suffix"
+      ]
+    },
+    {
+      "label": "low_confidence_never_fires_on_single_segment",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "use",
+          "no_speech_prob": 0.9,
+          "avg_logprob": -2.0,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "use",
+      "final_text": "use",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "bare_whole_dictation_trap['No, no, no.']",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "No, no, no.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "No, no, no.",
+      "final_text": "No, no, no.",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "bare_whole_dictation_trap['Very, very good.']",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "Very, very good.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Very, very good.",
+      "final_text": "Very, very good.",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "bare_whole_dictation_trap['Yes.']",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "Yes.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Yes.",
+      "final_text": "Yes.",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "bare_whole_dictation_trap['Thank you.']",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "Thank you.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Thank you.",
+      "final_text": "Thank you.",
+      "expected_reasons_sorted": []
+    },
+    {
+      "label": "bare_whole_dictation_trap['Bye.']",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "raw_text": "Bye.",
+          "no_speech_prob": 0.05,
+          "avg_logprob": -0.2,
+          "compression_ratio": 1.0
+        }
+      ],
+      "raw_text": "Bye.",
+      "final_text": "Bye.",
+      "expected_reasons_sorted": []
+    }
+  ],
+  "accept_cut_cases": [
+    {
+      "label": "accepts_short_suffix_at_word_boundary",
+      "text": "I reviewed the draft and I approve. Thank you.",
+      "junk_suffix": " Thank you.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": true,
+      "expected_reason": "accepted"
+    },
+    {
+      "label": "accepts_short_suffix_at_segment_boundary",
+      "text": "I reviewed the draft and I approve. Thank you.",
+      "junk_suffix": " Thank you.",
+      "boundaries": [
+        35
+      ],
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": true,
+      "expected_reason": "accepted"
+    },
+    {
+      "label": "refuses_non_suffix",
+      "text": "I reviewed the draft and I approve. Thank you.",
+      "junk_suffix": " We'll see you next week.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "not_suffix"
+    },
+    {
+      "label": "refuses_body_edit",
+      "text": "I approve. Let's ship it today.",
+      "junk_suffix": "approve.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "body_edit"
+    },
+    {
+      "label": "refuses_whole_text_cut",
+      "text": "I reviewed the draft and I approve. Thank you.",
+      "junk_suffix": "I reviewed the draft and I approve. Thank you.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    },
+    {
+      "label": "refuses_mid_word_cut",
+      "text": "I approve",
+      "junk_suffix": "prove",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "mid_word"
+    },
+    {
+      "label": "refuses_too_many_words",
+      "text": "I approve. This has been a long and winding road to approval.",
+      "junk_suffix": " This has been a long and winding road to approval.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "too_many_words"
+    },
+    {
+      "label": "refuses_share_too_high",
+      "text": "Yes I think so",
+      "junk_suffix": " I think so",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "share_too_high"
+    },
+    {
+      "label": "refuses_no_sentence_remains",
+      "text": "... --- ... --- ... --- ... --- Thank you.",
+      "junk_suffix": " Thank you.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "no_sentence_remains"
+    },
+    {
+      "label": "refuses_bare_whole_dictation_trap['No, no, no.']",
+      "text": "No, no, no.",
+      "junk_suffix": "No, no, no.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    },
+    {
+      "label": "refuses_bare_whole_dictation_trap['Very, very good.']",
+      "text": "Very, very good.",
+      "junk_suffix": "Very, very good.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    },
+    {
+      "label": "refuses_bare_whole_dictation_trap['Yes.']",
+      "text": "Yes.",
+      "junk_suffix": "Yes.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    },
+    {
+      "label": "refuses_bare_whole_dictation_trap['Thank you.']",
+      "text": "Thank you.",
+      "junk_suffix": "Thank you.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    },
+    {
+      "label": "refuses_bare_whole_dictation_trap['Bye.']",
+      "text": "Bye.",
+      "junk_suffix": "Bye.",
+      "boundaries": null,
+      "max_words": 8,
+      "max_share": 0.4,
+      "expected_accepted": false,
+      "expected_reason": "whole_text"
+    }
+  ]
+}

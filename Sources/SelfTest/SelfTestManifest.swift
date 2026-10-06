@@ -368,6 +368,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelFitSelftest: .init(tier: .deterministic) { arguments in
         ModelFitSelfTest.run(arguments: arguments)
     },
+    // GP of chain `vdtpga`: the five Phase-1 tailcheck arms (`--only <arm>`). See the enum case's
+    // own comment in main.swift for why this is `.excluded` rather than `.deterministic`.
+    .tailCheckSelftest: .init(tier: .excluded) { arguments in
+        TailCheckSelfTest.run(arguments: arguments)
+    },
     // RTY1: proves the capacity step-down fires from the production dispatch seam, not just from the
     // policy function. Takes no --only; it is one arm.
     .modelFitRetryWiringSelftest: .init(tier: .deterministic) { _ in
