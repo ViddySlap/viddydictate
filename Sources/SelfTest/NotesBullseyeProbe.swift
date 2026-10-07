@@ -326,7 +326,7 @@ extension NotesProbe {
                                       from: "func landInPlaceTransform(",
                                       to: "// MARK: lifecycle")
         let finalizeBody = sourceSlice(c1ControllerSrc,
-                                       from: "private func finalize(delivered:",
+                                       from: "func finalize(delivered:",
                                        to: "private func deliverPushToTalk(")
         let bullseyeBridgeCalls = coordinatorSrc.components(separatedBy: "callbacks.onDeliverToBullseye(delivered)").count - 1
         check("bullseye C1 call sites: raw finalize and one-shot in-place call the same coordinator helper",
@@ -1030,7 +1030,7 @@ extension NotesProbe {
                                 from: "private func deliver(text rawText:",
                                 to: "private func landCleanupRetry(")
         let finalizeBody = sourceSlice(controllerSrc,
-                                 from: "private func finalize(delivered:",
+                                 from: "func finalize(delivered:",
                                  to: "private func deliverPushToTalk(")
         let markTakeConsumedBody = sourceSlice(controllerSrc,
                                          from: "func markTakeConsumed()",

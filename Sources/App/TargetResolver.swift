@@ -450,8 +450,12 @@ enum TargetResolver {
         }
     }
 
-    static func copyToClipboard(_ text: String) {
-        SyntheticPasteboard.write(text)
+    /// `pasteboard` defaults to the real system pasteboard; every production call site keeps that
+    /// default unchanged. The override exists so a self-test can drive a real `DictationController`
+    /// delivery branch against a private, uniquely-named pasteboard instead of clobbering whatever is
+    /// really on the user's clipboard (see `TailCheckSelfTest`'s `hook-wired` / `hook-after-paste`).
+    static func copyToClipboard(_ text: String, to pasteboard: NSPasteboard = .general) {
+        SyntheticPasteboard.write(text, to: pasteboard)
     }
 
     /// Two-tier-undo TIER 1 (native-undo revert): fire the focused app's OWN undo (Cmd+Z) to remove

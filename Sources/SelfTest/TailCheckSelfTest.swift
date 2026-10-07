@@ -534,8 +534,11 @@ enum TailCheckSelfTest {
                             if case .timeout = hangOutcome { return true }
                             return false
                         }(), "\(hangOutcome)")
-        reporter.record("the hard timeout actually bounds the wait (<= ~1s for a 100ms budget)",
-                        elapsedMs <= 1_000, "elapsed=\(elapsedMs)ms")
+        // vdtpwg2 repair (JW hole 5): tightened from "<= ~1s" -- a wall this loose let a ~900ms-drifted
+        // hard timeout pass. The band is anchored to the 100ms budget itself: it must have genuinely
+        // waited close to it (not returned early) and must not have drifted hundreds of ms past it.
+        reporter.record("the hard timeout bounds the wait to a tight band around the 100ms budget",
+                        elapsedMs >= 100 && elapsedMs < 400, "elapsed=\(elapsedMs)ms")
 
         // End-to-end: the seam must paste unchanged and record "timeout"/"error"-shaped verdicts
         // even when triggered, through a judge that fails in each of these ways. Red today, same
@@ -660,10 +663,39 @@ enum TailCheckSelfTest {
     // leave the Mac on a non-local/off resolution TODAY, and must stay true once a later I3 link makes
     // the local branch real. Each scenario below gets a transport whose every closure `fatalError`s if
     // called at all, so a regression crashes the arm rather than silently passing.
+    //
+    // vdtpwg2 repair (JW hole 1, construction-time half): a runtime spy over an injected transport
+    // cannot rule out a FUTURE `LocalRouteTailJudge` that reaches the network some OTHER way -- a new
+    // call site that forgets to inject anything. The fix is at the type level: `transport` has no
+    // default (see `TailCheck.swift`), so the compiler itself refuses `LocalRouteTailJudge()` with no
+    // transport argument at ANY call site, construction-time, not a runtime observation. The two source
+    // checks below pin that half of the contract directly (the compiler already proves the other half
+    // -- that this file keeps compiling -- just by building at all): no default slipped back in, and
+    // the one production call site that needs a real transport by default (`TailCheckObserver`'s own
+    // `judge` parameter) still names `.live` explicitly rather than leaning on a removed default.
 
     private static func runJudgeLocalOnly() -> Bool {
         print("=== ViddyDictate tailcheck — judge-local-only arm ===")
         let reporter = SelfTestReporter()
+
+        // Sliced through the END of the init's parameter list (the first line of its body), so this
+        // covers both the `transport` PROPERTY declaration (which never has a default, mutated or not --
+        // checking only for that would be vacuous) and the init's own PARAMETER, which is the thing this
+        // check must actually pin: no "LocalChatTransport = ..." default anywhere in this span.
+        let judgeInitSlice = NotesProbe.sourceSlice(
+            NotesProbe.sourceTailCheck, from: "final class LocalRouteTailJudge",
+            to: "self.routeResolver = routeResolver")
+        reporter.record(
+            "LocalRouteTailJudge's own init has no default transport -- a bare LocalRouteTailJudge() "
+                + "cannot compile, so a construction site can never silently inherit a network-capable "
+                + "transport",
+            !judgeInitSlice.contains("LocalChatTransport = "), judgeInitSlice)
+        reporter.record(
+            "the production call site (TailCheckObserver's own judge default) still names the real "
+                + "live transport explicitly",
+            NotesProbe.countOccurrences(
+                of: "judge: TailJudge = LocalRouteTailJudge(transport: .live)",
+                in: NotesProbe.sourceTailCheck) >= 1)
 
         func explodingTransport() -> LocalChatTransport {
             LocalChatTransport(
@@ -710,14 +742,36 @@ enum TailCheckSelfTest {
     // Red today, traced to `LocalRouteTailJudge.judge()`'s `.success(nil)` stub line: the stub never
     // reads `transport` at all, so NONE of the scenarios below ever reach the fake LOCAL transport --
     // every "want" is the real I3 contract this arm pins for the link that replaces the stub.
+    //
+    // vdtpwg2 repair (JW hole 1, request-shape half + hole 6): each scenario now carries its OWN
+    // distinct context/tail pair (a hard-coded single-case answer can no longer coincidentally satisfy
+    // every scenario), the LM Studio and Ollama backends are BOTH covered (the design note names both
+    // as valid transports, keyed off `resolution.bundle?.resolvedLocalBackend`), and "no other text" is
+    // now an exact-equality check against exactly one `role == "user"` message -- not a
+    // contains-then-strip-every-occurrence check that a duplicated fixture could satisfy by accident.
+
+    /// Exactly one `role == "user"` message in an OpenAI-shaped chat body's `messages` array, or `nil`
+    /// when there are zero, more than one, or the body does not parse -- never "the first one found" /
+    /// "all of them joined", so a second stray user message is a visible failure, not silently ignored.
+    private static func exactlyOneUserMessageContent(_ body: [String: Any]) -> String? {
+        guard let messages = body["messages"] as? [[String: Any]] else { return nil }
+        let userContents = messages.compactMap { ($0["role"] as? String) == "user" ? $0["content"] as? String : nil }
+        return userContents.count == 1 ? userContents.first : nil
+    }
 
     private static func runJudgeRequestShape() -> Bool {
         print("=== ViddyDictate tailcheck — judge-request-shape arm ===")
         let reporter = SelfTestReporter()
 
+        enum Backend { case lmStudio, ollama }
+
         struct Scenario {
             let label: String
-            let respond: () -> (Data?, URLResponse?, Error?)
+            let backend: Backend
+            let context: String
+            let tail: String
+            let respondLMStudio: () -> (Data?, URLResponse?, Error?)
+            let respondOllama: () -> (Data?, HTTPURLResponse?, Error?)
             let wantAnswer: TailCheck.JudgeAnswer??   // nil (outer) means "want .failure"
         }
 
@@ -727,79 +781,117 @@ enum TailCheckSelfTest {
                 statusCode: 200, httpVersion: nil, headerFields: nil)
             return (body.data(using: .utf8), response, nil)
         }
-
-        let context = "Sentence one is here. Sentence two follows it."
-        let tail = "primarily primarily primarily primarily primarily primarily"
+        func ollamaOK(_ body: String) -> (Data?, HTTPURLResponse?, Error?) {
+            let response = HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:11434/api/chat")!,
+                statusCode: 200, httpVersion: nil, headerFields: nil)
+            return (body.data(using: .utf8), response, nil)
+        }
+        func unreachable<T>(_ label: String) -> () -> T {
+            { fatalError("judge-request-shape[\(label)]: wrong backend reached") }
+        }
 
         let scenarios: [Scenario] = [
-            Scenario(label: "well-formed junk, suffix ends the tail",
-                     respond: { httpOK(#"{"tail":"junk","junk_suffix":"primarily"}"#) },
+            Scenario(label: "LM Studio: well-formed junk, suffix ends the tail", backend: .lmStudio,
+                     context: "Sentence one is here. Sentence two follows it.",
+                     tail: "primarily primarily primarily primarily primarily primarily",
+                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"primarily"}"#) },
+                     respondOllama: unreachable("LM Studio well-formed junk"),
                      wantAnswer: .some(.junk("primarily"))),
-            Scenario(label: "malformed JSON",
-                     respond: { httpOK("not json") },
+            Scenario(label: "LM Studio: malformed JSON", backend: .lmStudio,
+                     context: "A second, entirely distinct bounded-context sentence for this case.",
+                     tail: "garbled nonsense tail unrelated to the first scenario",
+                     respondLMStudio: { httpOK("not json") },
+                     respondOllama: unreachable("LM Studio malformed JSON"),
                      wantAnswer: .some(nil)),
-            Scenario(label: "empty body",
-                     respond: { httpOK("") },
+            Scenario(label: "LM Studio: empty body", backend: .lmStudio,
+                     context: "Yet a third, distinct bounded-context sentence rounds things out.",
+                     tail: "a third, distinct suspicious tail phrase",
+                     respondLMStudio: { httpOK("") },
+                     respondOllama: unreachable("LM Studio empty body"),
                      wantAnswer: .some(nil)),
-            Scenario(label: "well-formed junk whose suffix is NOT in the tail",
-                     respond: { httpOK(#"{"tail":"junk","junk_suffix":"something else entirely"}"#) },
+            Scenario(label: "LM Studio: well-formed junk whose suffix is NOT in the tail", backend: .lmStudio,
+                     context: "A fourth bounded-context sentence, still distinct from the others.",
+                     tail: "a fourth, distinct tail phrase entirely",
+                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"something else entirely"}"#) },
+                     respondOllama: unreachable("LM Studio suffix not in tail"),
                      wantAnswer: .some(nil)),
-            Scenario(label: "transport error",
-                     respond: { (nil, nil, NSError(domain: "tailcheck-selftest-fake", code: 1)) },
+            Scenario(label: "LM Studio: transport error", backend: .lmStudio,
+                     context: "A fifth bounded-context sentence completes the LM Studio set.",
+                     tail: "a fifth, final distinct tail phrase",
+                     respondLMStudio: { (nil, nil, NSError(domain: "tailcheck-selftest-fake", code: 1)) },
+                     respondOllama: unreachable("LM Studio transport error"),
                      wantAnswer: nil),
+            Scenario(label: "Ollama: well-formed junk, suffix ends the tail", backend: .ollama,
+                     context: "An Ollama-routed bounded-context sentence, distinct from every LM Studio one.",
+                     tail: "secondary secondary secondary secondary",
+                     respondLMStudio: unreachable("Ollama well-formed junk"),
+                     respondOllama: { ollamaOK(#"{"tail":"junk","junk_suffix":"secondary"}"#) },
+                     wantAnswer: .some(.junk("secondary"))),
+            Scenario(label: "Ollama: malformed JSON", backend: .ollama,
+                     context: "A second, distinct Ollama-routed bounded-context sentence.",
+                     tail: "a distinct Ollama-only tail phrase",
+                     respondLMStudio: unreachable("Ollama malformed JSON"),
+                     respondOllama: { ollamaOK("not json") },
+                     wantAnswer: .some(nil)),
         ]
 
         for s in scenarios {
-            var capturedRequests: [URLRequest] = []
+            var capturedLMStudioRequests: [URLRequest] = []
+            var capturedOllamaBodies: [[String: Any]] = []
             let transport = LocalChatTransport(
                 sendLMStudio: { request, completion in
-                    capturedRequests.append(request)
-                    let (data, response, error) = s.respond()
+                    guard s.backend == .lmStudio else { fatalError("[\(s.label)]: must not reach LM Studio") }
+                    capturedLMStudioRequests.append(request)
+                    let (data, response, error) = s.respondLMStudio()
                     completion(data, response, error)
                 },
                 prepareLMStudio: { _, _ in (ModelManager.ReadinessResult.ready, false) },
                 unloadLMStudio: { _ in },
-                prepareOllama: { _, _, _ in
-                    fatalError("judge-request-shape: this scenario resolves LM Studio, not Ollama")
+                prepareOllama: { _, contextTokens, _ in
+                    guard s.backend == .ollama else { fatalError("[\(s.label)]: must not reach Ollama") }
+                    return (ModelManager.ReadinessResult.ready, contextTokens, false)
                 },
-                chatOllama: { _, _, _, _, _ in
-                    fatalError("judge-request-shape: this scenario resolves LM Studio, not Ollama")
+                chatOllama: { body, _, _, _, _ in
+                    guard s.backend == .ollama else { fatalError("[\(s.label)]: must not reach Ollama") }
+                    capturedOllamaBodies.append(body)
+                    let (data, response, error) = s.respondOllama()
+                    return (data, response, error)
                 },
                 unloadOllama: { _ in },
                 keepAliveSeconds: { 0 },
                 beginRequest: { _ in },
                 endRequest: { _ in })
 
-            let judge = LocalRouteTailJudge(
-                routeResolver: { .pinned(.local("fake-local-tailcheck-model")) }, transport: transport)
+            let resolution: LLMRouteResolution = s.backend == .lmStudio
+                ? .pinned(.local("fake-local-tailcheck-model"))
+                : .pinned(.local(ref: LocalModelRef(backend: .ollama, modelID: "fake-ollama-tailcheck-model")))
+            let judge = LocalRouteTailJudge(routeResolver: { resolution }, transport: transport)
 
             var captured: Result<TailCheck.JudgeAnswer?, Error>?
-            judge.judge(context: context, tail: tail, timeoutMs: 400) { captured = $0 }
+            judge.judge(context: s.context, tail: s.tail, timeoutMs: 400) { captured = $0 }
 
-            reporter.record("[\(s.label)] exactly one request was sent to the fake LOCAL transport",
-                            capturedRequests.count == 1, "calls=\(capturedRequests.count)")
-            if let request = capturedRequests.first, let body = request.httpBody,
-               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-               let messages = json["messages"] as? [[String: Any]] {
-                let userContent = messages
-                    .compactMap { ($0["role"] as? String) == "user" ? $0["content"] as? String : nil }
-                    .joined()
-                reporter.record("[\(s.label)] the user content carries the bounded context",
-                                userContent.contains(context))
-                reporter.record("[\(s.label)] the user content carries the tail",
-                                userContent.contains(tail))
-                let remainder = userContent
-                    .replacingOccurrences(of: context, with: "")
-                    .replacingOccurrences(of: tail, with: "")
-                reporter.record("[\(s.label)] the user content carries no other text",
-                                remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                "content=\(userContent)")
-            } else {
-                reporter.record("[\(s.label)] the request body is a parseable OpenAI-shaped chat body", false)
-                reporter.record("[\(s.label)] the user content carries the bounded context", false)
-                reporter.record("[\(s.label)] the user content carries the tail", false)
-                reporter.record("[\(s.label)] the user content carries no other text", false)
+            let userContent: String?
+            switch s.backend {
+            case .lmStudio:
+                reporter.record("[\(s.label)] exactly one request was sent to the fake LOCAL transport",
+                                capturedLMStudioRequests.count == 1, "calls=\(capturedLMStudioRequests.count)")
+                if let request = capturedLMStudioRequests.first, let body = request.httpBody,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                    userContent = exactlyOneUserMessageContent(json)
+                } else {
+                    userContent = nil
+                }
+            case .ollama:
+                reporter.record("[\(s.label)] exactly one request was sent to the fake LOCAL transport",
+                                capturedOllamaBodies.count == 1, "calls=\(capturedOllamaBodies.count)")
+                userContent = capturedOllamaBodies.first.flatMap(exactlyOneUserMessageContent)
             }
+
+            reporter.record(
+                "[\(s.label)] the request carries EXACTLY ONE user message, whose content is exactly "
+                    + "the bounded context followed by the tail and nothing else",
+                userContent == (s.context + s.tail), "got=\(String(describing: userContent))")
 
             switch (captured, s.wantAnswer) {
             case (.some(.success(let got)), .some(let want)):
@@ -862,8 +954,11 @@ enum TailCheckSelfTest {
         let paste = observer.afterFinalText(text, segments: segments, rawText: text)
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
 
-        reporter.record("a judge slower than the default 400 ms times out well under 1 s of real waiting",
-                        elapsedMs < 1_000, "elapsed=\(elapsedMs)ms")
+        // vdtpwg2 repair (JW hole 5): tightened from "< 1s" -- that bar let a hard wall drifted to
+        // ~900ms pass undetected. Anchored to the named 400ms default itself: the wait must have
+        // genuinely run close to it, not returned early and not drifted hundreds of ms past it.
+        reporter.record("a judge slower than the default 400 ms times out within a tight band around it",
+                        elapsedMs >= 400 && elapsedMs < 700, "elapsed=\(elapsedMs)ms")
         reporter.record("the paste stays unchanged even though the trigger fired", paste == text)
         if let line = observedLines.first, let data = line.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -886,12 +981,17 @@ enum TailCheckSelfTest {
     // the I1 additive fields must decode to the matching `[TailCheck.Segment]`, including the
     // documented safe value for a missing/null optional metric -- the stub ignores the input entirely.
     // The OLD-shaped check is a standing guardrail (already true against `[]`, must stay true once real).
+    //
+    // vdtpwg2 repair (JW hole 6): a SECOND, distinct new-shaped body (different segment count, order,
+    // and values) rules out a hard-coded two-segment answer, and a THIRD case exercises the doc
+    // comment's other untested clause -- "segments present but not an array decodes to [] without
+    // error" -- which the original fixture set never covered.
 
     private static func runDaemonSegmentsDecoded() -> Bool {
         print("=== ViddyDictate tailcheck — daemon-segments-decoded arm ===")
         let reporter = SelfTestReporter()
 
-        let newBody: [String: Any] = [
+        let newBodyA: [String: Any] = [
             "transcript": "Checking in now. primarily primarily",
             "raw_transcript": "Checking in now. primarily primarily",
             "model": "mlx-community/whisper-large-v3-turbo",
@@ -906,30 +1006,70 @@ enum TailCheckSelfTest {
                  "no_speech_prob": NSNull(), "avg_logprob": NSNull(), "compression_ratio": NSNull()],
             ],
         ]
-
-        let decodedNew = DaemonClient.parseSegments(from: newBody)
-        reporter.record("a NEW-shaped response decodes one TailCheck.Segment per input segment",
-                        decodedNew.count == 2, "got=\(decodedNew.count)")
-        if decodedNew.count == 2 {
-            reporter.record("segment[0] keeps start/end/raw_text and its real metrics",
-                            decodedNew[0].start == 0.0 && decodedNew[0].end == 5.0
-                                && decodedNew[0].rawText == "Checking in now."
-                                && decodedNew[0].noSpeechProb == 0.05
-                                && decodedNew[0].avgLogprob == -0.2
-                                && decodedNew[0].compressionRatio == 1.0)
+        let decodedA = DaemonClient.parseSegments(from: newBodyA)
+        reporter.record("[case A] a NEW-shaped response decodes one TailCheck.Segment per input segment",
+                        decodedA.count == 2, "got=\(decodedA.count)")
+        if decodedA.count == 2 {
+            reporter.record("[case A] segment[0] keeps start/end/raw_text and its real metrics",
+                            decodedA[0].start == 0.0 && decodedA[0].end == 5.0
+                                && decodedA[0].rawText == "Checking in now."
+                                && decodedA[0].noSpeechProb == 0.05
+                                && decodedA[0].avgLogprob == -0.2
+                                && decodedA[0].compressionRatio == 1.0)
             reporter.record(
-                "segment[1]'s raw_text is the PRE-collapse decode, distinct from the shortened 'text' field",
-                decodedNew[1].rawText == "primarily primarily primarily primarily")
+                "[case A] segment[1]'s raw_text is the PRE-collapse decode, distinct from the shortened 'text' field",
+                decodedA[1].rawText == "primarily primarily primarily primarily")
             let def = TailCheck.missingSegmentMetricDefault
-            reporter.record("segment[1]'s missing/null metrics decode to the documented safe default",
-                            decodedNew[1].noSpeechProb == def && decodedNew[1].avgLogprob == def
-                                && decodedNew[1].compressionRatio == def)
+            reporter.record("[case A] segment[1]'s missing/null metrics decode to the documented safe default",
+                            decodedA[1].noSpeechProb == def && decodedA[1].avgLogprob == def
+                                && decodedA[1].compressionRatio == def)
         } else {
-            reporter.record("segment[0] keeps start/end/raw_text and its real metrics", false)
+            reporter.record("[case A] segment[0] keeps start/end/raw_text and its real metrics", false)
             reporter.record(
-                "segment[1]'s raw_text is the PRE-collapse decode, distinct from the shortened 'text' field",
+                "[case A] segment[1]'s raw_text is the PRE-collapse decode, distinct from the shortened 'text' field",
                 false)
-            reporter.record("segment[1]'s missing/null metrics decode to the documented safe default", false)
+            reporter.record("[case A] segment[1]'s missing/null metrics decode to the documented safe default", false)
+        }
+
+        // Case B: distinct from A -- three segments, different order of present/missing metrics, a
+        // non-zero start time on segment[0], and different literal values throughout.
+        let newBodyB: [String: Any] = [
+            "transcript": "We'll be right back. We'll be right back. Thanks for watching.",
+            "raw_transcript": "We'll be right back. We'll be right back. Thanks for watching.",
+            "model": "mlx-community/whisper-large-v3-turbo",
+            "parameters": ["audio_duration_s": 20.0],
+            "segments": [
+                ["start": 1.5, "end": 6.0, "effective_end": 6.0, "text": "We'll be right back.",
+                 "kept": true, "drop_reason": NSNull(), "raw_text": "We'll be right back.",
+                 "no_speech_prob": NSNull(), "avg_logprob": -0.4, "compression_ratio": 1.1],
+                ["start": 6.0, "end": 10.0, "effective_end": 10.0, "text": "We'll be right back.",
+                 "kept": true, "drop_reason": NSNull(), "raw_text": "We'll be right back.",
+                 "no_speech_prob": 0.2, "avg_logprob": NSNull(), "compression_ratio": 1.1],
+                ["start": 10.1, "end": 20.0, "effective_end": 20.0, "text": "Thanks for watching.",
+                 "kept": true, "drop_reason": NSNull(), "raw_text": "Thanks for watching.",
+                 "no_speech_prob": 0.7, "avg_logprob": -1.2, "compression_ratio": NSNull()],
+            ],
+        ]
+        let decodedB = DaemonClient.parseSegments(from: newBodyB)
+        reporter.record("[case B] a differently-shaped NEW response decodes one Segment per input segment",
+                        decodedB.count == 3, "got=\(decodedB.count)")
+        if decodedB.count == 3 {
+            let def = TailCheck.missingSegmentMetricDefault
+            reporter.record("[case B] segment[0]'s only-null metric (no_speech_prob) decodes to the safe default",
+                            decodedB[0].start == 1.5 && decodedB[0].noSpeechProb == def
+                                && decodedB[0].avgLogprob == -0.4 && decodedB[0].compressionRatio == 1.1)
+            reporter.record("[case B] segment[1]'s only-null metric (avg_logprob) decodes to the safe default",
+                            decodedB[1].noSpeechProb == 0.2 && decodedB[1].avgLogprob == def
+                                && decodedB[1].compressionRatio == 1.1)
+            reporter.record("[case B] segment[2]'s only-null metric (compression_ratio) decodes to the safe "
+                            + "default, and its raw_text is kept",
+                            decodedB[2].rawText == "Thanks for watching." && decodedB[2].noSpeechProb == 0.7
+                                && decodedB[2].avgLogprob == -1.2 && decodedB[2].compressionRatio == def)
+        } else {
+            reporter.record("[case B] segment[0]'s only-null metric (no_speech_prob) decodes to the safe default", false)
+            reporter.record("[case B] segment[1]'s only-null metric (avg_logprob) decodes to the safe default", false)
+            reporter.record("[case B] segment[2]'s only-null metric (compression_ratio) decodes to the safe "
+                            + "default, and its raw_text is kept", false)
         }
 
         let oldBody: [String: Any] = [
@@ -942,9 +1082,71 @@ enum TailCheckSelfTest {
         reporter.record("an OLD-shaped response with no 'segments' key decodes to [] without error",
                         decodedOld.isEmpty, "got=\(decodedOld.count)")
 
+        // vdtpwg2 repair (JW hole 6): the doc comment's other untested clause -- `segments` present but
+        // not an array (a malformed/unexpected wire shape) must also decode to [] without throwing.
+        let notAnArrayBody: [String: Any] = [
+            "transcript": "Checking in now.",
+            "raw_transcript": "Checking in now.",
+            "model": "mlx-community/whisper-large-v3-turbo",
+            "parameters": ["audio_duration_s": 5.0],
+            "segments": "not-an-array",
+        ]
+        let decodedNotAnArray = DaemonClient.parseSegments(from: notAnArrayBody)
+        reporter.record(
+            "a response where 'segments' is present but NOT an array decodes to [] without error",
+            decodedNotAnArray.isEmpty, "got=\(decodedNotAnArray.count)")
+
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "daemon-segments-decoded"))
         return reporter.passed
+    }
+
+    // MARK: - DictationController test fixture (vdtpwg2 repair, parts B/C/D)
+    //
+    // Shared by `hook-after-paste` and `hook-wired`: a real, fully-constructed `DictationController`
+    // routed, deterministically and without AX or live-focus dependence, into `finalize()`'s
+    // locked-no-target branch (`wasLocked = true`, `target` left nil, Notes routing unarmed and
+    // `notesWindowIsKey` false so `routeNotesDelivery` returns `.notNotes`). That branch's real write
+    // (`TargetResolver.copyToClipboard`) goes to a PRIVATE, uniquely-named pasteboard -- never
+    // `.general` -- the same "private named pasteboard, never general" convention `CleanupSelfTest`'s
+    // own `runClipboardTests` already established, so driving a real delivery branch here never touches
+    // the user's actual clipboard. `NotesBullseyeState` gets its own fresh store + UserDefaults suite
+    // per call so no scenario can observe another's state.
+
+    private static func scratchPasteboard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("tailcheck-selftest-\(UUID().uuidString)")))
+    }
+
+    private static func makeHookTestController(
+        tailCheckHook: TailCheckDictationHook, pasteboard: NSPasteboard
+    ) -> DictationController {
+        let notesCallbacks = NotesDeliveryCallbacks(
+            onSnapshotNoteTarget: { _ in nil },
+            onDeliverToNoteTarget: { _, _ in .noWindow },
+            onInsertIntoActiveNote: { _ in .noWindow },
+            onSetBullseyeAtCaret: { nil },
+            onDeliverToBullseye: { _ in .noWindow },
+            onBullseyeStateChanged: {},
+            onRevealBullseye: { .noneSet },
+            onResolveReplaceHighlightTarget: { nil },
+            onShowReplaceHighlight: { _, _, _ in },
+            onClearReplaceHighlight: { _ in },
+            onUndoNoteDelivery: { _ in false },
+            onReplaceNoteDelivery: { _, _ in false },
+            onCurrentNoteId: { nil })
+        let bullseyeState = NotesBullseyeState(
+            store: StickyNotesStore(),
+            defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-\(UUID().uuidString)")!)
+        let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
+        let controller = DictationController(
+            callbacks: DictationControllerCallbacks(
+                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+            notesDelivery: notesDelivery,
+            tailCheckHook: tailCheckHook,
+            clipboardPasteboard: pasteboard)
+        controller.wasLocked = true
+        return controller
     }
 
     // MARK: - hook-after-paste (vdtpwg, part D)
@@ -955,6 +1157,15 @@ enum TailCheckSelfTest {
     // main thread, after the hook returned" check is red today, traced to `NullTailCheckDictationHook`'s
     // "ignores `observer` entirely and does nothing" stub line: the wrapped `TailCheckObserver` (with
     // its slow judge) never runs at all.
+    //
+    // vdtpwg2 repair (JW hole 2 + hole 6): the old arm called `NullTailCheckDictationHook.call(...)`
+    // directly and labeled that bare call "the paste/delivery callback" -- no paste or delivery had
+    // actually happened. This version drives a REAL `DictationController.finalize()` call through the
+    // deterministic locked-no-target branch (a real, synchronous clipboard write; see
+    // `makeHookTestController` above) and asserts the write is already observable (changeCount
+    // incremented) by the time `finalize()` returns, plus that the hook's own sink work never runs on
+    // the thread that performed the paste -- an ordering + thread assertion, not a timed sleep standing
+    // in for proof. Two distinct takes rule out a hard-coded single-case answer.
 
     private static func runHookAfterPaste() -> Bool {
         print("=== ViddyDictate tailcheck — hook-after-paste arm ===")
@@ -968,35 +1179,73 @@ enum TailCheckSelfTest {
             }
         }
 
-        let tailText = Array(repeating: "primarily", count: 8).joined(separator: " ")
-        let text = "I approve the plan. " + tailText
-        let segments = [
-            TailCheck.Segment(start: 0.0, end: 5.0, rawText: "I approve the plan.",
-                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
-            TailCheck.Segment(start: 5.1, end: 12.0, rawText: tailText,
-                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+        struct Case { let label: String; let text: String; let segments: [TailCheck.Segment] }
+        let cases: [Case] = [
+            Case(label: "case 1",
+                 text: "I approve the plan. " + Array(repeating: "primarily", count: 8).joined(separator: " "),
+                 segments: [
+                    TailCheck.Segment(start: 0.0, end: 5.0, rawText: "I approve the plan.",
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                    TailCheck.Segment(start: 5.1, end: 12.0,
+                                      rawText: Array(repeating: "primarily", count: 8).joined(separator: " "),
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                 ]),
+            Case(label: "case 2",
+                 text: "Let's finalize the budget. " + Array(repeating: "secondary", count: 7).joined(separator: " "),
+                 segments: [
+                    TailCheck.Segment(start: 0.0, end: 4.0, rawText: "Let's finalize the budget.",
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                    TailCheck.Segment(start: 4.1, end: 11.0,
+                                      rawText: Array(repeating: "secondary", count: 7).joined(separator: " "),
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                 ]),
         ]
 
-        let lock = NSLock()
-        var sinkCalls = 0
-        let observer = TailCheckObserver(
-            sink: { _ in lock.lock(); sinkCalls += 1; lock.unlock() },
-            judge: SlowJudge(), judgeTimeoutMs: 5_000)
-        let hook: TailCheckDictationHook = NullTailCheckDictationHook(observer: observer)
+        let savedEnabled = Settings.tailCheckEnabled
+        defer { Settings.tailCheckEnabled = savedEnabled }
+        Settings.tailCheckEnabled = true
 
-        let t0 = DispatchTime.now()
-        hook.call(finalText: text, rawText: text, segments: segments, cleanupLevel: TailCheck.cleanupLevelNone)
-        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
+        for c in cases {
+            let lock = NSLock()
+            var sinkCalls = 0
+            var sinkThread: Thread?
+            let observer = TailCheckObserver(
+                sink: { _ in lock.lock(); sinkCalls += 1; sinkThread = Thread.current; lock.unlock() },
+                judge: SlowJudge(), judgeTimeoutMs: 5_000)
+            let hook: TailCheckDictationHook = NullTailCheckDictationHook(observer: observer)
+            let pasteboard = scratchPasteboard()
+            defer { pasteboard.releaseGlobally() }
+            let controller = makeHookTestController(tailCheckHook: hook, pasteboard: pasteboard)
 
-        reporter.record("the paste/delivery callback (the hook call itself) returns within 100 ms",
-                        elapsedMs < 100, "elapsed=\(elapsedMs)ms")
+            let callingThread = Thread.current
+            let changeCountBefore = pasteboard.changeCount
+            let t0 = DispatchTime.now()
+            _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
+                                    historyID: UUID(), segments: c.segments)
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
+            let changeCountAfter = pasteboard.changeCount
 
-        Thread.sleep(forTimeInterval: 1.5)
-        lock.lock()
-        let finalSinkCalls = sinkCalls
-        lock.unlock()
-        reporter.record("the observe+judge work ran exactly once, after the hook returned",
-                        finalSinkCalls == 1, "sinkCalls=\(finalSinkCalls)")
+            reporter.record(
+                "[\(c.label)] the real paste/delivery write is observable by the time finalize() returns",
+                changeCountAfter > changeCountBefore,
+                "before=\(changeCountBefore) after=\(changeCountAfter)")
+            reporter.record(
+                "[\(c.label)] finalize() itself (the real paste/delivery callback) returns within 100 ms",
+                elapsedMs < 100, "elapsed=\(elapsedMs)ms")
+
+            Thread.sleep(forTimeInterval: 1.5)
+            lock.lock()
+            let finalSinkCalls = sinkCalls
+            let finalSinkThread = sinkThread
+            lock.unlock()
+            reporter.record(
+                "[\(c.label)] the observe+judge work ran exactly once, strictly after the real paste write",
+                finalSinkCalls == 1, "sinkCalls=\(finalSinkCalls)")
+            reporter.record(
+                "[\(c.label)] the hook's judge-call work ran off the thread that performed the paste",
+                finalSinkThread !== callingThread,
+                "sinkThread=\(String(describing: finalSinkThread)) pasteThread=\(callingThread)")
+        }
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "hook-after-paste"))
@@ -1005,36 +1254,124 @@ enum TailCheckSelfTest {
 
     // MARK: - hook-wired (vdtpwg, part D)
     //
-    // Red today, traced to "not yet called from DictationController": grades the production call
-    // site the same way `LockedDeliverySelfTest` already grades `deliverLocked` -- by slicing the real
-    // `DictationController.swift` source text, never by instantiating the real, stateful controller
-    // (no AX, no pasteboard, no HUD window is ever touched by this arm). `finalize(delivered:raw:
-    // cleaned:mode:...)` is the one choke point every delivered dictation passes through exactly once
-    // (`deliver`'s three branches -- raw, cleanup success, cleanup fallback -- each call it once); a
-    // later I3 link should put the hook call there, not duplicated across `deliver`'s three call
-    // sites, so "exactly once per delivered dictation" falls out of `finalize` running exactly once
-    // rather than needing its own counter.
+    // vdtpwg2 repair (JW hole 3): the old arm graded `DictationController.swift`'s source TEXT --
+    // a comment, `if false`, or a never-called closure containing the four strings could satisfy it,
+    // and it never checked WHERE the one call site sat relative to delivery, nor what values actually
+    // reached the hook. This version replaces the source-slice entirely: `DictationController` now
+    // takes its tail-check hook as a constructor-injectable dependency (`DictationController.init`'s
+    // `tailCheckHook` parameter, same pattern as `ModelManager.CapacityDependencies`), defaulting to
+    // the real production hook (`TailCheckObserver.makeDefaultHook`); production's own call site in
+    // `finalize()`'s `finish` tail is unchanged by this arm. The arm substitutes a spy hook and drives
+    // an ACTUAL `finalize(...)` call -- the smallest real entry point that reaches it (see
+    // `makeHookTestController` above) -- for each of `deliver()`'s three distinct calls into `finalize`
+    // (raw, cleanup success, cleanup fallback; GW's own commentary names these as finalize's three
+    // real entry shapes), asserting the spy received the EXACT `finalText`/`rawText`/`segments`/
+    // `cleanupLevel` values that specific real call was given -- never by grepping source text. A
+    // fourth case proves the `Settings.tailCheckEnabled` gate for real (flips it off, the real call
+    // produces zero hook invocations) rather than merely checking the literal name appears somewhere.
 
     private static func runHookWired() -> Bool {
         print("=== ViddyDictate tailcheck — hook-wired arm ===")
         let reporter = SelfTestReporter()
 
-        let source = NotesProbe.sourceDictationController
-        let finalizeSlice = NotesProbe.sourceSlice(
-            source, from: "private func finalize(delivered: String",
-            to: "private func deliverPushToTalk(delivered: String")
+        final class SpyHook: TailCheckDictationHook {
+            struct Call: Equatable {
+                let finalText: String; let rawText: String
+                let segmentRawTexts: [String]; let cleanupLevel: String
+            }
+            private let lock = NSLock()
+            private(set) var calls: [Call] = []
+            func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String) {
+                lock.lock(); defer { lock.unlock() }
+                calls.append(Call(finalText: finalText, rawText: rawText,
+                                  segmentRawTexts: segments.map(\.rawText), cleanupLevel: cleanupLevel))
+            }
+        }
 
-        reporter.record("finalize(...) is gated behind Settings.tailCheckEnabled before calling the hook",
-                        finalizeSlice.contains("Settings.tailCheckEnabled"), "")
-        reporter.record("finalize(...) calls the tail-check hook's call(finalText:...) contract",
-                        finalizeSlice.contains(".call(finalText:"), "")
-        let callSiteCount = NotesProbe.countOccurrences(of: ".call(finalText:", in: finalizeSlice)
-        reporter.record(
-            "the hook is called exactly once per delivered dictation (one call site in finalize)",
-            callSiteCount == 1, "occurrences=\(callSiteCount)")
-        reporter.record("finalize(...) passes the final text, raw text, segments, and cleanup level",
-                        finalizeSlice.contains("rawText:") && finalizeSlice.contains("segments:")
-                            && finalizeSlice.contains("cleanupLevel:"), "")
+        func segment(_ rawText: String) -> TailCheck.Segment {
+            TailCheck.Segment(start: 0.0, end: 1.0, rawText: rawText,
+                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0)
+        }
+
+        let savedEnabled = Settings.tailCheckEnabled
+        defer { Settings.tailCheckEnabled = savedEnabled }
+
+        // Branch 1: `deliver()`'s raw-mode call (`cleaned: nil, mode: .raw, level: nil`).
+        Settings.tailCheckEnabled = true
+        do {
+            let spy = SpyHook()
+            let pasteboard = scratchPasteboard(); defer { pasteboard.releaseGlobally() }
+            let controller = makeHookTestController(tailCheckHook: spy, pasteboard: pasteboard)
+            let segs = [segment("raw branch tail text")]
+            _ = controller.finalize(delivered: "raw delivered text", raw: "raw source text", cleaned: nil,
+                                    mode: .raw, historyID: UUID(), segments: segs)
+            reporter.record("[raw] the hook is called exactly once", spy.calls.count == 1,
+                            "calls=\(spy.calls.count)")
+            reporter.record(
+                "[raw] the spy received this real call's exact finalText/rawText/segments/cleanupLevel",
+                spy.calls.first == SpyHook.Call(finalText: "raw delivered text", rawText: "raw source text",
+                                                segmentRawTexts: ["raw branch tail text"],
+                                                cleanupLevel: TailCheck.cleanupLevelNone),
+                "got=\(String(describing: spy.calls.first))")
+        }
+
+        // Branch 2: `deliver()`'s cleanup-success call (`cleaned: <text>, mode: .cleanup, level:
+        // effectiveLevel.rawValue`) -- here CleanupLevel.tighten, so cleanupLevel == "l2".
+        do {
+            let spy = SpyHook()
+            let pasteboard = scratchPasteboard(); defer { pasteboard.releaseGlobally() }
+            let controller = makeHookTestController(tailCheckHook: spy, pasteboard: pasteboard)
+            let segs = [segment("cleanup branch tail text")]
+            _ = controller.finalize(delivered: "cleaned delivered text", raw: "cleanup raw source text",
+                                    cleaned: "cleaned delivered text", mode: .cleanup,
+                                    level: CleanupLevel.tighten.rawValue, historyID: UUID(), segments: segs)
+            reporter.record("[cleanup-success] the hook is called exactly once", spy.calls.count == 1,
+                            "calls=\(spy.calls.count)")
+            reporter.record(
+                "[cleanup-success] the spy received this real call's exact finalText/rawText/segments/"
+                    + "cleanupLevel (l2, from CleanupLevel.tighten)",
+                spy.calls.first == SpyHook.Call(
+                    finalText: "cleaned delivered text", rawText: "cleanup raw source text",
+                    segmentRawTexts: ["cleanup branch tail text"], cleanupLevel: TailCheck.cleanupLevelL2),
+                "got=\(String(describing: spy.calls.first))")
+        }
+
+        // Branch 3: `deliver()`'s cleanup-fallback call -- cleanup failed, so it lands the raw transcript
+        // exactly like branch 1's shape (`cleaned: nil, mode: .raw, level: nil`), but `keepHUD: true` and
+        // a `completion` closure, distinguishing it as a different real call site.
+        do {
+            let spy = SpyHook()
+            let pasteboard = scratchPasteboard(); defer { pasteboard.releaseGlobally() }
+            let controller = makeHookTestController(tailCheckHook: spy, pasteboard: pasteboard)
+            let segs = [segment("fallback branch tail text")]
+            var completionFired = false
+            _ = controller.finalize(delivered: "fallback raw text", raw: "fallback raw text", cleaned: nil,
+                                    mode: .raw, historyID: UUID(), keepHUD: true, segments: segs) { _ in
+                completionFired = true
+            }
+            reporter.record("[cleanup-fallback] the hook is called exactly once", spy.calls.count == 1,
+                            "calls=\(spy.calls.count)")
+            reporter.record(
+                "[cleanup-fallback] the spy received this real call's exact finalText/rawText/segments/cleanupLevel",
+                spy.calls.first == SpyHook.Call(finalText: "fallback raw text", rawText: "fallback raw text",
+                                                segmentRawTexts: ["fallback branch tail text"],
+                                                cleanupLevel: TailCheck.cleanupLevelNone),
+                "got=\(String(describing: spy.calls.first))")
+            reporter.record("[cleanup-fallback] the completion closure this real call site uses still fires",
+                            completionFired)
+        }
+
+        // Gate: `Settings.tailCheckEnabled == false` suppresses the real call site entirely.
+        do {
+            Settings.tailCheckEnabled = false
+            let spy = SpyHook()
+            let pasteboard = scratchPasteboard(); defer { pasteboard.releaseGlobally() }
+            let controller = makeHookTestController(tailCheckHook: spy, pasteboard: pasteboard)
+            _ = controller.finalize(delivered: "gated text", raw: "gated text", cleaned: nil, mode: .raw,
+                                    historyID: UUID())
+            reporter.record("[gated off] Settings.tailCheckEnabled == false suppresses the real hook call",
+                            spy.calls.isEmpty, "calls=\(spy.calls.count)")
+        }
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "hook-wired"))
@@ -1045,8 +1382,20 @@ enum TailCheckSelfTest {
     //
     // Red today, traced to `RealTailCheckFlagPresenter.showFlag`'s "does nothing" stub line: the sink
     // is never called at all, so none of the checks below -- which describe the real I3 contract --
-    // can pass yet. Reuses `hud-flag-only`'s own proven "triggered, judge junk, acceptCut would
-    // accept" fixture rather than inventing a new one.
+    // can pass yet.
+    //
+    // vdtpwg2 repair (JW hole 4 + hole 6): the old arm hand-built `TailCheckObserver(judge:presenter:
+    // RealTailCheckFlagPresenter(sink:))` directly in the test -- exactly the "parallel construction"
+    // JW objects to, since it never proved `DictationController`'s OWN default wiring goes through
+    // that same code. This version drives `TailCheckObserver.makeDefault` -- the ONE production
+    // factory `DictationController.init`'s own `tailCheckHook` default calls (tied together by the
+    // source check below; the factory's hook WRAPPER is still Phase 1's inert `NullTailCheckDictation
+    // Hook` stub, so the wrapped hook itself can't be driven end-to-end yet, but the observer/
+    // presenter construction it shares with the hook factory can) -- substituting only the judge
+    // (necessary: the real production judge is itself still a stub) and the HUD sink (the thing under
+    // test), never hand-building `RealTailCheckFlagPresenter` inline. The junk suffix is now well over
+    // the 60-char cap, and the check is the EXACT truncated string, not merely `count <= 60` (which a
+    // no-op emitting nothing, count 0, would also satisfy).
 
     private static func runHudFlagReal() -> Bool {
         print("=== ViddyDictate tailcheck — hud-flag-real arm ===")
@@ -1061,50 +1410,92 @@ enum TailCheckSelfTest {
             }
         }
 
-        let triggeringText = "I approve the plan for Monday and the budget we discussed. Thank you."
-        let triggeringSegments = [
+        let initSlice = NotesProbe.sourceSlice(
+            NotesProbe.sourceDictationController,
+            from: "private let tailCheckHookOverride", to: "func startMonitoring()")
+        reporter.record(
+            "DictationController's own tailCheckHook default calls the production factory "
+                + "(TailCheckObserver.makeDefaultHook) -- the real construction path, not a parallel copy",
+            initSlice.contains("TailCheckObserver.makeDefaultHook("), initSlice)
+
+        let cleanText = "The fix that landed for the sticky note tabs looks pretty good."
+        let cleanSegments = [
+            TailCheck.Segment(start: 0.0, end: 5.0, rawText: cleanText,
+                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+        ]
+        let gapTriggeringText = "I approve the plan for Monday and the budget we discussed. Thank you."
+        let gapTriggeringSegments = [
             TailCheck.Segment(start: 0.0, end: 5.0,
                               rawText: "I approve the plan for Monday and the budget we discussed.",
                               noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
             TailCheck.Segment(start: 6.5, end: 7.0, rawText: "Thank you.",
                               noSpeechProb: 0.3, avgLogprob: -0.3, compressionRatio: 1.0),
         ]
+        // A genuinely-long (> 60 char) accepted-suffix fixture, so truncation is actually exercised
+        // rather than vacuously passing against a suffix already under the cap. 8 repeated words trips
+        // `reasonRepeatLoop` (`repeatLoopMinRun == 6`); 8 words is exactly `acceptCut`'s `maxWords` (not
+        // over), and the 14-word lead-in keeps the 8-word cut at 8/22 ≈ 0.36, under the 40% share cap.
+        let longLeadIn = "I approve the plan for Monday and the budget we discussed in today's meeting."
+        let longTail = Array(repeating: "primarily", count: 8).joined(separator: " ")
+        let longTriggeringText = longLeadIn + " " + longTail
+        let longTriggeringSegments = [
+            TailCheck.Segment(start: 0.0, end: 5.0, rawText: longLeadIn,
+                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+            TailCheck.Segment(start: 5.5, end: 12.0, rawText: longTail,
+                              noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+        ]
+        precondition(longTail.count > RealTailCheckFlagPresenter.maxDisplaySuffixLength,
+                    "test fixture must exceed the truncation cap for this check to mean anything")
 
-        let lock = NSLock()
-        var sinkCalls: [String] = []
-        var sinkCallsOnMain = true
-        let presenter = RealTailCheckFlagPresenter(sink: { suffix in
-            lock.lock()
-            sinkCalls.append(suffix)
-            sinkCallsOnMain = sinkCallsOnMain && Thread.isMainThread
-            lock.unlock()
-        })
+        struct Scenario { let label: String; let text: String; let segments: [TailCheck.Segment]
+                          let judgeAnswer: TailCheck.JudgeAnswer?; let wantFlag: Bool }
+        let scenarios: [Scenario] = [
+            Scenario(label: "no trigger", text: cleanText, segments: cleanSegments,
+                    judgeAnswer: .junk(" anything"), wantFlag: false),
+            Scenario(label: "triggered, judge clean", text: gapTriggeringText, segments: gapTriggeringSegments,
+                    judgeAnswer: .clean, wantFlag: false),
+            Scenario(label: "triggered, judge junk (suffix over the truncation cap), acceptCut would accept",
+                    text: longTriggeringText, segments: longTriggeringSegments,
+                    judgeAnswer: .junk(longTail), wantFlag: true),
+        ]
 
-        let pasteboard = NSPasteboard.general
-        let changeCountBefore = pasteboard.changeCount
+        for s in scenarios {
+            let lock = NSLock()
+            var sinkCalls: [String] = []
+            var sinkCallsOnMain = true
+            let observer = TailCheckObserver.makeDefault(
+                hudSink: { suffix in
+                    lock.lock()
+                    sinkCalls.append(suffix)
+                    sinkCallsOnMain = sinkCallsOnMain && Thread.isMainThread
+                    lock.unlock()
+                },
+                judge: FixedJudge(s.judgeAnswer))
 
-        let observer = TailCheckObserver(judge: FixedJudge(.junk(" Thank you.")), presenter: presenter)
-        let paste = observer.afterFinalText(
-            triggeringText, segments: triggeringSegments, rawText: triggeringText)
+            let pasteboard = NSPasteboard.general
+            let changeCountBefore = pasteboard.changeCount
+            let paste = observer.afterFinalText(s.text, segments: s.segments, rawText: s.text)
 
-        reporter.record("paste is byte-identical to the input even when the real presenter is wired",
-                        paste == triggeringText)
-        reporter.record("the real presenter handed the display sink exactly one flag",
-                        sinkCalls.count == 1, "calls=\(sinkCalls.count)")
-        if let flagged = sinkCalls.first {
-            reporter.record(
-                "the flagged suffix is truncated to at most RealTailCheckFlagPresenter.maxDisplaySuffixLength",
-                flagged.count <= RealTailCheckFlagPresenter.maxDisplaySuffixLength,
-                "len=\(flagged.count) cap=\(RealTailCheckFlagPresenter.maxDisplaySuffixLength)")
-        } else {
-            reporter.record(
-                "the flagged suffix is truncated to at most RealTailCheckFlagPresenter.maxDisplaySuffixLength",
-                false, "no flag was handed to the sink")
+            reporter.record("[\(s.label)] paste is byte-identical to the input even when the real "
+                            + "presenter is wired", paste == s.text)
+            reporter.record("[\(s.label)] the real presenter handed the display sink exactly when it "
+                            + "should (want=\(s.wantFlag))",
+                            (sinkCalls.count == 1) == s.wantFlag, "calls=\(sinkCalls.count)")
+            reporter.record("[\(s.label)] the system pasteboard's changeCount is unchanged",
+                            pasteboard.changeCount == changeCountBefore,
+                            "before=\(changeCountBefore) after=\(pasteboard.changeCount)")
+
+            if s.wantFlag {
+                let wantTruncated = String(s.judgeAnswer!.junkSuffix.prefix(
+                    RealTailCheckFlagPresenter.maxDisplaySuffixLength))
+                reporter.record(
+                    "[\(s.label)] the flagged suffix is EXACTLY the suffix truncated to "
+                        + "maxDisplaySuffixLength (not merely <= the cap)",
+                    sinkCalls.first == wantTruncated,
+                    "want=\(wantTruncated) got=\(String(describing: sinkCalls.first))")
+                reporter.record("[\(s.label)] every sink call happened on the main thread", sinkCallsOnMain)
+            }
         }
-        reporter.record("every sink call happened on the main thread", sinkCallsOnMain)
-        reporter.record("the system pasteboard's changeCount is unchanged",
-                        pasteboard.changeCount == changeCountBefore,
-                        "before=\(changeCountBefore) after=\(pasteboard.changeCount)")
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "hud-flag-real"))

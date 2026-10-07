@@ -68,7 +68,11 @@ final class DictationController {
     private var partialTimer: Timer?
     private var partialInFlight = false
     private var liveText = ""
-    private var wasLocked = false
+    /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
+    /// arms drive a REAL `finalize()` call through the deterministic, AX-free locked-no-target delivery
+    /// branch, which this flag selects. Production behavior is unchanged -- the hotkey/state-machine path
+    /// still sets it exactly as before.
+    var wasLocked = false
     private var recordingStartedAt: Date?
 
     /// The persistent Cleanup toggle state captured at the moment of release — "state-at-release
@@ -118,8 +122,10 @@ final class DictationController {
     }
 
     /// Runtime-only destination receipt for replacing a cleanup raw fallback after an explicit retry.
-    /// It carries no transcript or provider response text.
-    private enum CleanupFallbackReceipt {
+    /// It carries no transcript or provider response text. Internal, not private (vdtpwg2 repair, part
+    /// C/D): `finalize()`'s own access level widened to let `TailCheckSelfTest` call it directly, which
+    /// requires its return type to be at least as visible.
+    enum CleanupFallbackReceipt {
         case note(String?)
         case foreign(DictationTarget?)
         case pastePark
@@ -188,9 +194,29 @@ final class DictationController {
     /// once-per-app-session.
     var onDictationSucceeded: (() -> Void)?
 
-    init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator) {
+    /// The tail-check dictation-path seam (2026-10-06 scope addition, part D; vdtpwg2 repair, part C/D).
+    /// Constructor-injectable, same pattern as `ModelManager.CapacityDependencies`: the production
+    /// default wires through `TailCheckObserver.makeDefaultHook`, the one real construction path, so a
+    /// test substituting `tailCheckHook` here proves `finalize()`'s own wiring/gating for real, and a
+    /// test substituting nothing still gets the real production hook. The override is captured at
+    /// `init` as a plain, self-free value; the hook itself builds `lazy`, once `self` (and `hud`) are
+    /// fully initialized, since its production default closes over `hud`.
+    private let tailCheckHookOverride: TailCheckDictationHook?
+    private lazy var tailCheckHook: TailCheckDictationHook = tailCheckHookOverride
+        ?? TailCheckObserver.makeDefaultHook(hudSink: { [hud] message in hud.toast(message) })
+    /// The pasteboard `finalize()`'s locked-no-target branch copies to. Defaults to the real system
+    /// pasteboard in production; a self-test overrides it with a private, uniquely-named one so driving
+    /// a real delivery branch never touches the user's actual clipboard (see `CleanupSelfTest`'s own
+    /// `runClipboardTests` for the same "private named pasteboard, never general" convention).
+    private let clipboardPasteboard: NSPasteboard
+
+    init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator,
+         tailCheckHook: TailCheckDictationHook? = nil,
+         clipboardPasteboard: NSPasteboard = .general) {
         self.callbacks = callbacks
         self.notesDelivery = notesDelivery
+        self.clipboardPasteboard = clipboardPasteboard
+        self.tailCheckHookOverride = tailCheckHook
     }
 
     func startMonitoring() -> Bool {
@@ -1418,12 +1444,27 @@ final class DictationController {
             : nil
     }
 
+    /// Internal, not private (vdtpwg2 repair, part C/D): `TailCheckSelfTest`'s `hook-wired`/
+    /// `hook-after-paste` arms call this directly (the smallest real entry point that reaches the
+    /// tail-check hook) to prove the hook is wired, gated, and ordered for real, rather than by
+    /// grepping this file's source text. `segments` has no production caller yet -- threading the
+    /// daemon's real per-dictation segments through `deliver()` into here is later I3 work -- so a test
+    /// can still prove exact pass-through of whatever this parameter is given.
     @discardableResult
-    private func finalize(delivered: String, raw: String, cleaned: String?, mode: HistoryMode,
-                          level: Int? = nil, historyID: UUID, keepHUD: Bool = false,
-                          lateRecovery: Bool = false,
-                          completion: ((CleanupFallbackReceipt) -> Void)? = nil) -> CleanupFallbackReceipt? {
+    func finalize(delivered: String, raw: String, cleaned: String?, mode: HistoryMode,
+                  level: Int? = nil, historyID: UUID, keepHUD: Bool = false,
+                  lateRecovery: Bool = false, segments: [TailCheck.Segment] = [],
+                  completion: ((CleanupFallbackReceipt) -> Void)? = nil) -> CleanupFallbackReceipt? {
         let finish: (CleanupFallbackReceipt) -> CleanupFallbackReceipt = { receipt in
+            // The tail-check hook (2026-10-06 scope addition, part D): every branch above this closure
+            // already performed its real delivery (paste synth, clipboard write, or notes landing)
+            // before calling `finish`, so this call is always strictly after that write is observable --
+            // `finish` is finalize()'s one shared tail, reached exactly once per delivered dictation.
+            if Settings.tailCheckEnabled {
+                let cleanupLevel = TailCheck.cleanupLevelString(for: level.flatMap(CleanupLevel.init(rawValue:)))
+                self.tailCheckHook.call(finalText: delivered, rawText: raw, segments: segments,
+                                        cleanupLevel: cleanupLevel)
+            }
             self.teardownTake(.full)
             self.note(self.readyHint)
             completion?(receipt)
@@ -1606,10 +1647,10 @@ final class DictationController {
         // Locked + no captured field — clipboard safety net.
         let resolution = Self.lockedDeliveryResolution(targetAvailable: false, outcome: nil)
         Log.write("deliver: clipboard fallback (locked, \(delivered.count) chars, mode=\(mode))")
-        if resolution.shouldCopyToClipboard { TargetResolver.copyToClipboard(delivered) }
+        if resolution.shouldCopyToClipboard { TargetResolver.copyToClipboard(delivered, to: clipboardPasteboard) }
         landDelivery(foreignUndo: makePendingUndo(raw: raw, delivered: delivered, revertable: revertable, canRevertInPlace: false),
                      noteUndo: nil, toast: resolution.toast, keepHUD: keepHUD)
-        return .clipboard(changeCount: NSPasteboard.general.changeCount)
+        return .clipboard(changeCount: clipboardPasteboard.changeCount)
     }
 
     /// The shared delivery tail every `finalize()` branch ends in: record the two-tier undo — a foreign-app

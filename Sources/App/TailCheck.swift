@@ -536,14 +536,18 @@ final class LocalRouteTailJudge: TailJudge {
     /// `Settings.modelsPower`'s real, persisted state. Default is the real app call.
     private let routeResolver: () -> LLMRouteResolution
     /// Injectable so a test can spy on / fake the local chat call without a real LM Studio/Ollama
-    /// process running. Default is `.live`, the same transport every other local route already uses.
+    /// process running. NO DEFAULT (vdtpwg2 repair, part A): a default value here would let any new
+    /// construction site silently inherit a real, network-capable transport without anyone choosing
+    /// that -- a construction-time proof, not a runtime spy. The production call site (this class's
+    /// only caller inside the app, `TailCheckObserver`'s own `judge` default below) still gets the
+    /// real local transport by default; injection stays a test seam.
     private let transport: LocalChatTransport
 
     init(
         routeResolver: @escaping () -> LLMRouteResolution = {
             Settings.modelsPower.resolveRoute(.custom(LocalRouteTailJudge.routeName))
         },
-        transport: LocalChatTransport = .live
+        transport: LocalChatTransport
     ) {
         self.routeResolver = routeResolver
         self.transport = transport
@@ -653,7 +657,7 @@ final class TailCheckObserver {
 
     init(
         sink: @escaping Sink = TailCheckObserver.defaultSink,
-        judge: TailJudge = LocalRouteTailJudge(),
+        judge: TailJudge = LocalRouteTailJudge(transport: .live),
         presenter: TailCheckFlagPresenting = NullTailCheckFlagPresenter(),
         judgeTimeoutMs: Int = TailCheckObserver.defaultJudgeTimeoutMs
     ) {
@@ -840,5 +844,28 @@ final class TailCheckObserver {
               let data = try? JSONSerialization.data(withJSONObject: record)
         else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+}
+
+/// Production construction path (vdtpwg2 repair, parts C/D): the ONE place that wires
+/// `RealTailCheckFlagPresenter` to a real display sink. `DictationController`'s own `tailCheckHook`
+/// default-parameter expression calls `makeDefaultHook` below, never a parallel hand-built copy, so a
+/// test driving these two functions directly is driving the real construction path, not a stand-in.
+/// `judge` stays overridable (defaulting to the real production judge, itself still a Phase-1 stub) so
+/// a test can simulate "the judge said junk" without also having to make the judge-resolution pipeline
+/// real -- that is a different, later link's job (`LocalRouteTailJudge.judge`'s own stub body).
+extension TailCheckObserver {
+    static func makeDefault(
+        hudSink: @escaping RealTailCheckFlagPresenter.DisplaySink,
+        judge: TailJudge = LocalRouteTailJudge(transport: .live)
+    ) -> TailCheckObserver {
+        TailCheckObserver(judge: judge, presenter: RealTailCheckFlagPresenter(sink: hudSink))
+    }
+
+    static func makeDefaultHook(
+        hudSink: @escaping RealTailCheckFlagPresenter.DisplaySink,
+        judge: TailJudge = LocalRouteTailJudge(transport: .live)
+    ) -> TailCheckDictationHook {
+        NullTailCheckDictationHook(observer: makeDefault(hudSink: hudSink, judge: judge))
     }
 }

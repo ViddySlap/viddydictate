@@ -63,7 +63,7 @@ final class NotesDeliveryCoordinator {
 
     init(callbacks: NotesDeliveryCallbacks,
          bullseyeState: NotesBullseyeState = .shared,
-         copyToClipboard: @escaping (String) -> Void = TargetResolver.copyToClipboard) {
+         copyToClipboard: @escaping (String) -> Void = { TargetResolver.copyToClipboard($0) }) {
         self.callbacks = callbacks
         self.bullseyeState = bullseyeState
         self.copyToClipboard = copyToClipboard
