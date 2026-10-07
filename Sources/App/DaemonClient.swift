@@ -157,6 +157,22 @@ enum DaemonClient {
         }.resume()
     }
 
+    /// Parse the `/transcribe` response's `segments` field (I1's additive per-segment diagnostics --
+    /// `viddydictate_whisperd.py`'s `_clean_segments`, proven by `scripts/test-tailcheck-diagnostics.py`)
+    /// into `[TailCheck.Segment]`.
+    ///
+    /// STUB (gate author vdtpwg, part C): always `[]`, regardless of what `responseObject["segments"]`
+    /// actually contains -- no behavior change, since nothing calls this yet. Real contract (a later
+    /// I3 link, not this one): decode each entry's `start`/`end`/`raw_text` (the three fields every
+    /// entry has, old daemon or new); a missing or JSON-`null` `no_speech_prob`/`avg_logprob`/
+    /// `compression_ratio` decodes to `TailCheck.missingSegmentMetricDefault`, never throws, and never
+    /// drops the segment. An OLD response with no `segments` key at all (pre-I1 daemon), or where
+    /// `segments` is present but not an array, decodes to `[]` without error -- the `daemon-segments-
+    /// decoded` arm pins both the new-body and old-body shapes against this exact contract.
+    static func parseSegments(from responseObject: [String: Any]) -> [TailCheck.Segment] {
+        []
+    }
+
     private static func responseParameterDetail(_ parameters: [String: Any]?) -> String {
         guard let parameters else { return "daemon-unreported" }
         func value(_ key: String) -> String { parameters[key].map { String(describing: $0) } ?? "?" }

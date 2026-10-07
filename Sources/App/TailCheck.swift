@@ -83,6 +83,13 @@ enum TailCheck {
         "we will be right back", "we will see you next week", "bye", "goodbye",
     ]
 
+    /// Safe default for a segment-diagnostic metric (`no_speech_prob`/`avg_logprob`/`compression_ratio`)
+    /// missing or JSON `null` on the wire (`_clean_segments` can omit it; see `viddydictate_whisperd.py`).
+    /// Named here as the single source of truth `DaemonClient.parseSegments`'s real contract (a later
+    /// link, not this one) must use, and what the `daemon-segments-decoded` arm checks a decoded
+    /// segment against.
+    static let missingSegmentMetricDefault: Double = 0.0
+
     // --- cleanup-level vocabulary for source attribution ---------------------------------------
     //
     // Deliberately reuses the app's REAL `CleanupLevel` axis (`Sources/App/CleanupState.swift`:
@@ -505,13 +512,42 @@ protocol TailJudge {
 /// `ModelsPowerSettings.resolveRoute(.custom(Self.routeName), ...)` -- an ALREADY-INSTALLED local
 /// LM Studio/Ollama model; installs nothing. Kev-0.8B is a later go (design note, 2026-10-05
 /// update). Mirrors `core.py`'s `KevClient`: a real-shaped placeholder client, never a model call.
-/// STUB: always answers `.success(nil)` -- no judge call happens yet, which is today's real,
-/// observable behavior, not a placeholder standing in for a wrong one.
+///
+/// GATE AUTHOR (vdtpwg, part A): `routeResolver`/`transport` below are the real app seams (house
+/// rules: "find them, do not invent a new HTTP client") -- `Settings.modelsPower.resolveRoute`, the
+/// same call `SearchClient.retrievalModelRef` already makes for `.searchRetrieval`, and
+/// `LocalChatTransport`, the same transport `CleanupClient`/`SearchClient` send every local-route
+/// request through. Injecting them here is the ONLY change this link makes to this class: `judge()`'s
+/// BODY is untouched and never reads either one. STUB: always answers `.success(nil)` with ZERO calls
+/// to `transport` -- no judge call happens yet, which is today's real, observable behavior, not a
+/// placeholder standing in for a wrong one (the `judge-local-only` guardrail pins this for every
+/// resolution, not only a non-local one). A later I3 link replaces the body with: resolve the route;
+/// unless `resolution.bundle?.provider == .local`, answer `.success(nil)` with zero transport calls
+/// (dictation text must never leave the Mac on any path); otherwise build exactly one request whose
+/// user content is `context` + `tail` and nothing else, send it through `transport`, and parse the
+/// documented `{"tail":"clean"}` / `{"tail":"junk","junk_suffix":...}` wire shape.
 final class LocalRouteTailJudge: TailJudge {
     /// `LLMRouteID.custom(Self.routeName)` once a later link wires the real route; `LLMRouteID`
     /// stays untouched by this gate-author link (its `custom(String)` case already covers this
     /// without adding a case to that closed, widely-switched-over enum).
     static let routeName = "tailCheck"
+
+    /// Injectable so a test can resolve to any provider (or "off") without touching
+    /// `Settings.modelsPower`'s real, persisted state. Default is the real app call.
+    private let routeResolver: () -> LLMRouteResolution
+    /// Injectable so a test can spy on / fake the local chat call without a real LM Studio/Ollama
+    /// process running. Default is `.live`, the same transport every other local route already uses.
+    private let transport: LocalChatTransport
+
+    init(
+        routeResolver: @escaping () -> LLMRouteResolution = {
+            Settings.modelsPower.resolveRoute(.custom(LocalRouteTailJudge.routeName))
+        },
+        transport: LocalChatTransport = .live
+    ) {
+        self.routeResolver = routeResolver
+        self.transport = transport
+    }
 
     func judge(
         context: String, tail: String, timeoutMs: Int,
@@ -536,6 +572,60 @@ final class NullTailCheckFlagPresenter: TailCheckFlagPresenting {
     func showFlag(suspectedSuffix: String) {}
 }
 
+/// Real-shaped (non-Null) presenter (STUB, gate author vdtpwg, part C). A later I3 link wires
+/// `showFlag`'s body to actually dispatch -- likely through `DictationController`'s own
+/// `HUDPanel.toast(...)`, the lightest precedent already used for every other transient dictation-path
+/// notice (or a dedicated panel, `PointOfUseOfferPresenter`-style, if that turns out not to fit) --
+/// per the design note's "a small 'possible trailing junk' flag with the suspected suffix." STUB:
+/// `showFlag` does nothing -- the sink is never called, no main-thread hop happens, and no pasteboard
+/// is ever touched, which is today's real, observable behavior (no HUD affordance exists yet), not a
+/// placeholder standing in for a wrong one.
+final class RealTailCheckFlagPresenter: TailCheckFlagPresenting {
+    /// What the real body will hand the suspected suffix to, already truncated to
+    /// `maxDisplaySuffixLength`. Injectable so a test can spy without a real `HUDPanel`/`NSPanel`.
+    typealias DisplaySink = (String) -> Void
+
+    /// The short display length a later link's real `showFlag` body truncates `suspectedSuffix` to
+    /// before handing it to `sink` -- named here so the `hud-flag-real` arm has a single source of
+    /// truth to assert against, not a magic number duplicated into the test.
+    static let maxDisplaySuffixLength = 60
+
+    private let sink: DisplaySink
+
+    init(sink: @escaping DisplaySink = { _ in }) {
+        self.sink = sink
+    }
+
+    func showFlag(suspectedSuffix: String) {}
+}
+
+/// The seam the dictation path will call once wired (2026-10-06 GW scope, part D -- NOT this link;
+/// see `hook-wired`). The caller is the paste/delivery callback itself (`DictationController`'s
+/// `finalize`, per the design note's "the paste never waits on the judge"), so `call` must return as
+/// fast as a plain function call: never run `TailCheckObserver.observe`/the judge on the calling
+/// thread, and never block the caller on that work finishing.
+protocol TailCheckDictationHook {
+    func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String)
+}
+
+/// Production default (STUB, gate author vdtpwg, part D). Wraps a `TailCheckObserver` -- the obvious
+/// production shape, since that IS the work a real `call` would dispatch -- so a test can inject any
+/// judge (including a slow one) through the exact constructor shape a real implementation will have.
+/// `call`'s BODY ignores `observer` entirely and does nothing, synchronously, returning immediately --
+/// today's real, observable behavior (nothing calls this yet; see `hook-wired`), not a placeholder
+/// standing in for a wrong one. A later I3 link replaces `call`'s body with: dispatch
+/// `observer.afterFinalText`'s work onto a background queue and return before that work finishes (see
+/// `hook-after-paste`).
+final class NullTailCheckDictationHook: TailCheckDictationHook {
+    private let observer: TailCheckObserver
+
+    init(observer: TailCheckObserver = TailCheckObserver()) {
+        self.observer = observer
+    }
+
+    func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String) {}
+}
+
 /// The seam the dictation path calls after final text, right before paste (Phase 1: observe-only,
 /// no judge, no UI change -- the 2026-10-06 "NEXT: Swift integration plan"). Never wired into
 /// `DictationController` by this link; a later "wire" link does that once the arms below are green.
@@ -552,13 +642,20 @@ final class TailCheckObserver {
     private let sink: Sink
     private let judge: TailJudge
     private let presenter: TailCheckFlagPresenting
-    private let judgeTimeoutMs: Int
+    let judgeTimeoutMs: Int
+
+    /// `TailCheckObserver.init`'s own default for `judgeTimeoutMs` (design note: "gives up after
+    /// 400 ms"), named so an arm can pin it directly. Closes `vdtpga-GQ.md` hole H2: "the literal `400`
+    /// ms production default is never pinned by name in any arm... a silent edit of that default would
+    /// pass every arm today." `judge-timeout-pinned` asserts this constant's value directly, and that
+    /// `TailCheckObserver()`'s own `judgeTimeoutMs` is exactly this constant, not a second, drifted copy.
+    static let defaultJudgeTimeoutMs = 400
 
     init(
         sink: @escaping Sink = TailCheckObserver.defaultSink,
         judge: TailJudge = LocalRouteTailJudge(),
         presenter: TailCheckFlagPresenting = NullTailCheckFlagPresenter(),
-        judgeTimeoutMs: Int = 400
+        judgeTimeoutMs: Int = TailCheckObserver.defaultJudgeTimeoutMs
     ) {
         self.sink = sink
         self.judge = judge

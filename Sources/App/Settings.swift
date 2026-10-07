@@ -25,6 +25,11 @@ enum Settings {
         static let gain        = "meterGain"          // 0…1
         static let reactivity  = "meterReactivity"    // 0…1
         static let reduceRepeats = "reduceRepeats"    // Bool
+        // Phase 1 tailcheck on/off (design note, 2026-10-06 "NEXT" plan revision): "no settings UI in
+        // Phase 1... Ben can turn it off with `defaults write`." No code reads this yet (`hook-wired`
+        // is red precisely because nothing is wired); this registers the real UserDefaults key so the
+        // arm can flip it deterministically rather than mocking a Bool.
+        static let tailCheckEnabled = "tailCheckEnabled"    // Bool
         // Local-model residency and capacity controls. LM Studio owns eviction; the app supplies the
         // one idle TTL at load time. The budget position is the Setup slider's visible 0…100 value.
         static let modelIdleUnloadSeconds = "modelIdleUnloadSeconds"
@@ -147,6 +152,7 @@ enum Settings {
         static let gain = 0.20
         static let reactivity = 0.72
         static let reduceRepeats = true
+        static let tailCheckEnabled = true
         static let modelIdleUnloadSeconds = 600
         static let modelMemoryBudgetSliderPosition = 54.0
         // Cleanup model: qwen3-coder-30b-a3b is the on-disk pick that clears the golden green
@@ -218,6 +224,7 @@ enum Settings {
             K.gain: Defaults.gain,
             K.reactivity: Defaults.reactivity,
             K.reduceRepeats: Defaults.reduceRepeats,
+            K.tailCheckEnabled: Defaults.tailCheckEnabled,
             K.modelIdleUnloadSeconds: Defaults.modelIdleUnloadSeconds,
             K.modelMemoryBudgetSliderPosition: Defaults.modelMemoryBudgetSliderPosition,
             K.cleanupModel: Defaults.cleanupModel,
@@ -667,6 +674,13 @@ enum Settings {
     static var reduceRepeats: Bool {
         get { d.bool(forKey: K.reduceRepeats) }
         set { d.set(newValue, forKey: K.reduceRepeats); notify() }
+    }
+
+    /// Phase 1 tailcheck on/off (design note, 2026-10-06 "NEXT" plan revision). No settings UI yet;
+    /// `defaults write` is the only way to flip it until a later link adds a toggle.
+    static var tailCheckEnabled: Bool {
+        get { d.bool(forKey: K.tailCheckEnabled) }
+        set { d.set(newValue, forKey: K.tailCheckEnabled); notify() }
     }
 
     /// The persisted checkbox setting for eligible Hotkeys rows. Stable descriptor ids keep a rebind
