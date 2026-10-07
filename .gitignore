@@ -2,6 +2,7 @@ build/
 node_modules/
 .DS_Store
 *.swiftmodule
+__pycache__/
 
 # manual pre-git source backups (superseded by git history)
 Sources-backup-*/

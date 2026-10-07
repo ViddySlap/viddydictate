@@ -57,7 +57,9 @@ enum LocalModelSetup {
     /// capacity policy compares against.
     static func budgetLine(position: Double, facts: MemoryFacts) -> String {
         guard let limit = facts.userWireLimitBytes,
-              let budget = SystemMemory.budgetBytes(forSliderPosition: normalized(position)) else {
+              let budget = facts.userWireLimitBytes.map({
+                  UInt64(Double($0) * SystemMemory.realFraction(forSliderPosition: normalized(position)))
+              }) else {
             return "macOS did not report how much memory it lets a process wire, so ViddyDictate cannot "
                 + "size a budget. Local models are not loaded until it can read that limit."
         }
@@ -287,7 +289,9 @@ enum LocalModelSetup {
     static func residencySummary(position: Double, facts: MemoryFacts, wiredBytes: UInt64?) -> String? {
         guard facts.isAvailable,
               let wired = wiredBytes,
-              let budget = SystemMemory.budgetBytes(forSliderPosition: normalized(position))
+              let budget = facts.userWireLimitBytes.map({
+                  UInt64(Double($0) * SystemMemory.realFraction(forSliderPosition: normalized(position)))
+              })
         else { return nil }
         return "\(SystemMemory.formatGB(wired)) of \(SystemMemory.formatGB(budget)) budget in use"
     }
@@ -303,7 +307,9 @@ enum LocalModelSetup {
     static func residencyOverBudget(position: Double, facts: MemoryFacts, wiredBytes: UInt64?) -> Bool {
         guard facts.isAvailable,
               let wired = wiredBytes,
-              let budget = SystemMemory.budgetBytes(forSliderPosition: normalized(position))
+              let budget = facts.userWireLimitBytes.map({
+                  UInt64(Double($0) * SystemMemory.realFraction(forSliderPosition: normalized(position)))
+              })
         else { return false }
         return wired > budget
     }
