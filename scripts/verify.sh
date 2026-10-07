@@ -422,6 +422,9 @@ tier_deterministic() {
     run_gate deterministic "Whisper daemon offline-first warm and phase health (socket-guarded, mutants)" \
         python3 "$ROOT/scripts/test-whisperd-offline-warm.py" || true
 
+    run_gate deterministic "TailCheck Swift-vs-Python differential fuzz (2000 synthetic Unicode cases, seed 1337)" \
+        python3 "$ROOT/Tools/tailcheck/differential_fuzz.py" || true
+
     if [[ ! -d node_modules ]]; then
         record_failure deterministic \
             "node_modules is absent; refusing build-web.sh because its fallback npm install may use the network"

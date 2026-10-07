@@ -275,6 +275,13 @@ if CommandLine.arguments.contains("--clear-gemini-key") {
 }
 
 #if SELFTEST
+// GF of chain `vdtpfuzz`: mechanical I/O seam for Tools/tailcheck/differential_fuzz.py. Not a
+// manifest flag -- it has no selftest arms or tiers of its own, just reads cases, runs them,
+// writes results.
+if let i = CommandLine.arguments.firstIndex(of: "--tailcheck-fuzz-io"), i + 2 < CommandLine.arguments.count {
+    exit(TailCheckFuzzIO.run(inPath: CommandLine.arguments[i + 1], outPath: CommandLine.arguments[i + 2]))
+}
+
 if CommandLine.arguments.contains("--list-selftest-flags") {
     for entry in selfTestManifest {
         print("\(entry.flag)\t\(entry.tier.rawValue)")
