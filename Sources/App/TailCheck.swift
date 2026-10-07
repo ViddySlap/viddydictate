@@ -110,7 +110,50 @@ enum TailCheck {
     /// Decide whether the tail is worth asking a judge about. Never a verdict by itself.
     /// Real contract: `core.trigger` in `core.py`. STUB: always `[]`.
     static func trigger(segments: [Segment], rawText: String, finalText: String) -> [String] {
-        []
+        var reasons: [String] = []
+        let last = segments.last
+        let lastText = last?.rawText ?? ""
+
+        // Signals that need the single-segment safety floor (>= 2 segments):
+        // outro_filler_after_gap and low_confidence_tail both compare the LAST
+        // segment against its predecessor.
+        if segments.count >= 2, let last, let prev = segments.dropLast().last {
+            let gap = last.start - prev.end
+            if gap > gapThresholdS && outroPhrases.contains(depunctuate(lastText)) {
+                reasons.append(reasonOutroFillerAfterGap)
+            }
+            if last.noSpeechProb > nospeechTrigger || last.avgLogprob < logprobTrigger {
+                reasons.append(reasonLowConfidenceTail)
+            }
+        }
+
+        if last != nil {
+            let tokens = whitespaceTokens(lastText)
+            if tokens.count >= 2 && tokens.count <= doubledTokenMaxWords
+                && loweredScalarsEqual(tokens[tokens.count - 1], tokens[tokens.count - 2]) {
+                reasons.append(reasonDoubledToken)
+            }
+            if hasRepeatRun(tokens, minRun: repeatLoopMinRun) {
+                reasons.append(reasonRepeatLoop)
+            }
+            let stripped = pythonStrip(lastText)
+            if !stripped.isEmpty && isPunctuationOnly(stripped) {
+                reasons.append(reasonLonePunctuationTail)
+            }
+        }
+
+        // cleanup_added_suffix is segment-independent, and uses exact scalar
+        // (code point) equality/prefix/length, never Swift String's canonical
+        // equivalence or grapheme counts.
+        let finalScalars = Array(finalText.unicodeScalars)
+        let rawScalars = Array(rawText.unicodeScalars)
+        if !scalarArraysEqual(finalScalars, rawScalars)
+            && scalarHasPrefix(finalScalars, prefix: rawScalars)
+            && finalScalars.count > rawScalars.count {
+            reasons.append(reasonCleanupAddedSuffix)
+        }
+
+        return reasons
     }
 
     /// App-enforced cut-acceptance rules. The judge only proposes `junkSuffix`; this function is
@@ -123,7 +166,210 @@ enum TailCheck {
         maxWords: Int = 8,
         maxShare: Double = 0.4
     ) -> (Bool, String) {
-        (false, "stub")
+        let textScalars = Array(text.unicodeScalars)
+        let suffixScalars = Array(junkSuffix.unicodeScalars)
+
+        // Rule 1: cutting the whole take is never allowed.
+        if scalarArraysEqual(textScalars, suffixScalars) {
+            return (false, refusalWholeText)
+        }
+
+        // Rule 2: the proposal must be an exact trailing suffix. A substring that
+        // occurs anywhere else is an attempted body edit, which is a stronger
+        // violation than unrelated non-suffix noise.
+        if !scalarHasSuffix(textScalars, suffix: suffixScalars) {
+            if !suffixScalars.isEmpty && scalarContains(textScalars, substring: suffixScalars) {
+                return (false, refusalBodyEdit)
+            }
+            return (false, refusalNotSuffix)
+        }
+
+        let cutPoint = textScalars.count - suffixScalars.count
+
+        // Rule 3: the cut must land on a token/word boundary, unless it is a known
+        // segment boundary from the daemon's diagnostics. Both neighbours are
+        // classified as individual scalars, exactly like Python's per-code-point
+        // `str.isalnum()`.
+        var splitsToken = false
+        if cutPoint > 0 && cutPoint < textScalars.count {
+            splitsToken = isAlnumScalar(textScalars[cutPoint - 1])
+                && isAlnumScalar(textScalars[cutPoint])
+        }
+        let onBoundary = !splitsToken || (boundaries != nil && boundaries!.contains(cutPoint))
+        if !onBoundary {
+            return (false, refusalMidWord)
+        }
+
+        // Rule 4: a suffix is short by definition.
+        let junkWords = whitespaceTokens(junkSuffix).count
+        if junkWords > maxWords {
+            return (false, refusalTooManyWords)
+        }
+
+        // Rule 5: never remove a large share of the take.
+        let textWords = whitespaceTokens(text).count
+        if Double(junkWords) / Double(max(1, textWords)) > maxShare {
+            return (false, refusalShareTooHigh)
+        }
+
+        // Rule 6: at least one non-empty, word-bearing sentence must remain.
+        let remainder = pythonStrip(stringFromScalars(textScalars[0..<cutPoint]))
+        if remainder.isEmpty {
+            return (false, refusalNoSentenceRemains)
+        }
+        var remainderHasAlnum = false
+        for scalar in remainder.unicodeScalars where isAlnumScalar(scalar) {
+            remainderHasAlnum = true
+            break
+        }
+        if !remainderHasAlnum {
+            return (false, refusalNoSentenceRemains)
+        }
+
+        return (true, accepted)
+    }
+
+    // MARK: - Unicode-scalar string arithmetic
+    //
+    // Python's `str` indexes, counts, compares, and searches by exact Unicode
+    // code point (== Unicode scalar). Swift's `String` does neither: `count`,
+    // `prefix`, `suffix`, and slicing use grapheme clusters, and `==`,
+    // `.hasSuffix`, `.hasPrefix`, and `.contains` use canonical equivalence.
+    // Every decision above therefore works on `Array(text.unicodeScalars)`,
+    // where `Unicode.Scalar` equality is exact scalar-value equality and no
+    // normalization happens.
+
+    private static func scalarArraysEqual(_ a: [Unicode.Scalar], _ b: [Unicode.Scalar]) -> Bool {
+        a == b
+    }
+
+    private static func scalarHasPrefix(
+        _ text: [Unicode.Scalar], prefix: [Unicode.Scalar]
+    ) -> Bool {
+        guard prefix.count <= text.count else { return false }
+        for i in 0..<prefix.count where text[i] != prefix[i] { return false }
+        return true
+    }
+
+    private static func scalarHasSuffix(
+        _ text: [Unicode.Scalar], suffix: [Unicode.Scalar]
+    ) -> Bool {
+        guard suffix.count <= text.count else { return false }
+        let offset = text.count - suffix.count
+        for i in 0..<suffix.count where text[offset + i] != suffix[i] { return false }
+        return true
+    }
+
+    /// Manual, Foundation-free substring scan: true iff `substring` occurs at
+    /// any start index of `text` as an exact scalar-for-scalar slice.
+    private static func scalarContains(
+        _ text: [Unicode.Scalar], substring: [Unicode.Scalar]
+    ) -> Bool {
+        if substring.isEmpty { return true }
+        guard substring.count <= text.count else { return false }
+        let lastStart = text.count - substring.count
+        for start in 0...lastStart {
+            var matched = true
+            for j in 0..<substring.count where text[start + j] != substring[j] {
+                matched = false
+                break
+            }
+            if matched { return true }
+        }
+        return false
+    }
+
+    private static func stringFromScalars<S: Sequence>(_ scalars: S) -> String
+    where S.Element == Unicode.Scalar {
+        var view = String.UnicodeScalarView()
+        view.append(contentsOf: scalars)
+        return String(view)
+    }
+
+    private static func isWhitespaceScalar(_ scalar: Unicode.Scalar) -> Bool {
+        Character(scalar).isWhitespace
+    }
+
+    /// Python `str.strip()` equivalent at scalar granularity.
+    private static func pythonStrip(_ text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        var start = 0
+        var end = scalars.count
+        while start < end && isWhitespaceScalar(scalars[start]) { start += 1 }
+        while end > start && isWhitespaceScalar(scalars[end - 1]) { end -= 1 }
+        return stringFromScalars(scalars[start..<end])
+    }
+
+    /// Python `\w`: a letter, a number, or the underscore. Classified per
+    /// scalar so a bare combining mark (its own code point is not `\w`) is
+    /// stripped even when it sits on a base letter in the same grapheme.
+    private static func isWordScalar(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar == "_" { return true }
+        let character = Character(scalar)
+        return character.isLetter || character.isNumber
+    }
+
+    /// Python `str.isalnum()` at scalar granularity.
+    private static func isAlnumScalar(_ scalar: Unicode.Scalar) -> Bool {
+        let character = Character(scalar)
+        return character.isLetter || character.isNumber
+    }
+
+    /// `_PUNCT_ONLY = ^[^\w]+$`: non-empty and every scalar is a non-word scalar.
+    private static func isPunctuationOnly(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars where isWordScalar(scalar) { return false }
+        return true
+    }
+
+    /// `_depunctuate`: keep only scalar word characters and whitespace, lower,
+    /// strip.
+    private static func depunctuate(_ text: String) -> String {
+        var kept = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if isWordScalar(scalar) || isWhitespaceScalar(scalar) {
+                kept.append(scalar)
+            }
+        }
+        return pythonStrip(String(kept)).lowercased()
+    }
+
+    /// Python `str.split()` (no argument): split on scalar whitespace runs,
+    /// dropping empty tokens.
+    private static func whitespaceTokens(_ text: String) -> [String] {
+        var tokens: [String] = []
+        var current = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if isWhitespaceScalar(scalar) {
+                if !current.isEmpty {
+                    tokens.append(String(current))
+                    current = String.UnicodeScalarView()
+                }
+            } else {
+                current.append(scalar)
+            }
+        }
+        if !current.isEmpty { tokens.append(String(current)) }
+        return tokens
+    }
+
+    private static func loweredScalarsEqual(_ a: String, _ b: String) -> Bool {
+        scalarArraysEqual(Array(a.lowercased().unicodeScalars), Array(b.lowercased().unicodeScalars))
+    }
+
+    private static func hasRepeatRun(_ tokens: [String], minRun: Int) -> Bool {
+        guard !tokens.isEmpty else { return false }
+        var run = 1
+        var i = 1
+        while i < tokens.count {
+            if loweredScalarsEqual(tokens[i], tokens[i - 1]) {
+                run += 1
+                if run >= minRun { return true }
+            } else {
+                run = 1
+            }
+            i += 1
+        }
+        return false
     }
 
     /// Build the observe-only log record. MUST NEVER contain dictation text or any substring of it.
@@ -148,7 +394,26 @@ enum TailCheck {
         judgeName: String,
         cleanupLevel: String = cleanupLevelNone
     ) -> [String: Any] {
-        [:]
+        var tailInRaw = false
+        var tailAddedByCleanup = false
+        for reason in reasons {
+            if reason == reasonCleanupAddedSuffix {
+                tailAddedByCleanup = true
+            } else {
+                tailInRaw = true
+            }
+        }
+        return [
+            "text_len": text.unicodeScalars.count,
+            "reasons": reasons,
+            "verdict": verdict,
+            "junk_suffix_len": junkSuffixLen,
+            "latency_ms": latencyMs,
+            "judge_name": judgeName,
+            "tail_in_raw": tailInRaw,
+            "tail_added_by_cleanup": tailAddedByCleanup,
+            "cleanup_level": cleanupLevel,
+        ]
     }
 
     /// Derive the judge's bounded context from the text preceding the suspicious tail. Mirrors
@@ -314,7 +579,62 @@ final class TailCheckObserver {
     /// described above; until then every arm that exercises the default sink is red against this
     /// exact no-op, never against a partially-correct writer.
     static func defaultSink(_ line: String) {
-        // intentionally empty (STUB)
+        let fm = FileManager.default
+        let dir = AppPaths.ensureApplicationSupportDirectory()
+        let path = dir.appendingPathComponent(defaultLogFileName)
+
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        let limit = defaultLogMaxBytes
+
+        // A single line that cannot fit is dropped outright: appending it would
+        // put the live file past the bound with no rotation able to help.
+        if data.count > limit { return }
+
+        let currentSize: Int
+        if let attributes = try? fm.attributesOfItem(atPath: path.path),
+           let size = attributes[.size] as? NSNumber {
+            currentSize = size.intValue
+        } else {
+            currentSize = 0
+        }
+
+        if currentSize > 0 && currentSize + data.count > limit {
+            // Rotation is required. Only proceed if BOTH the remove of the old
+            // `.1` and the move of the live file actually succeeded, and re-check
+            // the live path afterward as ground truth: a `try?` that returns
+            // without throwing is NOT proof the file is gone. If rotation did not
+            // leave the old live path clear, drop the line rather than append past
+            // the bound.
+            let rotatedPath = dir.appendingPathComponent(defaultLogFileName + ".1")
+            var removeSucceeded = true
+            if fm.fileExists(atPath: rotatedPath.path) {
+                do { try fm.removeItem(at: rotatedPath) } catch { removeSucceeded = false }
+            }
+            var moveSucceeded = false
+            if removeSucceeded {
+                do {
+                    try fm.moveItem(at: path, to: rotatedPath)
+                    moveSucceeded = true
+                } catch {
+                    moveSucceeded = false
+                }
+            }
+            if !removeSucceeded || !moveSucceeded || fm.fileExists(atPath: path.path) {
+                return
+            }
+        }
+
+        if !fm.fileExists(atPath: path.path) {
+            guard fm.createFile(atPath: path.path, contents: nil, attributes: nil) else { return }
+        }
+        guard let handle = try? FileHandle(forWritingTo: path) else { return }
+        defer { try? handle.close() }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            return
+        }
     }
 
     /// Compute the observe record for one dictation, running the judge (bounded, hard-timeout) and
