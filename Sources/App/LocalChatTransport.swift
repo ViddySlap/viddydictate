@@ -22,6 +22,7 @@ struct OllamaSurfaceProfile: Equatable {
     static let email = OllamaSurfaceProfile(contextTokens: 8192, think: true)
     static let vision = OllamaSurfaceProfile(contextTokens: 8192, think: false)
     static let customMode = OllamaSurfaceProfile(contextTokens: 8192, think: false)
+    static let tailCheck = OllamaSurfaceProfile(contextTokens: 8192, think: false)
     static let searchSynthesis = OllamaSurfaceProfile(contextTokens: 8192, think: true)
     static let searchRetrieval = OllamaSurfaceProfile(contextTokens: 16384, think: false)
 }

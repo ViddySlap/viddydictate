@@ -1,9 +1,9 @@
 import Foundation
 
-/// `TailCheck` — the Swift port of `Tools/tailcheck/core.py`'s trigger + cut-acceptance contract
-/// (STUB, gate author: vdtpga). Design note: `Projects/viddydictate/notes/
-/// trailing-gibberish-check-design-20261003.md`, section 2A (trigger), section 2B (accept-cut
-/// rules), and the 2026-10-06 "NEXT: Swift integration plan" (Phase 1, observe-only).
+/// `TailCheck` — the Swift port of `Tools/tailcheck/core.py`'s trigger + cut-acceptance contract.
+/// Design note: `Projects/viddydictate/notes/trailing-gibberish-check-design-20261003.md`, section
+/// 2A (trigger), section 2B (accept-cut rules), and the 2026-10-06 "NEXT: Swift integration plan"
+/// (Phase 1, observe-only).
 ///
 /// Every function below is a pure namespace function: no file I/O, no socket, no AppKit, and never
 /// a carrier of dictation text into anything that gets logged (`TailCheckObserver` below is the only
@@ -11,23 +11,18 @@ import Foundation
 /// real contract; `Tools/tailcheck/parity-fixture.json` (exported FROM core.py) is the oracle this
 /// port is measured against, via `TailCheckSelfTest`'s `trigger-parity` / `cutrules-parity` arms.
 ///
-/// This file ships STUBS on purpose: `trigger` always returns `[]`, `acceptCut` always refuses with
-/// `"stub"`, `observeRecord` always returns `[:]`. Every arm red against these stubs is expected and
-/// traces to exactly one of the three lines below -- a later link (not this one) replaces each stub
-/// with the real port, never editing `TailCheckSelfTest.swift` to make the stub pass.
-///
-/// SCOPE ADDITION (2026-10-06, lane orchestrator + Ben, after GP launched): Phase 1 also carries
-/// (A) text-free SOURCE ATTRIBUTION on the observe record (answers Ben's design-note fork 1 with
-/// data, never a guess), (B) a judge seam (`TailJudge`) whose production default routes through the
-/// app's existing local-model machinery, and (C) a HUD flag seam that may only ever flag, never
-/// trim. `TailCheck.trigger`/`acceptCut`/`observeRecord` stay the three stubs above; the new pieces
-/// below (`LocalRouteTailJudge.judge`, `NullTailCheckFlagPresenter.showFlag`) are STUBS in the same
-/// sense -- "no flag, no judge call" is today's real, observable behavior, not a placeholder that
-/// happens to look right.
+/// I2 landed the real port of `trigger`/`acceptCut`/`observeRecord` and the text-free SOURCE
+/// ATTRIBUTION fields. I3 lands the three Phase-1 seams: a LOCAL-ONLY `LocalRouteTailJudge` that
+/// sends one bounded request through the injected local transport, a `RealTailCheckFlagPresenter`
+/// that hands the truncated suffix to the HUD sink on the main thread, and a
+/// `NullTailCheckDictationHook` that dispatches the observe work to a utility queue and returns
+/// before the paste waits on it. Phase 1 stays observe-only: it may flag a trailing-junk suffix in
+/// the HUD, but it never edits, trims or delays the pasted text.
 enum TailCheck {
     /// One entry from the daemon's pre-collapse per-segment diagnostics (see `_clean_segments` in
-    /// `viddydictate_whisperd.py`, and the `daemon-diagnostics` arm that will carry these fields
-    /// once a later link wires them). Mirrors `core.py`'s segment dict contract field for field.
+    /// `viddydictate_whisperd.py`; `DaemonClient.parseSegments` decodes them and the
+    /// `daemon-segments-decoded` arm round-trips these fields). Mirrors `core.py`'s contract field
+    /// for field.
     struct Segment {
         let start: Double
         let end: Double
@@ -70,7 +65,7 @@ enum TailCheck {
     static let refusalNoSentenceRemains = "no_sentence_remains"
     static let accepted = "accepted"
 
-    // --- tunable thresholds (mirrors core.py; a later link tunes against measurement) ----------
+    // --- tunable thresholds (mirrors core.py) --------------------------------------------------
     static let gapThresholdS = 0.8
     static let doubledTokenMaxWords = 4
     static let repeatLoopMinRun = 6
@@ -85,9 +80,8 @@ enum TailCheck {
 
     /// Safe default for a segment-diagnostic metric (`no_speech_prob`/`avg_logprob`/`compression_ratio`)
     /// missing or JSON `null` on the wire (`_clean_segments` can omit it; see `viddydictate_whisperd.py`).
-    /// Named here as the single source of truth `DaemonClient.parseSegments`'s real contract (a later
-    /// link, not this one) must use, and what the `daemon-segments-decoded` arm checks a decoded
-    /// segment against.
+    /// Named here as the single source of truth `DaemonClient.parseSegments` uses, and what the
+    /// `daemon-segments-decoded` arm checks a decoded segment against.
     static let missingSegmentMetricDefault: Double = 0.0
 
     // --- cleanup-level vocabulary for source attribution ---------------------------------------
@@ -115,7 +109,7 @@ enum TailCheck {
     }
 
     /// Decide whether the tail is worth asking a judge about. Never a verdict by itself.
-    /// Real contract: `core.trigger` in `core.py`. STUB: always `[]`.
+    /// Real contract: `core.trigger` in `core.py`.
     static func trigger(segments: [Segment], rawText: String, finalText: String) -> [String] {
         var reasons: [String] = []
         let last = segments.last
@@ -165,7 +159,7 @@ enum TailCheck {
 
     /// App-enforced cut-acceptance rules. The judge only proposes `junkSuffix`; this function is
     /// the only thing allowed to decide whether the proposal is safe to act on.
-    /// Real contract: `core.accept_cut` in `core.py`. STUB: always `(false, "stub")`.
+    /// Real contract: `core.accept_cut` in `core.py`.
     static func acceptCut(
         text: String,
         junkSuffix: String,
@@ -391,7 +385,6 @@ enum TailCheck {
     ///   - `tail_added_by_cleanup` (Bool): `true` iff `reasons` contains `reasonCleanupAddedSuffix`.
     ///   - `cleanup_level` (String): `cleanupLevel` passed straight through, verbatim, from the
     ///     fixed vocabulary above (`cleanupLevelNone`/`l1`/`l2`/`l3`) -- never free text.
-    /// STUB: always `[:]`, so none of the above is observable yet.
     static func observeRecord(
         text: String,
         reasons: [String],
@@ -426,9 +419,8 @@ enum TailCheck {
     /// Derive the judge's bounded context from the text preceding the suspicious tail. Mirrors
     /// `core.py`'s `_bound_context` exactly: last `maxContextSentences` sentences, then truncated
     /// to the trailing `maxContextChars` characters (the END nearest the tail, never the start).
-    /// This is pure string arithmetic with no judge/accuracy concern, so -- unlike the three named
-    /// stubs above -- it is implemented for real, faithfully porting the Python reference, which
-    /// already has this exact behavior GREEN today (`test_core.py`'s
+    /// This is pure string arithmetic with no judge/accuracy concern, faithfully porting the Python
+    /// reference, which already has this exact behavior GREEN today (`test_core.py`'s
     /// `test_check_bounds_context_to_last_two_sentences_and_a_char_cap`).
     static func boundedContext(preceding: String) -> String {
         let trimmed = preceding.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -508,28 +500,23 @@ protocol TailJudge {
     )
 }
 
-/// Production default `TailJudge` (STUB, part B): a later link wires this through
-/// `ModelsPowerSettings.resolveRoute(.custom(Self.routeName), ...)` -- an ALREADY-INSTALLED local
-/// LM Studio/Ollama model; installs nothing. Kev-0.8B is a later go (design note, 2026-10-05
-/// update). Mirrors `core.py`'s `KevClient`: a real-shaped placeholder client, never a model call.
+/// Production default `TailJudge` (part B): resolves `ModelsPowerSettings.resolveRoute(.custom(Self
+/// .routeName), ...)` to an ALREADY-INSTALLED local LM Studio/Ollama model; installs nothing and
+/// cold-loads nothing beyond the transport's own `prepare*` for that app.
 ///
-/// GATE AUTHOR (vdtpwg, part A): `routeResolver`/`transport` below are the real app seams (house
-/// rules: "find them, do not invent a new HTTP client") -- `Settings.modelsPower.resolveRoute`, the
-/// same call `SearchClient.retrievalModelRef` already makes for `.searchRetrieval`, and
-/// `LocalChatTransport`, the same transport `CleanupClient`/`SearchClient` send every local-route
-/// request through. Injecting them here is the ONLY change this link makes to this class: `judge()`'s
-/// BODY is untouched and never reads either one. STUB: always answers `.success(nil)` with ZERO calls
-/// to `transport` -- no judge call happens yet, which is today's real, observable behavior, not a
-/// placeholder standing in for a wrong one (the `judge-local-only` guardrail pins this for every
-/// resolution, not only a non-local one). A later I3 link replaces the body with: resolve the route;
-/// unless `resolution.bundle?.provider == .local`, answer `.success(nil)` with zero transport calls
-/// (dictation text must never leave the Mac on any path); otherwise build exactly one request whose
-/// user content is `context` + `tail` and nothing else, send it through `transport`, and parse the
-/// documented `{"tail":"clean"}` / `{"tail":"junk","junk_suffix":...}` wire shape.
+/// LOCAL ONLY, hard rule: unless the resolution is `resolution.bundle?.provider == .local`, `judge`
+/// answers `.success(nil)` with zero calls to `transport` (dictation text must never leave the Mac;
+/// a claude/codex/none resolution answers clean). Otherwise it sends exactly one non-streaming chat
+/// request whose single `user` message is the bounded `context` plus the `tail` and nothing else,
+/// through the same injected `LocalChatTransport` every local route uses (`ollamaChat` for Ollama,
+/// `sendLMStudio` for LM Studio), and parses the documented `{"tail":"clean"}` / `{"tail":"junk",
+/// "junk_suffix":...}` wire shape. Anything malformed, non-local, not-ready or failed answers clean
+/// (`.success(nil)`); a transport error answers `.failure`. The caller's own hard wall clock still
+/// fails open on a cold or slow model.
 final class LocalRouteTailJudge: TailJudge {
-    /// `LLMRouteID.custom(Self.routeName)` once a later link wires the real route; `LLMRouteID`
-    /// stays untouched by this gate-author link (its `custom(String)` case already covers this
-    /// without adding a case to that closed, widely-switched-over enum).
+    /// The route this judge resolves through `routeResolver()` is
+    /// `LLMRouteID.custom(Self.routeName)`; `LLMRouteID` stays untouched (its `custom(String)` case
+    /// already covers this without adding a case to that closed, widely-switched-over enum).
     static let routeName = "tailCheck"
 
     /// Injectable so a test can resolve to any provider (or "off") without touching
@@ -557,7 +544,118 @@ final class LocalRouteTailJudge: TailJudge {
         context: String, tail: String, timeoutMs: Int,
         completion: @escaping (Result<TailCheck.JudgeAnswer?, Error>) -> Void
     ) {
-        completion(.success(nil))
+        let resolution = routeResolver()
+        // Local only: a cloud/off resolution is answered clean without touching any transport, so
+        // dictation text can never leave the Mac on this path.
+        guard let bundle = resolution.bundle, bundle.provider == .local else {
+            completion(.success(nil))
+            return
+        }
+        let ref = bundle.localRef
+        let requestTimeout = Double(max(0, timeoutMs)) / 1000.0
+        let body = Self.requestBody(ref: ref, context: context, tail: tail)
+
+        if ref.backend == .ollama {
+            switch transport.ollamaChat(ref, body: body, profile: .tailCheck, timeout: requestTimeout) {
+            case .notReady:
+                completion(.success(nil))
+            case .response(let data, let response, let error, _):
+                completion(Self.answer(data: data, response: response, error: error, tail: tail))
+            }
+            return
+        }
+
+        guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
+            completion(.success(nil))
+            return
+        }
+        var request = URLRequest(url: Settings.searchEndpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = encoded
+
+        let sem = DispatchSemaphore(value: 0)
+        var outcome: Result<TailCheck.JudgeAnswer?, Error> = .success(nil)
+        transport.sendLMStudio(request) { data, response, error in
+            outcome = Self.answer(data: data, response: response, error: error, tail: tail)
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + requestTimeout)
+        completion(outcome)
+    }
+
+    /// The one chat body this surface ever sends: a short fixed system line, and exactly one `user`
+    /// message carrying the bounded context followed by the tail and nothing else.
+    private static func requestBody(ref: LocalModelRef, context: String, tail: String) -> [String: Any] {
+        [
+            "model": ref.modelID,
+            "messages": [
+                ["role": "system", "content": "Reply with JSON only: {\"tail\":\"clean\"} or "
+                    + "{\"tail\":\"junk\",\"junk_suffix\":\"...\"}."],
+                ["role": "user", "content": context + tail],
+            ],
+            "temperature": 0.0,
+            "max_tokens": 128,
+            "stream": false,
+        ]
+    }
+
+    /// Classify one transport response. A transport error or a non-2xx status fails; every other
+    /// miss (no data, a non-JSON body, a shape that is not the documented wire object, an empty or
+    /// non-trailing `junk_suffix`) answers clean, so a confused model can only ever fail open.
+    private static func answer(
+        data: Data?, response: URLResponse?, error: Error?, tail: String
+    ) -> Result<TailCheck.JudgeAnswer?, Error> {
+        if let error { return .failure(error) }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            return .failure(NSError(domain: "tailcheck", code: http.statusCode))
+        }
+        guard let data, let object = answerObject(from: data) else { return .success(nil) }
+        guard (object["tail"] as? String) == "junk",
+              let suffix = object["junk_suffix"] as? String, !suffix.isEmpty,
+              tail.hasSuffix(suffix)
+        else { return .success(nil) }
+        return .success(.junk(suffix))
+    }
+
+    /// The documented wire object, whether the transport handed it back directly or wrapped it in an
+    /// OpenAI-shaped `choices[0].message.content` / Ollama-shaped `message.content` string. Tolerates
+    /// surrounding whitespace and one fenced code block.
+    private static func answerObject(from data: Data) -> [String: Any]? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if root["tail"] != nil { return root }
+        if let choices = root["choices"] as? [[String: Any]],
+           let message = choices.first?["message"] as? [String: Any],
+           let content = message["content"] as? String {
+            return parseWireObject(content)
+        }
+        if let content = (root["message"] as? [String: Any])?["content"] as? String {
+            return parseWireObject(content)
+        }
+        return nil
+    }
+
+    /// Parse a model-authored string as the wire object, dropping one surrounding Markdown fence.
+    private static func parseWireObject(_ text: String) -> [String: Any]? {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.hasPrefix("```") {
+            if let newline = body.firstIndex(of: "\n") {
+                body = String(body[body.index(after: newline)...])
+            } else {
+                body = String(body.dropFirst(3))
+            }
+            if let closing = body.range(of: "```", options: .backwards) {
+                body = String(body[..<closing.lowerBound])
+            }
+            body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !body.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any]
+        else { return nil }
+        return object
     }
 }
 
@@ -569,29 +667,24 @@ protocol TailCheckFlagPresenting {
     func showFlag(suspectedSuffix: String)
 }
 
-/// Production default (STUB, part C): shows nothing. A later link wires the real HUD affordance
-/// (a small "possible trailing junk" flag, per the design note's Phase 2 section) once the judge
-/// seam above is real and the arms below are green.
+/// Inert default/test presenter: shows nothing. It is what a `TailCheckObserver` built without an
+/// explicit presenter gets, so observation can run with no HUD wired at all.
 final class NullTailCheckFlagPresenter: TailCheckFlagPresenting {
     func showFlag(suspectedSuffix: String) {}
 }
 
-/// Real-shaped (non-Null) presenter (STUB, gate author vdtpwg, part C). A later I3 link wires
-/// `showFlag`'s body to actually dispatch -- likely through `DictationController`'s own
-/// `HUDPanel.toast(...)`, the lightest precedent already used for every other transient dictation-path
-/// notice (or a dedicated panel, `PointOfUseOfferPresenter`-style, if that turns out not to fit) --
-/// per the design note's "a small 'possible trailing junk' flag with the suspected suffix." STUB:
-/// `showFlag` does nothing -- the sink is never called, no main-thread hop happens, and no pasteboard
-/// is ever touched, which is today's real, observable behavior (no HUD affordance exists yet), not a
-/// placeholder standing in for a wrong one.
+/// The real HUD presenter (part C): truncates the suspected suffix to `maxDisplaySuffixLength` and
+/// hands it to the injected display sink on the MAIN thread (synchronously when already there,
+/// otherwise `DispatchQueue.main.async`). Display only -- it never touches `NSPasteboard`, never
+/// edits text, and never blocks the caller.
 final class RealTailCheckFlagPresenter: TailCheckFlagPresenting {
-    /// What the real body will hand the suspected suffix to, already truncated to
-    /// `maxDisplaySuffixLength`. Injectable so a test can spy without a real `HUDPanel`/`NSPanel`.
+    /// What `showFlag` hands the suspected suffix to, already truncated to `maxDisplaySuffixLength`.
+    /// Injectable so a test can spy without a real `HUDPanel`/`NSPanel`.
     typealias DisplaySink = (String) -> Void
 
-    /// The short display length a later link's real `showFlag` body truncates `suspectedSuffix` to
-    /// before handing it to `sink` -- named here so the `hud-flag-real` arm has a single source of
-    /// truth to assert against, not a magic number duplicated into the test.
+    /// The short display length `showFlag` truncates `suspectedSuffix` to before handing it to
+    /// `sink` -- one source of truth for the `hud-flag-real` arm, not a magic number duplicated into
+    /// the test.
     static let maxDisplaySuffixLength = 60
 
     private let sink: DisplaySink
@@ -600,44 +693,54 @@ final class RealTailCheckFlagPresenter: TailCheckFlagPresenting {
         self.sink = sink
     }
 
-    func showFlag(suspectedSuffix: String) {}
+    func showFlag(suspectedSuffix: String) {
+        let truncated = String(suspectedSuffix.prefix(Self.maxDisplaySuffixLength))
+        if Thread.isMainThread {
+            sink(truncated)
+        } else {
+            DispatchQueue.main.async { self.sink(truncated) }
+        }
+    }
 }
 
-/// The seam the dictation path will call once wired (2026-10-06 GW scope, part D -- NOT this link;
-/// see `hook-wired`). The caller is the paste/delivery callback itself (`DictationController`'s
-/// `finalize`, per the design note's "the paste never waits on the judge"), so `call` must return as
-/// fast as a plain function call: never run `TailCheckObserver.observe`/the judge on the calling
-/// thread, and never block the caller on that work finishing.
+/// The seam the dictation path calls after delivery (2026-10-06 GW scope, part D). The caller is
+/// `DictationController`'s `finalize` finish tail -- the paste/delivery callback itself -- per the
+/// design note's "the paste never waits on the judge", so `call` must return as fast as a plain
+/// function call: never run `TailCheckObserver.observe`/the judge on the calling thread, and never
+/// block the caller on that work finishing.
 protocol TailCheckDictationHook {
     func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String)
 }
 
-/// Production default (STUB, gate author vdtpwg, part D). Wraps a `TailCheckObserver` -- the obvious
-/// production shape, since that IS the work a real `call` would dispatch -- so a test can inject any
-/// judge (including a slow one) through the exact constructor shape a real implementation will have.
-/// `call`'s BODY ignores `observer` entirely and does nothing, synchronously, returning immediately --
-/// today's real, observable behavior (nothing calls this yet; see `hook-wired`), not a placeholder
-/// standing in for a wrong one. A later I3 link replaces `call`'s body with: dispatch
-/// `observer.afterFinalText`'s work onto a background queue and return before that work finishes (see
-/// `hook-after-paste`).
+/// Production default (part D). Wraps a `TailCheckObserver` -- the work a real `call` dispatches --
+/// so a test can inject any judge (including a slow one) through the exact constructor shape a real
+/// implementation has. `call` dispatches `observer.afterFinalText` onto a dedicated utility-QoS
+/// serial queue and returns immediately, so the paste/delivery path never waits on the observe+judge
+/// work and a failure inside it never reaches the caller.
 final class NullTailCheckDictationHook: TailCheckDictationHook {
     private let observer: TailCheckObserver
+    private let queue = DispatchQueue(label: AppIdentity.queueLabel("tailcheck-observe"), qos: .utility)
 
     init(observer: TailCheckObserver = TailCheckObserver()) {
         self.observer = observer
     }
 
-    func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String) {}
+    func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String) {
+        queue.async {
+            self.observer.afterFinalText(finalText, segments: segments, rawText: rawText,
+                                         cleanupLevel: cleanupLevel)
+        }
+    }
 }
 
-/// The seam the dictation path calls after final text, right before paste (Phase 1: observe-only,
-/// no judge, no UI change -- the 2026-10-06 "NEXT: Swift integration plan"). Never wired into
-/// `DictationController` by this link; a later "wire" link does that once the arms below are green.
+/// The seam the dictation path calls after final text has been delivered (Phase 1, observe-only).
+/// `DictationController.finalize` reaches it from its shared finish tail, strictly after delivery
+/// and never on the paste's critical path -- the paste does not wait on it. Gated by
+/// `Settings.tailCheckEnabled`.
 ///
 /// By construction, Phase 1 never edits what gets pasted: `afterFinalText` always returns `text`
-/// unchanged, whether or not observation is enabled and regardless of what the sink does with the
-/// record. That guarantee does not depend on `TailCheck.trigger`/`observeRecord` becoming real --
-/// it already holds against the stubs today, which is exactly what the `paste-unchanged` arm pins.
+/// unchanged, whether or not observation is enabled and regardless of what the judge, the presenter
+/// or the sink do with the record -- exactly what the `paste-unchanged` arm pins.
 final class TailCheckObserver {
     /// Injectable sink: given one already-JSON-encoded line (no trailing newline), do whatever the
     /// caller wants with it. The production default is `defaultSink` below.
@@ -671,14 +774,15 @@ final class TailCheckObserver {
     /// `Application Support/ViddyDictate/tailcheck-observe.jsonl` (see `AppPaths.applicationSupportDirectory`).
     static let defaultLogFileName = "tailcheck-observe.jsonl"
 
-    /// Size bound a later link's real sink enforces on the observe log (bytes). Named here so the
+    /// The size bound `defaultSink` enforces on the observe log (bytes). Named here so the
     /// `observe-log-bounded` arm has a single source of truth to assert against, not a magic number
     /// duplicated into the test.
     static let defaultLogMaxBytes = 1_000_000
 
-    /// STUB: writes nothing. A later link replaces this with the real size-bounded JSONL append
-    /// described above; until then every arm that exercises the default sink is red against this
-    /// exact no-op, never against a partially-correct writer.
+    /// Append one already-encoded observe line to the size-bounded JSONL log at
+    /// `defaultLogFileName`. A single line that cannot fit is dropped; when appending would cross
+    /// the bound the live file rotates to `.1`, and if that rotation cannot complete cleanly the
+    /// line is dropped rather than appended past the bound.
     static func defaultSink(_ line: String) {
         let fm = FileManager.default
         let dir = AppPaths.ensureApplicationSupportDirectory()
@@ -738,11 +842,9 @@ final class TailCheckObserver {
         }
     }
 
-    /// Compute the observe record for one dictation, running the judge (bounded, hard-timeout) and
-    /// the HUD flag seam when (and only when) `TailCheck.trigger` fired. STUB today: `trigger`
-    /// always returns `[]`, so the `if !reasons.isEmpty` branch below never executes -- no judge
-    /// call, no flag, exactly "today's real behavior" per the 2026-10-06 scope addition, not a
-    /// placeholder standing in for a wrong one.
+    /// Compute the observe record for one dictation. Runs the judge (bounded by
+    /// `callJudgeWithHardTimeout`) and, only when it answers junk with a suffix `acceptCut` accepts,
+    /// asks the presenter to flag it. Never edits the text.
     func observe(
         text: String, segments: [TailCheck.Segment], rawText: String,
         cleanupLevel: String = TailCheck.cleanupLevelNone
@@ -816,8 +918,8 @@ final class TailCheckObserver {
     /// thrown error, `check()`'s caller fails open identically either way. Pure concurrency
     /// plumbing (no dictation-content or judge-accuracy concern), and the Python reference already
     /// has this exact behavior GREEN today (`test_fail_open_when_judge_raises` /
-    /// `test_fail_open_when_judge_exceeds_timeout`), so -- unlike the three named stubs -- this is
-    /// implemented for real, not stubbed.
+    /// `test_fail_open_when_judge_exceeds_timeout`), so it is implemented for real, faithfully
+    /// porting the Python reference.
     static func callJudgeWithHardTimeout(
         _ judge: TailJudge, context: String, tail: String, timeoutMs: Int
     ) -> JudgeCallOutcome {
@@ -851,9 +953,9 @@ final class TailCheckObserver {
 /// `RealTailCheckFlagPresenter` to a real display sink. `DictationController`'s own `tailCheckHook`
 /// default-parameter expression calls `makeDefaultHook` below, never a parallel hand-built copy, so a
 /// test driving these two functions directly is driving the real construction path, not a stand-in.
-/// `judge` stays overridable (defaulting to the real production judge, itself still a Phase-1 stub) so
-/// a test can simulate "the judge said junk" without also having to make the judge-resolution pipeline
-/// real -- that is a different, later link's job (`LocalRouteTailJudge.judge`'s own stub body).
+/// `judge` stays overridable (defaulting to the real production judge) so a test can simulate "the
+/// judge said junk" without a real LM Studio/Ollama process, or a non-junk answer without touching
+/// the judge-resolution pipeline.
 extension TailCheckObserver {
     static func makeDefault(
         hudSink: @escaping RealTailCheckFlagPresenter.DisplaySink,

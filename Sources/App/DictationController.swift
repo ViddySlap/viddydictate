@@ -211,7 +211,9 @@ final class DictationController {
     /// fully initialized, since its production default closes over `hud`.
     private let tailCheckHookOverride: TailCheckDictationHook?
     private lazy var tailCheckHook: TailCheckDictationHook = tailCheckHookOverride
-        ?? TailCheckObserver.makeDefaultHook(hudSink: { [hud] message in hud.toast(message) })
+        ?? TailCheckObserver.makeDefaultHook(hudSink: { [hud] suffix in
+            hud.toast("Possible trailing junk: \"\(suffix)\"")
+        })
     /// The pasteboard `finalize()`'s locked-no-target branch copies to. Defaults to the real system
     /// pasteboard in production; a self-test overrides it with a private, uniquely-named one so driving
     /// a real delivery branch never touches the user's actual clipboard (see `CleanupSelfTest`'s own
