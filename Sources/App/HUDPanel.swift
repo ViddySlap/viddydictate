@@ -1,5 +1,68 @@
 import Cocoa
 
+// MARK: - HUD presenting (vdtpwg4 repair, master ruling item iv)
+
+/// The HUD surface `DictationController` drives, abstracted away from the concrete `HUDPanel` class.
+/// JW3 traced a crash to `HUDPanel.init(forTesting:)` itself (`NSTextField.labelWithString` ->
+/// AppKit screen registration -> `_RegisterApplication`) in a headless test process with no window-
+/// server session -- vdtpwg3's `isHeadlessForTesting` guard around `orderFrontRegardless`/`orderOut`
+/// never reached that site, because the crash is in CONSTRUCTING the real AppKit controls
+/// (`NSPanel`/`NSTextField`/`NSVisualEffectView`...), not in ordering them on screen. Per the master
+/// ruling: "inject a no-op presenter at the TEST HOST level so the REAL HUDPanel class is never
+/// instantiated at all." This protocol is that seam -- `DictationController.hud` is typed against it,
+/// so a headless test fixture can supply a plain no-op conformer (`NullHUDPresenter`, in
+/// `TailCheckSelfTest.swift`) that never touches AppKit, while production's own construction site
+/// (`AppDelegate`) still gets the exact real `HUDPanel()` as before. Surface is exactly the methods/
+/// properties `DictationController` calls on `hud` today -- no more, no less. The old
+/// `isHeadlessForTesting`/`makeHeadlessForTesting()` machinery is removed: it never fixed the crash
+/// (construction itself was the crash site, not the ordering calls it guarded) and the master ruling
+/// explicitly rules out a "headless-safe HUDPanel that still constructs real AppKit controls."
+protocol HUDPresenting: AnyObject {
+    var onLock: (() -> Void)? { get set }
+    var onStop: (() -> Void)? { get set }
+    var onSettings: (() -> Void)? { get set }
+    var samplesProvider: (() -> [Float])? { get set }
+    var onSetLevel: ((Int) -> Void)? { get set }
+
+    func show()
+    func hide()
+    func setTakeActive(_ active: Bool)
+    func setRecoveryPending(takeID: UUID, pending: Bool)
+    func setHotkeyMap(_ map: HotkeyMap)
+    func flashModeBadge(glyph: String, label: String)
+    func flashCleanupBadge(label: String)
+    func setThinking(_ on: Bool)
+    func setCleanup(enabled: Bool, level: Int)
+    func setArmedMode(glyph: String?)
+    func setBullseyeArmed(_ armed: Bool)
+    func update(state: String, target: String?, text: String, locked: Bool)
+    /// Full-arity requirement (protocol requirements cannot carry default parameter values); the
+    /// extension below restores the shorthand call shapes every real call site already uses.
+    func toast(_ message: String, duration: TimeInterval, forceFull: Bool, action: (() -> Void)?)
+    func answer(_ text: String)
+}
+
+extension HUDPresenting {
+    /// Mirrors `HUDPanel.toast`'s own defaults so every existing shorthand `hud.toast(...)` call site
+    /// (message-only, message+duration, or message+duration+forceFull -- the three shapes real call
+    /// sites in `AppDelegate`/`OneShotRegistry` actually use; nothing calls `action:` outside
+    /// `HUDPanel` itself) keeps compiling unchanged against the protocol type. Separate, smaller-arity
+    /// overloads (not a default-valued redeclaration of the full requirement above) so there is no
+    /// ambiguity between the requirement and these conveniences.
+    func toast(_ message: String) {
+        toast(message, duration: 3.5, forceFull: false, action: nil)
+    }
+    func toast(_ message: String, duration: TimeInterval) {
+        toast(message, duration: duration, forceFull: false, action: nil)
+    }
+    func toast(_ message: String, duration: TimeInterval, forceFull: Bool) {
+        toast(message, duration: duration, forceFull: forceFull, action: nil)
+    }
+    func toast(_ message: String, duration: TimeInterval, action: (() -> Void)?) {
+        toast(message, duration: duration, forceFull: false, action: action)
+    }
+}
+
 // MARK: - HUD display mode
 
 /// What the HUD is currently showing — HUDPanel's single source of truth for its layout (BUG 1 fix).
@@ -56,7 +119,7 @@ private final class HUDToastClickView: NSView {
     }
 }
 
-final class HUDPanel: NSObject {
+final class HUDPanel: NSObject, HUDPresenting {
     var onLock: (() -> Void)?
     var onStop: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -96,18 +159,6 @@ final class HUDPanel: NSObject {
     private let infoPill = InfoPillPanel()
     /// The spinning green-phosphor wheel that replaces the whole HUD during the cleanup wait.
     private let spinner = ThinkingSpinner()
-    /// vdtpwg3 repair (point 0): `true` only for `makeHeadlessForTesting()`'s instances. Construction
-    /// itself, `relayout()`, and every pure-geometry `panel.*` call are already exercised headlessly
-    /// and without incident by the existing `--hud-render`/`--hud-probe` seams (`renderToastForSeam`,
-    /// `simulateDragForTesting`, `frameForTesting`) -- so this flag does NOT touch any of that. It
-    /// guards only the two calls that ask the real window server to change on-screen ordering
-    /// (`orderFrontRegardless`/`orderOut`, in `presentForCurrentMode`/`presentThinking`/`hide` below),
-    /// which no existing headless seam exercises and which `vdtpwg2-JW2.md`'s crash reports traced an
-    /// abort to. A headless `DictationController` test fixture (`TailCheckSelfTest.makeHookTestController`)
-    /// needs a real, fully-typed `HUDPanel` to drive `finalize()`'s real delivery branches without a
-    /// window-server session; this flag is how it gets one without reaching the crash site. Production's
-    /// own `HUDPanel()` is completely unchanged -- `isHeadlessForTesting` is `false` on every real app path.
-    private let isHeadlessForTesting: Bool
     /// Forwarded when the user drags the HUD slider, so the controller can set the level.
     var onSetLevel: ((Int) -> Void)?
     private var cleanupEnabled = false
@@ -168,19 +219,7 @@ final class HUDPanel: NSObject {
     /// toast (`answer()`) or any full-power toast uses the readable full box.
     private func toastMode(forceFull: Bool) -> HUDDisplayMode { (finalOnly && !forceFull) ? .pillToast : .fullToast }
 
-    /// Production's own zero-arg construction (every real app path) -- unchanged.
-    override convenience init() {
-        self.init(forTesting: false)
-    }
-
-    /// vdtpwg3 repair (point 0): the one test-only construction path, used by nothing in the shipped
-    /// app. Never launches a built app and never touches `/Applications`/`~/Applications` -- it
-    /// constructs a plain Swift object in the SAME headless test binary the self-tests already run
-    /// as, with real AppKit types, and only changes which calls `presentForCurrentMode`/`hide` make.
-    static func makeHeadlessForTesting() -> HUDPanel { HUDPanel(forTesting: true) }
-
-    init(forTesting: Bool) {
-        isHeadlessForTesting = forTesting
+    override init() {
         W = min(1080, (NSScreen.main?.visibleFrame.width ?? 1100) - 80)
         lockButton = GlassButton(title: "Lock", symbol: "lock.fill", isStop: false, target: nil, action: #selector(noop))
         stopButton = GlassButton(title: "Stop", symbol: "stop.fill", isStop: true, target: nil, action: #selector(noop))
@@ -468,10 +507,6 @@ final class HUDPanel: NSObject {
         case .thinking:
             break                                        // setThinking owns the spinner bring-up
         }
-        // vdtpwg3 (point 0): the one call in this method that asks the real window server to change
-        // on-screen ordering -- everything above (relayout/clampOnScreen/updateInfoPill/wave/caret) is
-        // pure model state, already exercised headlessly by `renderToastForSeam`/`hud-probe`.
-        guard !isHeadlessForTesting else { return }
         panel.orderFrontRegardless()
     }
 
@@ -497,8 +532,6 @@ final class HUDPanel: NSObject {
         spinner.stop(); spinner.isHidden = true
         badge.hide()
         infoPill.hide()
-        // vdtpwg3 (point 0): see presentForCurrentMode's identical guard above.
-        guard !isHeadlessForTesting else { return }
         panel.orderOut(nil)              // the genuine take-end path; dismissToast reserves this for takeActive == false
     }
 
@@ -573,11 +606,6 @@ final class HUDPanel: NSObject {
         if panel.isVisible { origin = panel.frame.origin }  // else applyHome positions it
         relayout()
         if !wasThinking { spinner.start() }
-        // vdtpwg3 (point 0): see presentForCurrentMode's identical guard above. `finalize()`'s delivery
-        // branches never reach this method (only `setThinking(true)`, outside the delivery path), but
-        // guarded the same way for consistency -- every real window-server-ordering call in this file
-        // is now behind the same flag.
-        guard !isHeadlessForTesting else { return }
         panel.orderFrontRegardless()
     }
 

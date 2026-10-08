@@ -15,7 +15,7 @@ import Cocoa
 protocol OneShotContext: AnyObject {
     /// The shared HUD (toast / thinking ring / hide). The flows surface their status through it exactly
     /// as the inline methods did.
-    var hud: HUDPanel { get }
+    var hud: HUDPresenting { get }
 
     /// The idle prompt string, tracking the live wakeup binding (a flow restores it when it finishes).
     var readyHint: String { get }

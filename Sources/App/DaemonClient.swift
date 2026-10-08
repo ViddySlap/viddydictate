@@ -105,10 +105,13 @@ enum DaemonClient {
         }
     }
 
-    /// POST raw WAV bytes -> (transcript, error). The daemon decodes via ffmpeg, so a WAV at the
-    /// mic's native sample rate is fine.
+    /// POST raw WAV bytes -> (transcript, error, segments). The daemon decodes via ffmpeg, so a WAV at
+    /// the mic's native sample rate is fine. `segments` (vdtpwg4 repair, master ruling item v) is the
+    /// response's real per-dictation diagnostics, decoded via `parseSegments` -- `[]` on any failure
+    /// path (transport error, bad body, no transcript) or against an old daemon that never sends them,
+    /// exactly as `parseSegments`'s own contract already guarantees.
     static func transcribe(_ wav: Data, takeID: UUID? = nil,
-                           completion: @escaping (String?, String?) -> Void) {
+                           completion: @escaping (String?, String?, [TailCheck.Segment]) -> Void) {
         var req = URLRequest(url: base.appendingPathComponent("transcribe"))
         req.httpMethod = "POST"
         req.timeoutInterval = 120
@@ -134,10 +137,10 @@ enum DaemonClient {
             + "params={condition_on_previous_text=\(conditionPrevious), clean=\(clean), "
             + "initial_prompt_chars=\(bias.count), format=wav, timeout_s=120} wav_bytes=\(wav.count)")
         URLSession.shared.dataTask(with: req) { data, _, error in
-            if let error = error { completion(nil, error.localizedDescription); return }
+            if let error = error { completion(nil, error.localizedDescription, []); return }
             guard let data = data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                completion(nil, "bad response"); return
+                completion(nil, "bad response", []); return
             }
             if let t = obj["transcript"] as? String {
                 let model = (obj["model"] as? String) ?? lastKnownModel ?? "daemon-unreported"
@@ -151,9 +154,9 @@ enum DaemonClient {
                 } else {
                     Log.write("stt.partial result model=\(model) params={\(parameterDetail)} chars=\(t.count)")
                 }
-                completion(t, nil)
+                completion(t, nil, parseSegments(from: obj))
             }
-            else { completion(nil, (obj["error"] as? String) ?? "no transcript") }
+            else { completion(nil, (obj["error"] as? String) ?? "no transcript", []) }
         }.resume()
     }
 
@@ -161,16 +164,28 @@ enum DaemonClient {
     /// `viddydictate_whisperd.py`'s `_clean_segments`, proven by `scripts/test-tailcheck-diagnostics.py`)
     /// into `[TailCheck.Segment]`.
     ///
-    /// STUB (gate author vdtpwg, part C): always `[]`, regardless of what `responseObject["segments"]`
-    /// actually contains -- no behavior change, since nothing calls this yet. Real contract (a later
-    /// I3 link, not this one): decode each entry's `start`/`end`/`raw_text` (the three fields every
-    /// entry has, old daemon or new); a missing or JSON-`null` `no_speech_prob`/`avg_logprob`/
-    /// `compression_ratio` decodes to `TailCheck.missingSegmentMetricDefault`, never throws, and never
-    /// drops the segment. An OLD response with no `segments` key at all (pre-I1 daemon), or where
-    /// `segments` is present but not an array, decodes to `[]` without error -- the `daemon-segments-
-    /// decoded` arm pins both the new-body and old-body shapes against this exact contract.
+    /// vdtpwg4 repair (master ruling item v): real contract, replacing the gate-author `[]` stub.
+    /// Decodes each entry's `start`/`end`/`raw_text` (the three fields every entry has, old daemon or
+    /// new); a missing or JSON-`null` `no_speech_prob`/`avg_logprob`/`compression_ratio` decodes to
+    /// `TailCheck.missingSegmentMetricDefault`, never throws, and never drops the segment. An OLD
+    /// response with no `segments` key at all (pre-I1 daemon), or where `segments` is present but not
+    /// an array, decodes to `[]` without error -- `daemon-segments-decoded` pins both the new-body and
+    /// old-body shapes against this exact contract.
     static func parseSegments(from responseObject: [String: Any]) -> [TailCheck.Segment] {
-        []
+        guard let rawSegments = responseObject["segments"] as? [[String: Any]] else { return [] }
+        func metric(_ dict: [String: Any], _ key: String) -> Double {
+            (dict[key] as? Double) ?? TailCheck.missingSegmentMetricDefault
+        }
+        return rawSegments.compactMap { entry in
+            guard let start = entry["start"] as? Double,
+                  let end = entry["end"] as? Double,
+                  let rawText = entry["raw_text"] as? String else { return nil }
+            return TailCheck.Segment(
+                start: start, end: end, rawText: rawText,
+                noSpeechProb: metric(entry, "no_speech_prob"),
+                avgLogprob: metric(entry, "avg_logprob"),
+                compressionRatio: metric(entry, "compression_ratio"))
+        }
     }
 
     private static func responseParameterDetail(_ parameters: [String: Any]?) -> String {

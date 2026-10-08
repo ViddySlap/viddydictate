@@ -30,7 +30,11 @@ final class RetainedTakeRecovery {
         },
         ensureReady: @escaping EnsureReady = DaemonClient.ensureUp,
         transcribe: @escaping Transcribe = { wav, id, done in
-            DaemonClient.transcribe(wav, takeID: id, completion: done)
+            // vdtpwg4 repair (master ruling item v): `DaemonClient.transcribe` now also hands back the
+            // daemon's real decoded segments; this retry path's own `Transcribe` typealias carries no
+            // segments (recovery has no segment-threading contract of its own), so they are dropped
+            // here, unchanged from today's real behavior.
+            DaemonClient.transcribe(wav, takeID: id) { text, error, _ in done(text, error) }
         },
         schedule: @escaping Schedule = { work in
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: work)

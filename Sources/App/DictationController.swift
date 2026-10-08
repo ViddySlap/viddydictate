@@ -57,13 +57,14 @@ final class DictationController {
         }
     })
     /// Internal, not private (same reasoning as `wasLocked` below): part of the OneShotContext seam
-    /// (piece 8). Constructor-injectable (vdtpwg3 repair, point 0) so a headless test fixture can
-    /// supply `HUDPanel.makeHeadlessForTesting()` -- a real, fully-typed `HUDPanel` whose own
-    /// window-server-ordering calls are no-ops -- instead of production's real, window-backed default,
-    /// so a real `finalize()` call never reaches the crash site `vdtpwg2-JW2.md` traced
-    /// (`panel.orderFrontRegardless()`/`orderOut` with no window-server session). Production's own
-    /// construction site (`AppDelegate`) passes nothing and gets the exact same `HUDPanel()` as before.
-    let hud: HUDPanel
+    /// (piece 8). Constructor-injectable (vdtpwg4 repair, master ruling item iv) against the
+    /// `HUDPresenting` protocol, not the concrete `HUDPanel` class, so a headless test fixture can
+    /// supply a plain no-op conformer (`NullHUDPresenter`) that never constructs any real AppKit
+    /// control -- never reaching the construction-time crash site `vdtpwg3-JW3.md` traced
+    /// (`HUDPanel.init` -> `NSTextField.labelWithString` -> `_RegisterApplication`, with no window-
+    /// server session). Production's own construction site (`AppDelegate`) passes nothing and gets
+    /// the exact same real `HUDPanel()` as before.
+    let hud: HUDPresenting
     /// The Family-3 notes-delivery collaborator (ADR 0012): owns the notes-bullseye / replace-highlight /
     /// note-target / cross-focus-undo state + JS-bridge callbacks + delivery routing. The seam is deliberately
     /// HUD-free, so the thin Option+N/Option+B entry points and `finalize()`'s tail keep their `hud.*` calls on
@@ -219,7 +220,7 @@ final class DictationController {
 
     init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator,
          tailCheckHook: TailCheckDictationHook? = nil,
-         clipboardPasteboard: NSPasteboard = .general, hud: HUDPanel = HUDPanel()) {
+         clipboardPasteboard: NSPasteboard = .general, hud: HUDPresenting = HUDPanel()) {
         self.callbacks = callbacks
         self.notesDelivery = notesDelivery
         self.clipboardPasteboard = clipboardPasteboard
@@ -307,7 +308,7 @@ final class DictationController {
 
     private func transcribeAudioSnapshot(retainingAs takeID: UUID? = nil,
                                          retentionEnabled: Bool? = nil,
-                                         completion: @escaping (String?, String?) -> Void) {
+                                         completion: @escaping (String?, String?, [TailCheck.Segment]) -> Void) {
         audioWorkQueue.async { [audio] in
             let snapshot = audio.snapshotWavWithMetrics()
             let wav = snapshot.wav
@@ -347,7 +348,7 @@ final class DictationController {
         hud.update(state: "Transcribing…", target: target?.label, text: liveText, locked: false)
         hud.setThinking(true)
         note(noteLabel)
-        transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { text, err in
+        transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { text, err, _ in
             DispatchQueue.main.async { completion(text, err, takeID, retentionEnabled) }
         }
     }
@@ -1050,7 +1051,7 @@ final class DictationController {
         guard Settings.powerMode.partialTranscriptionInterval != nil else { return }
         guard state == .recording || state == .locked, !partialInFlight, audio.hasAudio else { return }
         partialInFlight = true
-        transcribeAudioSnapshot { [weak self] text, _ in
+        transcribeAudioSnapshot { [weak self] text, _, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.partialInFlight = false
@@ -1100,10 +1101,10 @@ final class DictationController {
         hud.update(state: "Transcribing…", target: target?.label, text: liveText, locked: false)
         note("transcribing")
         let generation = takeGeneration   // BT5: capture so an Esc-cancel during transcribe drops this landing
-        transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { [weak self] text, err in
+        transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { [weak self] text, err, segments in
             DispatchQueue.main.async {
                 self?.deliver(text: text, error: err, generation: generation, takeID: takeID,
-                              retentionWasEnabled: retentionEnabled)
+                              retentionWasEnabled: retentionEnabled, segments: segments)
             }
         }
     }
@@ -1172,11 +1173,17 @@ final class DictationController {
 
     /// Internal, not private (vdtpwg3 repair, point 3): `TailCheckSelfTest`'s `hook-wired` arm drives
     /// the REAL raw-mode upstream call chain through this entry point (same pattern as `finalize()`'s
-    /// own `private` -> `internal` widening in `vdtpwg2`), rather than calling `finalize()` directly
-    /// with hand-supplied segments -- so production's real (currently empty) `deliver()` -> `finalize()`
-    /// segment wiring shows up as an observable red, not a shortcut-call green.
+    /// own `private` -> `internal` widening in `vdtpwg2`). `segments` (vdtpwg4 repair, master ruling
+    /// item v) is the real per-dictation daemon diagnostics, threaded all the way from
+    /// `DaemonClient.transcribe` through `transcribeAudioSnapshot`'s completion to here, and now
+    /// forwarded into every real `finalize()` call site below -- closing the gap `hook-wired`'s raw
+    /// branch used to bless (`segmentRawTexts: []` asserted as correct). The retained-retry re-entry
+    /// (`recovered: true`) is a narrower, pre-existing path with no daemon round-trip of its own
+    /// (`RetainedTakeRecovery`'s own `Transcribe` typealias carries no segments); it keeps landing
+    /// with `[]`, unchanged from today's real behavior, not a regression this link introduces.
     func deliver(text rawText: String?, error: String?, generation: Int, takeID: UUID,
-                 retentionWasEnabled: Bool, recovered: Bool = false) {
+                 retentionWasEnabled: Bool, recovered: Bool = false,
+                 segments: [TailCheck.Segment] = []) {
         // BT5: an Esc-cancel that fired while this take was transcribing bumped `takeGeneration`; drop the stale
         // landing so nothing lands for the aborted take.
         guard generation == takeGeneration else {
@@ -1217,7 +1224,7 @@ final class DictationController {
         // Raw mode (toggle off at release): land exactly as v1 does.
         guard cleanupAtRelease else {
             finalize(delivered: raw, raw: raw, cleaned: nil, mode: .raw, historyID: takeID,
-                     lateRecovery: recovered)
+                     lateRecovery: recovered, segments: segments)
             return
         }
 
@@ -1281,7 +1288,7 @@ final class DictationController {
                     } else {
                         self.finalize(delivered: cleaned, raw: raw, cleaned: cleaned, mode: .cleanup,
                                       level: effectiveLevel.rawValue, historyID: takeID,
-                                      lateRecovery: recovered)
+                                      lateRecovery: recovered, segments: segments)
                         if let offer = effectiveResolution.upgradeOffer {
                             self.hud.toast(offer.message)
                         }
@@ -1300,7 +1307,7 @@ final class DictationController {
                     }
                     self.finalize(
                         delivered: raw, raw: raw, cleaned: nil, mode: .raw,
-                        historyID: takeID, keepHUD: true, lateRecovery: recovered
+                        historyID: takeID, keepHUD: true, lateRecovery: recovered, segments: segments
                     ) { [weak self] receipt in
                         guard let self = self else { return }
                         fallbackReceipt = receipt
@@ -1460,9 +1467,10 @@ final class DictationController {
     /// Internal, not private (vdtpwg2 repair, part C/D): `TailCheckSelfTest`'s `hook-wired`/
     /// `hook-after-paste` arms call this directly (the smallest real entry point that reaches the
     /// tail-check hook) to prove the hook is wired, gated, and ordered for real, rather than by
-    /// grepping this file's source text. `segments` has no production caller yet -- threading the
-    /// daemon's real per-dictation segments through `deliver()` into here is later I3 work -- so a test
-    /// can still prove exact pass-through of whatever this parameter is given.
+    /// grepping this file's source text. `segments` (vdtpwg4 repair, master ruling item v): `deliver()`
+    /// now threads the daemon's real per-dictation segments into every one of its own three real calls
+    /// here (raw, cleanup-success, cleanup-fallback) -- a test can still prove exact pass-through of
+    /// whatever this parameter is given, for a direct call that bypasses `deliver()` entirely.
     @discardableResult
     func finalize(delivered: String, raw: String, cleaned: String?, mode: HistoryMode,
                   level: Int? = nil, historyID: UUID, keepHUD: Bool = false,
