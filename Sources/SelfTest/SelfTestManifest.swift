@@ -368,9 +368,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .modelFitSelftest: .init(tier: .deterministic) { arguments in
         ModelFitSelfTest.run(arguments: arguments)
     },
-    // GP of chain `vdtpga`: the five Phase-1 tailcheck arms (`--only <arm>`). See the enum case's
-    // own comment in main.swift for why this is `.excluded` rather than `.deterministic`.
-    .tailCheckSelftest: .init(tier: .excluded) { arguments in
+    // GP of chain `vdtpga` + `vdtpwg`: the Phase-1 tailcheck arms (`--only <arm>`). Deterministic:
+    // every arm is exercised by a scripts/verify.sh gate; the four that need a real nested sandbox
+    // are wrapped by run_tailcheck_sandbox_limited_gate, whose explicit UNVERIFIED path fires only
+    // when this environment cannot nest sandbox_apply (a broken arm still fails).
+    .tailCheckSelftest: .init(tier: .deterministic) { arguments in
         TailCheckSelfTest.run(arguments: arguments)
     },
     // RTY1: proves the capacity step-down fires from the production dispatch seam, not just from the

@@ -192,6 +192,26 @@ run_codex_isolation_selftest_gate() {
     return 0
 }
 
+# Mirrors run_codex_isolation_selftest_gate and the vm.global_* sysctl UNVERIFIED precedent. Four
+# tailcheck arms need a process outside the outer seatbelt: judge-local-only and judge-request-shape
+# re-exec themselves under sandbox-exec, and hook-after-paste and hook-wired abort (SIGABRT) in a
+# headless sandboxed process. A codex judge runs verify.sh inside its own seatbelt, where a nested
+# sandbox_apply is refused with "Operation not permitted" (status 71); probe ONCE PER ARM and never
+# cache the result, so one arm can never hide another. When the probe fails the arm cannot run here
+# and is reported UNVERIFIED for host/conductor confirmation, not FAIL; when it succeeds the arm is a
+# normal required gate whose real failure stays a FAIL.
+run_tailcheck_sandbox_limited_gate() {
+    local arm="$1"
+    if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true >/dev/null 2>&1; then
+        record_unverified deterministic \
+            "TailCheck $arm arm: outer sandbox denies nested sandbox_apply; host/conductor confirmation remains required"
+        return 0
+    fi
+    run_gate deterministic "tailcheck $arm arm" \
+        env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+        "$TEST_APP" --tailcheck-selftest --only "$arm"
+}
+
 # Host gate: the real Codex bundle-snapshot install on this machine's filesystem with its own codesign.
 # Without codesign it abstains with [precondition-missing], which is counted as SKIP, never PASS. On macOS
 # an abstain is a failure: the Mac's deterministic tier must not skip the one gate that runs on APFS,
@@ -643,6 +663,52 @@ tier_deterministic() {
             "$TEST_APP" --hang-watchdog-selftest || true
         run_notes_http_gate || true
         run_codex_isolation_selftest_gate || true
+        # GP of chain `vdtpga` + `vdtpwg`: the 17 `--tailcheck-selftest --only <arm>` arms now run
+        # here, next to the model-fit arm block. Thirteen are plain required gates; the four that
+        # need a real nested sandbox go through run_tailcheck_sandbox_limited_gate.
+        run_gate deterministic "tailcheck hud-flag-real arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only hud-flag-real || true
+        run_gate deterministic "tailcheck daemon-segments-decoded arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only daemon-segments-decoded || true
+        run_gate deterministic "tailcheck judge-fail-open arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only judge-fail-open || true
+        run_gate deterministic "tailcheck judge-timeout-pinned arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only judge-timeout-pinned || true
+        run_gate deterministic "tailcheck trigger-parity arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only trigger-parity || true
+        run_gate deterministic "tailcheck cutrules-parity arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only cutrules-parity || true
+        run_gate deterministic "tailcheck observe-no-text arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only observe-no-text || true
+        run_gate deterministic "tailcheck paste-unchanged arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only paste-unchanged || true
+        run_gate deterministic "tailcheck observe-log-bounded arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only observe-log-bounded || true
+        run_gate deterministic "tailcheck source-attribution arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only source-attribution || true
+        run_gate deterministic "tailcheck judge-bounded-context arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only judge-bounded-context || true
+        run_gate deterministic "tailcheck judge-only-when-triggered arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only judge-only-when-triggered || true
+        run_gate deterministic "tailcheck hud-flag-only arm" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --tailcheck-selftest --only hud-flag-only || true
+        run_tailcheck_sandbox_limited_gate judge-local-only || true
+        run_tailcheck_sandbox_limited_gate judge-request-shape || true
+        run_tailcheck_sandbox_limited_gate hook-after-paste || true
+        run_tailcheck_sandbox_limited_gate hook-wired || true
         run_gate deterministic "model-fit search-retrieval arm" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --modelfit-selftest --only search-retrieval || true
