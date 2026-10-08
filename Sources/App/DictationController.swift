@@ -56,7 +56,14 @@ final class DictationController {
             self?.hud.setRecoveryPending(takeID: takeID, pending: pending)
         }
     })
-    let hud = HUDPanel()   // internal: part of the OneShotContext seam (piece 8)
+    /// Internal, not private (same reasoning as `wasLocked` below): part of the OneShotContext seam
+    /// (piece 8). Constructor-injectable (vdtpwg3 repair, point 0) so a headless test fixture can
+    /// supply `HUDPanel.makeHeadlessForTesting()` -- a real, fully-typed `HUDPanel` whose own
+    /// window-server-ordering calls are no-ops -- instead of production's real, window-backed default,
+    /// so a real `finalize()` call never reaches the crash site `vdtpwg2-JW2.md` traced
+    /// (`panel.orderFrontRegardless()`/`orderOut` with no window-server session). Production's own
+    /// construction site (`AppDelegate`) passes nothing and gets the exact same `HUDPanel()` as before.
+    let hud: HUDPanel
     /// The Family-3 notes-delivery collaborator (ADR 0012): owns the notes-bullseye / replace-highlight /
     /// note-target / cross-focus-undo state + JS-bridge callbacks + delivery routing. The seam is deliberately
     /// HUD-free, so the thin Option+N/Option+B entry points and `finalize()`'s tail keep their `hud.*` calls on
@@ -212,11 +219,12 @@ final class DictationController {
 
     init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator,
          tailCheckHook: TailCheckDictationHook? = nil,
-         clipboardPasteboard: NSPasteboard = .general) {
+         clipboardPasteboard: NSPasteboard = .general, hud: HUDPanel = HUDPanel()) {
         self.callbacks = callbacks
         self.notesDelivery = notesDelivery
         self.clipboardPasteboard = clipboardPasteboard
         self.tailCheckHookOverride = tailCheckHook
+        self.hud = hud
     }
 
     func startMonitoring() -> Bool {
@@ -1162,8 +1170,13 @@ final class DictationController {
             userMessage: CleanupClient.wrap(input), timeout: timeout)
     }
 
-    private func deliver(text rawText: String?, error: String?, generation: Int, takeID: UUID,
-                         retentionWasEnabled: Bool, recovered: Bool = false) {
+    /// Internal, not private (vdtpwg3 repair, point 3): `TailCheckSelfTest`'s `hook-wired` arm drives
+    /// the REAL raw-mode upstream call chain through this entry point (same pattern as `finalize()`'s
+    /// own `private` -> `internal` widening in `vdtpwg2`), rather than calling `finalize()` directly
+    /// with hand-supplied segments -- so production's real (currently empty) `deliver()` -> `finalize()`
+    /// segment wiring shows up as an observable red, not a shortcut-call green.
+    func deliver(text rawText: String?, error: String?, generation: Int, takeID: UUID,
+                 retentionWasEnabled: Bool, recovered: Bool = false) {
         // BT5: an Esc-cancel that fired while this take was transcribing bumped `takeGeneration`; drop the stale
         // landing so nothing lands for the aborted take.
         guard generation == takeGeneration else {

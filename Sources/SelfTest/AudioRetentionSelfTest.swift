@@ -105,7 +105,7 @@ enum AudioRetentionSelfTest {
         let partial = slice(controller, from: "private func tickPartial() {",
                             to: "private func finishNothingHeard(")
         let finish = slice(controller, from: "private func finish() {",
-                           to: "private func deliver(text rawText:")
+                           to: "func deliver(text rawText:")
         let oneShotFinal = slice(controller, from: "func finalizeTakeAndTranscribe(",
                                  to: "// MARK: hotkey")
         let retainIndex = sharedSnapshot.range(of: "AudioRetentionStore.shared.retain")?.lowerBound

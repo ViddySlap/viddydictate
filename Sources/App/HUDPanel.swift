@@ -96,6 +96,18 @@ final class HUDPanel: NSObject {
     private let infoPill = InfoPillPanel()
     /// The spinning green-phosphor wheel that replaces the whole HUD during the cleanup wait.
     private let spinner = ThinkingSpinner()
+    /// vdtpwg3 repair (point 0): `true` only for `makeHeadlessForTesting()`'s instances. Construction
+    /// itself, `relayout()`, and every pure-geometry `panel.*` call are already exercised headlessly
+    /// and without incident by the existing `--hud-render`/`--hud-probe` seams (`renderToastForSeam`,
+    /// `simulateDragForTesting`, `frameForTesting`) -- so this flag does NOT touch any of that. It
+    /// guards only the two calls that ask the real window server to change on-screen ordering
+    /// (`orderFrontRegardless`/`orderOut`, in `presentForCurrentMode`/`presentThinking`/`hide` below),
+    /// which no existing headless seam exercises and which `vdtpwg2-JW2.md`'s crash reports traced an
+    /// abort to. A headless `DictationController` test fixture (`TailCheckSelfTest.makeHookTestController`)
+    /// needs a real, fully-typed `HUDPanel` to drive `finalize()`'s real delivery branches without a
+    /// window-server session; this flag is how it gets one without reaching the crash site. Production's
+    /// own `HUDPanel()` is completely unchanged -- `isHeadlessForTesting` is `false` on every real app path.
+    private let isHeadlessForTesting: Bool
     /// Forwarded when the user drags the HUD slider, so the controller can set the level.
     var onSetLevel: ((Int) -> Void)?
     private var cleanupEnabled = false
@@ -156,7 +168,19 @@ final class HUDPanel: NSObject {
     /// toast (`answer()`) or any full-power toast uses the readable full box.
     private func toastMode(forceFull: Bool) -> HUDDisplayMode { (finalOnly && !forceFull) ? .pillToast : .fullToast }
 
-    override init() {
+    /// Production's own zero-arg construction (every real app path) -- unchanged.
+    override convenience init() {
+        self.init(forTesting: false)
+    }
+
+    /// vdtpwg3 repair (point 0): the one test-only construction path, used by nothing in the shipped
+    /// app. Never launches a built app and never touches `/Applications`/`~/Applications` -- it
+    /// constructs a plain Swift object in the SAME headless test binary the self-tests already run
+    /// as, with real AppKit types, and only changes which calls `presentForCurrentMode`/`hide` make.
+    static func makeHeadlessForTesting() -> HUDPanel { HUDPanel(forTesting: true) }
+
+    init(forTesting: Bool) {
+        isHeadlessForTesting = forTesting
         W = min(1080, (NSScreen.main?.visibleFrame.width ?? 1100) - 80)
         lockButton = GlassButton(title: "Lock", symbol: "lock.fill", isStop: false, target: nil, action: #selector(noop))
         stopButton = GlassButton(title: "Stop", symbol: "stop.fill", isStop: true, target: nil, action: #selector(noop))
@@ -444,6 +468,10 @@ final class HUDPanel: NSObject {
         case .thinking:
             break                                        // setThinking owns the spinner bring-up
         }
+        // vdtpwg3 (point 0): the one call in this method that asks the real window server to change
+        // on-screen ordering -- everything above (relayout/clampOnScreen/updateInfoPill/wave/caret) is
+        // pure model state, already exercised headlessly by `renderToastForSeam`/`hud-probe`.
+        guard !isHeadlessForTesting else { return }
         panel.orderFrontRegardless()
     }
 
@@ -469,6 +497,8 @@ final class HUDPanel: NSObject {
         spinner.stop(); spinner.isHidden = true
         badge.hide()
         infoPill.hide()
+        // vdtpwg3 (point 0): see presentForCurrentMode's identical guard above.
+        guard !isHeadlessForTesting else { return }
         panel.orderOut(nil)              // the genuine take-end path; dismissToast reserves this for takeActive == false
     }
 
@@ -543,6 +573,11 @@ final class HUDPanel: NSObject {
         if panel.isVisible { origin = panel.frame.origin }  // else applyHome positions it
         relayout()
         if !wasThinking { spinner.start() }
+        // vdtpwg3 (point 0): see presentForCurrentMode's identical guard above. `finalize()`'s delivery
+        // branches never reach this method (only `setThinking(true)`, outside the delivery path), but
+        // guarded the same way for consistency -- every real window-server-ordering call in this file
+        // is now behind the same flag.
+        guard !isHeadlessForTesting else { return }
         panel.orderFrontRegardless()
     }
 

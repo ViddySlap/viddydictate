@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// GP of chain `vdtpga`: the protected graders for the Phase 1 (observe-only) Swift port of
@@ -37,7 +38,20 @@ enum TailCheckSelfTest {
         case hudFlagReal = "hud-flag-real"
     }
 
+    /// vdtpwg3 repair (point 1, bounded egress directive): a tiny, self-contained canary mode, checked
+    /// BEFORE the normal `--only` dispatch so it never needs a valid arm value. See
+    /// `NetworkDenialSandbox`'s own doc comment for what it proves and why.
+    private static let networkCanaryFlag = "--tailcheck-network-canary"
+    /// vdtpwg3 repair (point 1): marks a child process already running INSIDE the deny-network
+    /// sandbox-exec profile, so it runs the real, contained arm logic directly instead of re-wrapping
+    /// itself (which would recurse forever).
+    static let networkDeniedChildFlag = "--network-denied-child"
+
     static func run(arguments: [String]) -> Int32 {
+        if arguments.contains(networkCanaryFlag) {
+            print("errno=\(NetworkDenialSandbox.rawConnectErrno())")
+            return 0
+        }
         guard let i = arguments.firstIndex(of: "--only"), i + 1 < arguments.count,
               let arm = Arm(rawValue: arguments[i + 1])
         else {
@@ -57,8 +71,8 @@ enum TailCheckSelfTest {
         case .judgeFailOpen:          ok = runJudgeFailOpen()
         case .judgeOnlyWhenTriggered: ok = runJudgeOnlyWhenTriggered()
         case .hudFlagOnly:            ok = runHudFlagOnly()
-        case .judgeLocalOnly:         ok = runJudgeLocalOnly()
-        case .judgeRequestShape:      ok = runJudgeRequestShape()
+        case .judgeLocalOnly:         ok = runJudgeLocalOnly(arguments: arguments)
+        case .judgeRequestShape:      ok = runJudgeRequestShape(arguments: arguments)
         case .judgeTimeoutPinned:     ok = runJudgeTimeoutPinned()
         case .daemonSegmentsDecoded:  ok = runDaemonSegmentsDecoded()
         case .hookAfterPaste:         ok = runHookAfterPaste()
@@ -534,11 +548,14 @@ enum TailCheckSelfTest {
                             if case .timeout = hangOutcome { return true }
                             return false
                         }(), "\(hangOutcome)")
-        // vdtpwg2 repair (JW hole 5): tightened from "<= ~1s" -- a wall this loose let a ~900ms-drifted
-        // hard timeout pass. The band is anchored to the 100ms budget itself: it must have genuinely
-        // waited close to it (not returned early) and must not have drifted hundreds of ms past it.
+        // vdtpwg3 repair (JW2 hole 5, bounded per the 2026-10-07 addendum): [100,400) let a hard wait
+        // implemented as `timeoutMs + 250ms` (-> ~350ms here) pass. Measured over several real runs in
+        // this environment the genuine wait lands ~104-110ms; [100,150) still has ~40ms of jitter
+        // headroom while failing any `+250ms` drift by a wide margin. Still measured from OUTSIDE
+        // (`t0`/`DispatchTime.now()` wrap the arm's own call), per the addendum's directive 2 -- a hard-
+        // timeout implementation cannot game this by reporting its own, different elapsed time.
         reporter.record("the hard timeout bounds the wait to a tight band around the 100ms budget",
-                        elapsedMs >= 100 && elapsedMs < 400, "elapsed=\(elapsedMs)ms")
+                        elapsedMs >= 100 && elapsedMs < 150, "elapsed=\(elapsedMs)ms")
 
         // End-to-end: the seam must paste unchanged and record "timeout"/"error"-shaped verdicts
         // even when triggered, through a judge that fails in each of these ways. Red today, same
@@ -656,6 +673,145 @@ enum TailCheckSelfTest {
         return reporter.passed
     }
 
+    // MARK: - NetworkDenialSandbox (vdtpwg3 repair, point 1)
+    //
+    // 2026-10-07 addendum from the lane orchestrator: close the egress hole with an OS-level network
+    // deny for the graded test process, not another runtime assertion -- `sandbox-exec` with a
+    // deny-network profile around `judge-local-only`/`judge-request-shape`'s own invocation, so the
+    // injected transport is the ONLY path a request can physically reach and a second, unobserved
+    // `URLSession.shared` call cannot connect at all, full stop, no spy needed. This mirrors the
+    // existing `Tools/CodexContainmentRunner.swift` precedent (`sandbox-exec -p <policy> <executable>
+    // <args>`, run as a child process and its result captured) -- a DIFFERENT compiled target, so its
+    // code is not reusable here, but the pattern is. Scope, per the addendum: bounded, not unbounded-
+    // adversarial -- this closes the egress hole against any REAL extra network path (the data
+    // physically cannot leave the Mac), not against every non-network side channel a judge could
+    // invent (mach IPC, a Unix-domain socket to a co-resident daemon, writing to a shared file another
+    // process reads) -- noted as a residual risk in this chain's GW3 report, not pursued here.
+    private enum NetworkDenialSandbox {
+        static let sandboxExec = "/usr/bin/sandbox-exec"
+        /// The simplest correct deny-network profile: everything else stays allowed (this process must
+        /// still read its own binary, fork/exec itself for the canary, write its observe log under a
+        /// scratch HOME, etc. -- all orthogonal to egress), and only the `network*` operation family
+        /// (outbound, inbound, bind -- TCP, UDP, and Unix-domain alike) is denied at the kernel/Seatbelt
+        /// level, for every socket in the process, regardless of which API opened it.
+        static let denyNetworkProfile = "(version 1)\n(allow default)\n(deny network*)\n"
+
+        /// A raw BSD `connect()` to loopback port 1 (nothing listens there), classified by `errno`:
+        /// `EPERM` means Seatbelt denied the attempt before it ever reached the network; any other
+        /// errno (typically `ECONNREFUSED`) means the OS actually tried and the far end refused. This
+        /// needs no real listener and no real destination -- the FAILURE MODE is the proof, not whether
+        /// the connection succeeds. Used both unsandboxed (must NOT be `EPERM`: the differential control)
+        /// and inside the sandboxed child via `--tailcheck-network-canary` (must BE `EPERM`: the proof
+        /// the deny actually fires, never merely assumed -- the same "confirm the deny actually fires"
+        /// discipline this codebase already applies to the Private-vault path denies).
+        static func rawConnectErrno(port: UInt16 = 1) -> Int32 {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { return errno }
+            defer { Darwin.close(fd) }
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let rc = withUnsafePointer(to: &addr) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            return rc == 0 ? 0 : errno
+        }
+
+        /// This test binary's own absolute executable path, so the wrapper can re-exec itself under
+        /// `sandbox-exec` (same pattern `CodexContainmentRunner`'s selftest uses to sandbox a fixture
+        /// binary, except the "fixture" here is this SAME binary with an extra marker flag).
+        static func selfExecutablePath() -> String? {
+            var size: UInt32 = 0
+            _NSGetExecutablePath(nil, &size)
+            var buffer = [Int8](repeating: 0, count: Int(size))
+            guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+            return String(cString: buffer)
+        }
+
+        struct Result { let status: Int32; let stdout: String; let stderr: String }
+
+        /// Spawn `exePath arguments` under `sandbox-exec -p denyNetworkProfile`. `(allow default)` means
+        /// nothing besides networking is restricted -- the child still reads its own binary/frameworks,
+        /// forks/execs itself for the canary, and writes its scratch-HOME observe log exactly as an
+        /// unsandboxed run would; only `(deny network*)` changes anything observable.
+        static func runSandboxed(exePath: String, arguments: [String], timeoutSeconds: Double = 20) -> Result {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: sandboxExec)
+            process.arguments = ["-p", denyNetworkProfile, exePath] + arguments
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            do {
+                try process.run()
+            } catch {
+                return Result(status: -1, stdout: "", stderr: "spawn failed: \(error)")
+            }
+            let deadline = DispatchTime.now() + timeoutSeconds
+            let watchdog = DispatchQueue(label: "tailcheck-selftest-sandbox-watchdog")
+            watchdog.asyncAfter(deadline: deadline) {
+                if process.isRunning { process.terminate() }
+            }
+            process.waitUntilExit()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            return Result(status: process.terminationStatus,
+                         stdout: String(data: outData, encoding: .utf8) ?? "",
+                         stderr: String(data: errData, encoding: .utf8) ?? "")
+        }
+
+        /// Run `label`'s real, contained arm logic (`contained()`) inside the deny-network sandbox,
+        /// after first proving -- with the loopback-connect differential above -- that the sandbox
+        /// actually denies network for THIS binary on THIS machine right now, rather than assuming a
+        /// seatbelt profile that silently failed to apply (exactly the `rg`-shim-shaped failure mode
+        /// `agents-mac.md` warns about: a guard that looks present but never fires). `contained()` is
+        /// reached by re-invoking this same executable with `--only <arm> --network-denied-child`, so
+        /// everything the arm already does (loading the fixture, driving the stub/real judge) runs for
+        /// real inside the sandbox, not in a parallel/simulated copy.
+        static func runArmDenyingNetwork(arm: String, label: String) -> Bool {
+            print("=== ViddyDictate tailcheck — \(label) arm (OS-level network-denial wrapper) ===")
+            let reporter = SelfTestReporter()
+
+            let unsandboxedErrno = rawConnectErrno()
+            reporter.record(
+                "unsandboxed control: a raw loopback TCP connect is NOT denied by Seatbelt (errno != EPERM)",
+                unsandboxedErrno != EPERM, "errno=\(unsandboxedErrno)")
+
+            guard let exePath = selfExecutablePath() else {
+                reporter.record("resolved this test binary's own absolute executable path for re-exec", false)
+                print("\n=== RESULT ===")
+                print(reporter.summaryLine(prefix: label))
+                return reporter.passed
+            }
+
+            let canary = runSandboxed(exePath: exePath, arguments: ["--tailcheck-selftest", "--only", arm,
+                                                                     TailCheckSelfTest.networkCanaryFlag])
+            reporter.record(
+                "sandboxed control: the SAME raw loopback TCP connect, run under sandbox-exec's deny-"
+                    + "network profile, IS denied at the OS level (errno == EPERM) -- proves the deny "
+                    + "actually fires for this binary on this machine, not merely assumed",
+                canary.stdout.contains("errno=\(EPERM)"),
+                "stdout=\(canary.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) status=\(canary.status)")
+
+            let child = runSandboxed(exePath: exePath, arguments: ["--tailcheck-selftest", "--only", arm,
+                                                                    TailCheckSelfTest.networkDeniedChildFlag])
+            if !child.stdout.isEmpty { print(child.stdout) }
+            if !child.stderr.isEmpty { FileHandle.standardError.write(Data(child.stderr.utf8)) }
+            reporter.record(
+                "[\(label)] ran to completion and passed every assertion INSIDE the deny-network "
+                    + "sandbox, where the injected transport is the only path any request could "
+                    + "physically reach",
+                child.status == 0, "exit=\(child.status)")
+
+            print("\n=== RESULT ===")
+            print(reporter.summaryLine(prefix: label))
+            return reporter.passed
+        }
+    }
+
     // MARK: - judge-local-only (vdtpwg, part A)
     //
     // Not stub-caused red -- a GUARDRAIL, explicit in the manifest brief: `LocalRouteTailJudge.judge()`
@@ -673,6 +829,14 @@ enum TailCheckSelfTest {
     // -- that this file keeps compiling -- just by building at all): no default slipped back in, and
     // the one production call site that needs a real transport by default (`TailCheckObserver`'s own
     // `judge` parameter) still names `.live` explicitly rather than leaning on a removed default.
+    //
+    // vdtpwg3 repair (JW2 hole 1, bounded per the 2026-10-07 addendum): the source-level/spy checks
+    // above rule out a known transport being bypassed, but cannot rule out a FUTURE real `judge()` body
+    // making an UNOBSERVED second request (e.g. `URLSession.shared`) alongside the injected transport.
+    // `runJudgeLocalOnly(arguments:)` below is the real entry point: outside the sandboxed child it
+    // wraps this method in an OS-level `sandbox-exec` deny-network profile (`NetworkDenialSandbox`), so
+    // a second real request cannot physically connect, full stop. This method itself is now the
+    // CONTAINED body, run for real both directly (fast local iteration) and inside the sandboxed child.
 
     private static func runJudgeLocalOnly() -> Bool {
         print("=== ViddyDictate tailcheck — judge-local-only arm ===")
@@ -737,6 +901,29 @@ enum TailCheckSelfTest {
         return reporter.passed
     }
 
+    /// The real entry point the manifest dispatches to. Inside the sandboxed child
+    /// (`--network-denied-child` present), runs the contained body directly, for real, as the arm's
+    /// own exit code; otherwise wraps it in `NetworkDenialSandbox`'s OS-level deny-network sandbox.
+    private static func runJudgeLocalOnly(arguments: [String]) -> Bool {
+        if arguments.contains(networkDeniedChildFlag) {
+            return runJudgeLocalOnly()
+        }
+        return NetworkDenialSandbox.runArmDenyingNetwork(arm: Arm.judgeLocalOnly.rawValue, label: "judge-local-only")
+    }
+
+    /// vdtpwg3 repair (point 6): a plain word bank `judge-request-shape`/`daemon-segments-decoded` draw
+    /// from at RUNTIME (`.randomElement()`, the system RNG) to build fixture context/tail/segment text,
+    /// instead of a literal compile-time string. Ordinary nouns -- never anything resembling real
+    /// dictation content -- so no implementation under test can contain a matching compile-time
+    /// literal for any value this draws, and a value read off one run's output is wrong on the next.
+    private enum RandomFixtureWords {
+        static let bank = [
+            "umbrella", "harbor", "canvas", "ledger", "orbit", "granite", "willow", "compass",
+            "ember", "quartz", "lantern", "meadow", "cipher", "anchor", "ripple", "thicket",
+            "beacon", "marble", "thistle", "copper", "driftwood", "satchel", "paddock", "kestrel",
+        ]
+    }
+
     // MARK: - judge-request-shape (vdtpwg, part A)
     //
     // Red today, traced to `LocalRouteTailJudge.judge()`'s `.success(nil)` stub line: the stub never
@@ -791,46 +978,67 @@ enum TailCheckSelfTest {
             { fatalError("judge-request-shape[\(label)]: wrong backend reached") }
         }
 
+        // vdtpwg3 repair (point 6, JW2 hole 6): GW2 already made every scenario's context/tail
+        // DISTINCT from every other, but all of it stayed literal and known at COMPILE TIME --
+        // JW2's named violation is a judge body that switches on the seven exact literal strings.
+        // These words are drawn via `RandomFixtureWords`'s own doc comment at RUNTIME, from the
+        // system RNG, so no compile-time literal in any implementation can equal them; a fresh value
+        // is drawn on every real invocation (direct or inside the sandboxed child alike), never a
+        // fixed seed, so a value captured by reading one run's output is already wrong on the next.
+        var usedWords: Set<String> = []
+        func freshWord() -> String {
+            let word = RandomFixtureWords.bank.filter { !usedWords.contains($0) }.randomElement()
+                ?? RandomFixtureWords.bank.randomElement()!
+            usedWords.insert(word)
+            return word
+        }
+        func freshSentencePair(_ marker: String) -> String {
+            "\(marker) \(freshWord()) meets \(freshWord()) today. The \(freshWord()) followed \(freshWord())."
+        }
+        let wellFormedWordLM = freshWord()
+        let wellFormedWordOllama = freshWord()
+        let suffixNotInTailWord = freshWord()
+
         let scenarios: [Scenario] = [
             Scenario(label: "LM Studio: well-formed junk, suffix ends the tail", backend: .lmStudio,
-                     context: "Sentence one is here. Sentence two follows it.",
-                     tail: "primarily primarily primarily primarily primarily primarily",
-                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"primarily"}"#) },
+                     context: freshSentencePair("LM-1:"),
+                     tail: Array(repeating: wellFormedWordLM, count: 6).joined(separator: " "),
+                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"\#(wellFormedWordLM)"}"#) },
                      respondOllama: unreachable("LM Studio well-formed junk"),
-                     wantAnswer: .some(.junk("primarily"))),
+                     wantAnswer: .some(.junk(wellFormedWordLM))),
             Scenario(label: "LM Studio: malformed JSON", backend: .lmStudio,
-                     context: "A second, entirely distinct bounded-context sentence for this case.",
-                     tail: "garbled nonsense tail unrelated to the first scenario",
+                     context: freshSentencePair("LM-2:"),
+                     tail: "\(freshWord()) \(freshWord()) \(freshWord()) \(freshWord())",
                      respondLMStudio: { httpOK("not json") },
                      respondOllama: unreachable("LM Studio malformed JSON"),
                      wantAnswer: .some(nil)),
             Scenario(label: "LM Studio: empty body", backend: .lmStudio,
-                     context: "Yet a third, distinct bounded-context sentence rounds things out.",
-                     tail: "a third, distinct suspicious tail phrase",
+                     context: freshSentencePair("LM-3:"),
+                     tail: "\(freshWord()) \(freshWord()) \(freshWord())",
                      respondLMStudio: { httpOK("") },
                      respondOllama: unreachable("LM Studio empty body"),
                      wantAnswer: .some(nil)),
             Scenario(label: "LM Studio: well-formed junk whose suffix is NOT in the tail", backend: .lmStudio,
-                     context: "A fourth bounded-context sentence, still distinct from the others.",
-                     tail: "a fourth, distinct tail phrase entirely",
-                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"something else entirely"}"#) },
+                     context: freshSentencePair("LM-4:"),
+                     tail: "\(freshWord()) \(freshWord()) \(freshWord())",
+                     respondLMStudio: { httpOK(#"{"tail":"junk","junk_suffix":"\#(suffixNotInTailWord)"}"#) },
                      respondOllama: unreachable("LM Studio suffix not in tail"),
                      wantAnswer: .some(nil)),
             Scenario(label: "LM Studio: transport error", backend: .lmStudio,
-                     context: "A fifth bounded-context sentence completes the LM Studio set.",
-                     tail: "a fifth, final distinct tail phrase",
+                     context: freshSentencePair("LM-5:"),
+                     tail: "\(freshWord()) \(freshWord()) \(freshWord())",
                      respondLMStudio: { (nil, nil, NSError(domain: "tailcheck-selftest-fake", code: 1)) },
                      respondOllama: unreachable("LM Studio transport error"),
                      wantAnswer: nil),
             Scenario(label: "Ollama: well-formed junk, suffix ends the tail", backend: .ollama,
-                     context: "An Ollama-routed bounded-context sentence, distinct from every LM Studio one.",
-                     tail: "secondary secondary secondary secondary",
+                     context: freshSentencePair("Ollama-1:"),
+                     tail: Array(repeating: wellFormedWordOllama, count: 4).joined(separator: " "),
                      respondLMStudio: unreachable("Ollama well-formed junk"),
-                     respondOllama: { ollamaOK(#"{"tail":"junk","junk_suffix":"secondary"}"#) },
-                     wantAnswer: .some(.junk("secondary"))),
+                     respondOllama: { ollamaOK(#"{"tail":"junk","junk_suffix":"\#(wellFormedWordOllama)"}"#) },
+                     wantAnswer: .some(.junk(wellFormedWordOllama))),
             Scenario(label: "Ollama: malformed JSON", backend: .ollama,
-                     context: "A second, distinct Ollama-routed bounded-context sentence.",
-                     tail: "a distinct Ollama-only tail phrase",
+                     context: freshSentencePair("Ollama-2:"),
+                     tail: "\(freshWord()) \(freshWord()) \(freshWord())",
                      respondLMStudio: unreachable("Ollama malformed JSON"),
                      respondOllama: { ollamaOK("not json") },
                      wantAnswer: .some(nil)),
@@ -910,6 +1118,15 @@ enum TailCheckSelfTest {
         return reporter.passed
     }
 
+    /// The real entry point the manifest dispatches to -- see `runJudgeLocalOnly(arguments:)`'s
+    /// identical wrapper above.
+    private static func runJudgeRequestShape(arguments: [String]) -> Bool {
+        if arguments.contains(networkDeniedChildFlag) {
+            return runJudgeRequestShape()
+        }
+        return NetworkDenialSandbox.runArmDenyingNetwork(arm: Arm.judgeRequestShape.rawValue, label: "judge-request-shape")
+    }
+
     // MARK: - judge-timeout-pinned (vdtpwg, part B)
     //
     // Not stub-caused red -- closes `vdtpga-GQ.md` hole H2 ("the literal `400` ms production default
@@ -954,11 +1171,14 @@ enum TailCheckSelfTest {
         let paste = observer.afterFinalText(text, segments: segments, rawText: text)
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
 
-        // vdtpwg2 repair (JW hole 5): tightened from "< 1s" -- that bar let a hard wall drifted to
-        // ~900ms pass undetected. Anchored to the named 400ms default itself: the wait must have
-        // genuinely run close to it, not returned early and not drifted hundreds of ms past it.
+        // vdtpwg3 repair (JW2 hole 5, bounded per the 2026-10-07 addendum): [400,700) let a hard wait
+        // implemented as `timeoutMs + 250ms` (-> ~650ms here) pass. Measured over several real runs in
+        // this environment the genuine wait lands ~410-411ms; [400,450) still has ~40ms of jitter
+        // headroom while failing any `+250ms` drift by a wide margin. Still measured from OUTSIDE
+        // (`t0`/`DispatchTime.now()` wrap the arm's own call to `afterFinalText`), per the addendum's
+        // directive 2.
         reporter.record("a judge slower than the default 400 ms times out within a tight band around it",
-                        elapsedMs >= 400 && elapsedMs < 700, "elapsed=\(elapsedMs)ms")
+                        elapsedMs >= 400 && elapsedMs < 450, "elapsed=\(elapsedMs)ms")
         reporter.record("the paste stays unchanged even though the trigger fired", paste == text)
         if let line = observedLines.first, let data = line.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -1144,8 +1364,58 @@ enum TailCheckSelfTest {
                 notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
             notesDelivery: notesDelivery,
             tailCheckHook: tailCheckHook,
-            clipboardPasteboard: pasteboard)
+            clipboardPasteboard: pasteboard,
+            // vdtpwg3 repair (point 0): a real, fully-typed HUDPanel whose window-server-ordering calls
+            // are no-ops in this headless test process -- see HUDPanel.makeHeadlessForTesting's own doc
+            // comment and vdtpwg2-JW2.md's crash report (exit 134 in HUDPanel's real window-ordering
+            // path, reached via finalize()'s real landDelivery -> hud.toast()/hide()).
+            hud: HUDPanel.makeHeadlessForTesting())
         controller.wasLocked = true
+        return controller
+    }
+
+    /// vdtpwg3 repair (point 2): a SECOND real, AX-free, system-pasteboard-free delivery branch --
+    /// `finalize()`'s notes/bullseye landing (`NotesLanding.bullseye`), which `NotesBullseyeLogic.delivery`
+    /// routes to BEFORE either the `wasLocked` or `target` checks, so this is a genuinely different real
+    /// branch from `makeHookTestController`'s locked-no-target one, not a relabeled copy of it. Armed
+    /// deterministically via `NotesBullseyeState.setAtCaret` (no JS bridge, no real note, no AX) with
+    /// `onDeliverToBullseye` answering `.delivered` -- the same "real seam, injected answer" shape as
+    /// `makeHookTestController`'s clipboard pasteboard. Push-to-talk and locked-WITH-a-captured-target are
+    /// NOT driven here: both require a real `DictationTarget` wrapping a live AX element with no existing
+    /// fake-target seam into the REAL `finalize()` (see `LockedDeliverySelfTest`, which tests the pure
+    /// `lockedDeliveryResolution` classifier plus a parallel fake harness for exactly this reason, never
+    /// the real controller) -- driving them here would mean either a live AX paste-synthesis call or a
+    /// write to `NSPasteboard.general`, the one thing every fixture in this file is built to avoid. Noted
+    /// as a residual (see this chain's GW3 report), not closed by this link.
+    private static func makeBullseyeHookTestController(
+        tailCheckHook: TailCheckDictationHook, noteId: String = "tailcheck-selftest-bullseye-note"
+    ) -> DictationController {
+        let notesCallbacks = NotesDeliveryCallbacks(
+            onSnapshotNoteTarget: { _ in nil },
+            onDeliverToNoteTarget: { _, _ in .noWindow },
+            onInsertIntoActiveNote: { _ in .noWindow },
+            onSetBullseyeAtCaret: { nil },
+            onDeliverToBullseye: { _ in .delivered },
+            onBullseyeStateChanged: {},
+            onRevealBullseye: { .noneSet },
+            onResolveReplaceHighlightTarget: { nil },
+            onShowReplaceHighlight: { _, _, _ in },
+            onClearReplaceHighlight: { _ in },
+            onUndoNoteDelivery: { _ in false },
+            onReplaceNoteDelivery: { _, _ in false },
+            onCurrentNoteId: { nil })
+        let bullseyeState = NotesBullseyeState(
+            store: StickyNotesStore(),
+            defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-armed-\(UUID().uuidString)")!)
+        bullseyeState.setAtCaret(noteId: noteId)
+        let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
+        let controller = DictationController(
+            callbacks: DictationControllerCallbacks(
+                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+            notesDelivery: notesDelivery,
+            tailCheckHook: tailCheckHook,
+            hud: HUDPanel.makeHeadlessForTesting())
         return controller
     }
 
@@ -1165,7 +1435,19 @@ enum TailCheckSelfTest {
     // `makeHookTestController` above) and asserts the write is already observable (changeCount
     // incremented) by the time `finalize()` returns, plus that the hook's own sink work never runs on
     // the thread that performed the paste -- an ordering + thread assertion, not a timed sleep standing
-    // in for proof. Two distinct takes rule out a hard-coded single-case answer.
+    // in for proof.
+    //
+    // vdtpwg3 repair (JW2 hole 2, bounded per the 2026-10-07 addendum): two fixes. (a) `elapsed < 100`
+    // let a hook that synchronously sleeps 90-99ms before dispatching still pass; tightened to `<= 20`
+    // ms, well under any budget a real dispatch-and-return-fast implementation needs. (b) "two distinct
+    // takes" never varied the DELIVERY BRANCH, only the text -- both ran through the same locked-no-
+    // target path. A second real branch (`NotesLanding.bullseye`, via `makeBullseyeHookTestController`)
+    // is added; its own real, synchronous write (the injected `onDeliverToBullseye` callback) is proven
+    // observable by return the same way the clipboard write is, via a dedicated counter rather than a
+    // pasteboard changeCount (that branch never touches any pasteboard). Push-to-talk and locked-with-
+    // a-captured-target stay out of scope -- see `makeBullseyeHookTestController`'s own doc comment.
+    // Elapsed is still measured from OUTSIDE the call (`t0` wraps `controller.finalize(...)` itself,
+    // never a value the hook or observer reports about itself), per the addendum's directive 2.
 
     private static func runHookAfterPaste() -> Bool {
         print("=== ViddyDictate tailcheck — hook-after-paste arm ===")
@@ -1179,9 +1461,10 @@ enum TailCheckSelfTest {
             }
         }
 
-        struct Case { let label: String; let text: String; let segments: [TailCheck.Segment] }
+        enum Branch { case lockedNoTarget, notesBullseye }
+        struct Case { let label: String; let branch: Branch; let text: String; let segments: [TailCheck.Segment] }
         let cases: [Case] = [
-            Case(label: "case 1",
+            Case(label: "case 1 (locked, no target)", branch: .lockedNoTarget,
                  text: "I approve the plan. " + Array(repeating: "primarily", count: 8).joined(separator: " "),
                  segments: [
                     TailCheck.Segment(start: 0.0, end: 5.0, rawText: "I approve the plan.",
@@ -1190,13 +1473,22 @@ enum TailCheckSelfTest {
                                       rawText: Array(repeating: "primarily", count: 8).joined(separator: " "),
                                       noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
                  ]),
-            Case(label: "case 2",
+            Case(label: "case 2 (locked, no target)", branch: .lockedNoTarget,
                  text: "Let's finalize the budget. " + Array(repeating: "secondary", count: 7).joined(separator: " "),
                  segments: [
                     TailCheck.Segment(start: 0.0, end: 4.0, rawText: "Let's finalize the budget.",
                                       noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
                     TailCheck.Segment(start: 4.1, end: 11.0,
                                       rawText: Array(repeating: "secondary", count: 7).joined(separator: " "),
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                 ]),
+            Case(label: "case 3 (notes bullseye landing)", branch: .notesBullseye,
+                 text: "Add this to the shopping list. " + Array(repeating: "tertiary", count: 7).joined(separator: " "),
+                 segments: [
+                    TailCheck.Segment(start: 0.0, end: 4.0, rawText: "Add this to the shopping list.",
+                                      noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
+                    TailCheck.Segment(start: 4.1, end: 11.0,
+                                      rawText: Array(repeating: "tertiary", count: 7).joined(separator: " "),
                                       noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.0),
                  ]),
         ]
@@ -1213,25 +1505,73 @@ enum TailCheckSelfTest {
                 sink: { _ in lock.lock(); sinkCalls += 1; sinkThread = Thread.current; lock.unlock() },
                 judge: SlowJudge(), judgeTimeoutMs: 5_000)
             let hook: TailCheckDictationHook = NullTailCheckDictationHook(observer: observer)
-            let pasteboard = scratchPasteboard()
-            defer { pasteboard.releaseGlobally() }
-            let controller = makeHookTestController(tailCheckHook: hook, pasteboard: pasteboard)
 
             let callingThread = Thread.current
-            let changeCountBefore = pasteboard.changeCount
-            let t0 = DispatchTime.now()
-            _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
-                                    historyID: UUID(), segments: c.segments)
-            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
-            let changeCountAfter = pasteboard.changeCount
+            var writeObservedByReturn = false
+            var writeDetail = ""
+            let elapsedMs: Double
+
+            switch c.branch {
+            case .lockedNoTarget:
+                let pasteboard = scratchPasteboard()
+                defer { pasteboard.releaseGlobally() }
+                let controller = makeHookTestController(tailCheckHook: hook, pasteboard: pasteboard)
+                let changeCountBefore = pasteboard.changeCount
+                let t0 = DispatchTime.now()
+                _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
+                                        historyID: UUID(), segments: c.segments)
+                elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
+                let changeCountAfter = pasteboard.changeCount
+                writeObservedByReturn = changeCountAfter > changeCountBefore
+                writeDetail = "clipboard changeCount before=\(changeCountBefore) after=\(changeCountAfter)"
+            case .notesBullseye:
+                let writeLock = NSLock()
+                var bullseyeWrites = 0
+                let notesCallbacks = NotesDeliveryCallbacks(
+                    onSnapshotNoteTarget: { _ in nil },
+                    onDeliverToNoteTarget: { _, _ in .noWindow },
+                    onInsertIntoActiveNote: { _ in .noWindow },
+                    onSetBullseyeAtCaret: { nil },
+                    onDeliverToBullseye: { _ in
+                        writeLock.lock(); bullseyeWrites += 1; writeLock.unlock()
+                        return .delivered
+                    },
+                    onBullseyeStateChanged: {},
+                    onRevealBullseye: { .noneSet },
+                    onResolveReplaceHighlightTarget: { nil },
+                    onShowReplaceHighlight: { _, _, _ in },
+                    onClearReplaceHighlight: { _ in },
+                    onUndoNoteDelivery: { _ in false },
+                    onReplaceNoteDelivery: { _, _ in false },
+                    onCurrentNoteId: { nil })
+                let bullseyeState = NotesBullseyeState(
+                    store: StickyNotesStore(),
+                    defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-timing-\(UUID().uuidString)")!)
+                bullseyeState.setAtCaret(noteId: "tailcheck-selftest-timing-note")
+                let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
+                let controller = DictationController(
+                    callbacks: DictationControllerCallbacks(
+                        onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                        notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+                    notesDelivery: notesDelivery,
+                    tailCheckHook: hook,
+                    hud: HUDPanel.makeHeadlessForTesting())
+                let t0 = DispatchTime.now()
+                _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
+                                        historyID: UUID(), segments: c.segments)
+                elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
+                writeLock.lock(); let writes = bullseyeWrites; writeLock.unlock()
+                writeObservedByReturn = writes == 1
+                writeDetail = "onDeliverToBullseye calls=\(writes)"
+            }
 
             reporter.record(
                 "[\(c.label)] the real paste/delivery write is observable by the time finalize() returns",
-                changeCountAfter > changeCountBefore,
-                "before=\(changeCountBefore) after=\(changeCountAfter)")
+                writeObservedByReturn, writeDetail)
             reporter.record(
-                "[\(c.label)] finalize() itself (the real paste/delivery callback) returns within 100 ms",
-                elapsedMs < 100, "elapsed=\(elapsedMs)ms")
+                "[\(c.label)] finalize() itself (the real paste/delivery callback) returns within 20 ms, "
+                    + "measured from OUTSIDE the call",
+                elapsedMs <= 20, "elapsed=\(elapsedMs)ms")
 
             Thread.sleep(forTimeInterval: 1.5)
             lock.lock()
@@ -1297,21 +1637,40 @@ enum TailCheckSelfTest {
         defer { Settings.tailCheckEnabled = savedEnabled }
 
         // Branch 1: `deliver()`'s raw-mode call (`cleaned: nil, mode: .raw, level: nil`).
+        //
+        // vdtpwg3 repair (point 3, JW2 hole 3's shallow-wiring half): the old version called
+        // `finalize(...)` directly with a hand-supplied `segs` array -- exactly the "shortcut-call
+        // green" JW2 named, since it never proved deliver() (the real upstream entry point transcribe's
+        // completion calls) threads anything at all. This drives `DictationController.deliver(text:
+        // error:generation:takeID:retentionWasEnabled:)` itself (widened `private` -> `internal`, same
+        // precedent as `finalize()`'s own vdtpwg2 widening). `deliver()`'s raw path post-processes the
+        // transcript (`CleanupLogic.cleanRepeats` + `CorrectionDictionary.shared.applyHardCoded`, both
+        // no-ops on this plain, repeat-free fixture text) and calls `finalize(..., mode: .raw, ...)`
+        // with NO `segments:` argument at all -- it defaults to `[]`. Asserting `segmentRawTexts == []`
+        // here is deliberately pinning TODAY'S REAL GAP through the real call chain, not a stand-in:
+        // neither `deliver()` nor `transcribeAudioSnapshot`'s completion (`(text, err)`, see `finish()`)
+        // carries segments yet, so there is nothing upstream for this call to thread. I3's job is
+        // extending that whole chain (daemon -> `DaemonClient.transcribe` -> `transcribeAudioSnapshot`
+        // -> `deliver()` -> `finalize()`) to carry the daemon's real per-dictation segments -- at which
+        // point THIS specific expected value (not the test's existence) must change to require the
+        // real, non-empty, upstream-sourced segments, the same way GW2's own widening of `finalize()`'s
+        // signature required editing this file to match a real contract change, never to launder a stub.
         Settings.tailCheckEnabled = true
         do {
             let spy = SpyHook()
             let pasteboard = scratchPasteboard(); defer { pasteboard.releaseGlobally() }
             let controller = makeHookTestController(tailCheckHook: spy, pasteboard: pasteboard)
-            let segs = [segment("raw branch tail text")]
-            _ = controller.finalize(delivered: "raw delivered text", raw: "raw source text", cleaned: nil,
-                                    mode: .raw, historyID: UUID(), segments: segs)
-            reporter.record("[raw] the hook is called exactly once", spy.calls.count == 1,
-                            "calls=\(spy.calls.count)")
+            let rawText = "The raw upstream delivery text arrived safely."
+            controller.deliver(text: rawText, error: nil, generation: 0, takeID: UUID(),
+                               retentionWasEnabled: false)
+            reporter.record("[raw, via the real deliver() entry point] the hook is called exactly once",
+                            spy.calls.count == 1, "calls=\(spy.calls.count)")
             reporter.record(
-                "[raw] the spy received this real call's exact finalText/rawText/segments/cleanupLevel",
-                spy.calls.first == SpyHook.Call(finalText: "raw delivered text", rawText: "raw source text",
-                                                segmentRawTexts: ["raw branch tail text"],
-                                                cleanupLevel: TailCheck.cleanupLevelNone),
+                "[raw, via the real deliver() entry point] the spy received this real call's exact "
+                    + "finalText/rawText/cleanupLevel, and today's real (not yet wired) empty segments "
+                    + "-- never a test-supplied stand-in",
+                spy.calls.first == SpyHook.Call(finalText: rawText, rawText: rawText,
+                                                segmentRawTexts: [], cleanupLevel: TailCheck.cleanupLevelNone),
                 "got=\(String(describing: spy.calls.first))")
         }
 
@@ -1417,6 +1776,36 @@ enum TailCheckSelfTest {
             "DictationController's own tailCheckHook default calls the production factory "
                 + "(TailCheckObserver.makeDefaultHook) -- the real construction path, not a parallel copy",
             initSlice.contains("TailCheckObserver.makeDefaultHook("), initSlice)
+
+        // vdtpwg3 repair (point 4, JW2's exact named adversary): the check above only proves the
+        // CONTROLLER names `makeDefaultHook` somewhere in its init slice -- it says nothing about
+        // `makeDefaultHook`'s OWN body, in TailCheck.swift. JW2's adversary keeps that controller-level
+        // reference (satisfying the check above) while editing `makeDefaultHook` itself to build a hook
+        // wrapping `NullTailCheckFlagPresenter`, "retaining a dead/unreachable `makeDefault(...)`
+        // expression" so a bare `contains("makeDefault")`-style check still passes. Closed by slicing
+        // `makeDefaultHook`'s OWN source (from its declaration to end of file -- it is the last
+        // declaration in `TailCheck.swift`) and asserting BOTH that it still names the real executed
+        // return shape AND that `NullTailCheckFlagPresenter` does not appear anywhere in that slice --
+        // a dead/unreachable real expression sitting alongside a live `NullTailCheckFlagPresenter` swap
+        // fails this second half even though it would still satisfy a bare substring-presence check.
+        guard let makeDefaultHookStart = NotesProbe.sourceTailCheck.range(of: "static func makeDefaultHook(")
+        else {
+            reporter.record("located makeDefaultHook's own declaration in TailCheck.swift to slice it", false)
+            print("\n=== RESULT ===")
+            print(reporter.summaryLine(prefix: "hud-flag-real"))
+            return reporter.passed
+        }
+        let makeDefaultHookBody = String(NotesProbe.sourceTailCheck[makeDefaultHookStart.upperBound...])
+        reporter.record(
+            "makeDefaultHook's OWN body (not merely the controller's reference to its name) still "
+                + "returns the real, executed NullTailCheckDictationHook(observer: makeDefault(...)) shape",
+            makeDefaultHookBody.contains("NullTailCheckDictationHook(observer: makeDefault("),
+            makeDefaultHookBody)
+        reporter.record(
+            "makeDefaultHook's OWN body never constructs NullTailCheckFlagPresenter anywhere -- ruling "
+                + "out a live swap to the no-op presenter sitting alongside a dead/unreachable real "
+                + "makeDefault(...) expression or comment",
+            !makeDefaultHookBody.contains("NullTailCheckFlagPresenter"), makeDefaultHookBody)
 
         let cleanText = "The fix that landed for the sticky note tabs looks pretty good."
         let cleanSegments = [

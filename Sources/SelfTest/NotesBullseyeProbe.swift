@@ -1022,12 +1022,12 @@ extension NotesProbe {
                                       to: "state = .recording")
         let finishBody = sourceSlice(controllerSrc,
                                from: "private func finish() {",
-                               to: "private func deliver(text rawText:")
+                               to: "func deliver(text rawText:")
         let nothingHeardBody = sourceSlice(controllerSrc,
                                 from: "private func finishNothingHeard(",
                                 to: "private func finish() {")
         let deliverBody = sourceSlice(controllerSrc,
-                                from: "private func deliver(text rawText:",
+                                from: "func deliver(text rawText:",
                                 to: "private func landCleanupRetry(")
         let finalizeBody = sourceSlice(controllerSrc,
                                  from: "func finalize(delivered:",
