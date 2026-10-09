@@ -41,4 +41,45 @@ enum LaunchPermissionSequence {
         log("perms ax=\(ax) im=\(im)")
         return (ax, im)
     }
+
+    /// The whole launch-time permission path, injected so a selftest can drive it without constructing an
+    /// `AppDelegate` or touching real TCC. On a launch whose first-run Setup window will show, it checks
+    /// Accessibility and Input Monitoring SILENTLY (`prompt: false`), arms the tap only when BOTH are
+    /// already granted, and never requests the Microphone. When either is missing it does exactly what it
+    /// did before: prompt nothing and leave the explanation to the Setup window. A launch with no Setup
+    /// window keeps the old full prompting sequence.
+    static func runLaunch(setupWindowWillShow: Bool,
+                          requester: LaunchPermissionRequester = LaunchPermissionRequester(),
+                          startController: () -> Void,
+                          setStatus: (String) -> Void = { _ in },
+                          log: @escaping (String) -> Void = { Log.write($0) }) {
+        if setupWindowWillShow {
+            let ax = requester.accessibility(false)
+            let im = requester.inputMonitoring(false)
+            if LaunchPermissionPolicy.shouldStartControllerWithoutPrompt(
+                setupWindowWillShow: setupWindowWillShow,
+                accessibilityGranted: ax,
+                inputMonitoringGranted: im) {
+                startController()
+            }
+            return
+        }
+        guard let result = run(shouldRequest: true, requester: requester, log: log) else { return }
+        if result.accessibility && result.inputMonitoring {
+            startController()
+        } else {
+            setStatus("Dictation: grant Accessibility + Input Monitoring, then relaunch")
+        }
+    }
+}
+
+/// The setup-window launch decision, kept pure so a selftest can drive it without AppKit or TCC. The tap
+/// is armed only when the Setup window is about to show AND Accessibility and Input Monitoring are both
+/// already granted; a missing grant leaves the old behaviour (no prompt, no tap) to the Setup window.
+extension LaunchPermissionPolicy {
+    static func shouldStartControllerWithoutPrompt(setupWindowWillShow: Bool,
+                                                   accessibilityGranted: Bool,
+                                                   inputMonitoringGranted: Bool) -> Bool {
+        setupWindowWillShow && accessibilityGranted && inputMonitoringGranted
+    }
 }

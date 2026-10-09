@@ -814,15 +814,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func requestPermissions() {
-        guard let result = LaunchPermissionSequence.run(
-            shouldRequest: LaunchPermissionPolicy.shouldRequestAtLaunch(
-                setupWindowWillShow: FirstRunSetupPresenter.shared.launchShowsWindow))
-        else { return }
-        if result.accessibility && result.inputMonitoring {
-            startController()
-        } else {
-            statusLabel.title = "Dictation: grant Accessibility + Input Monitoring, then relaunch"
-        }
+        LaunchPermissionSequence.runLaunch(
+            setupWindowWillShow: FirstRunSetupPresenter.shared.launchShowsWindow,
+            startController: { [weak self] in self?.startController() },
+            setStatus: { [weak self] text in self?.statusLabel.title = text })
     }
 
     private func startController() {
