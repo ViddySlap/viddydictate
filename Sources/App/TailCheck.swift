@@ -565,19 +565,16 @@ final class LocalRouteTailJudge: TailJudge {
             return
         }
 
-        guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
-            completion(.success(nil))
-            return
-        }
-        var request = URLRequest(url: Settings.searchEndpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = encoded
-
+        // LM Studio carries `reasoning_effort: none` so a reasoning-capable judge answers inside the
+        // caller's hard wall clock. The key is added here, not in `requestBody`, because the Ollama
+        // branch above hands that same body to `transport.ollamaChat` and must stay byte-for-byte
+        // unchanged; a model that rejects the field is retried once without it.
         let sem = DispatchSemaphore(value: 0)
         var outcome: Result<TailCheck.JudgeAnswer?, Error> = .success(nil)
-        transport.sendLMStudio(request) { data, response, error in
+        LMStudioReasoningEffort.send(
+            baseBody: body, modelID: ref.modelID, endpoint: Settings.searchEndpoint,
+            timeout: requestTimeout, transport: transport
+        ) { data, response, error in
             outcome = Self.answer(data: data, response: response, error: error, tail: tail)
             sem.signal()
         }

@@ -302,6 +302,12 @@ enum CleanupClient {
 
     /// One chat-completions attempt against the cleanup endpoint. `cleanup(_:)` owns making the model
     /// resident first; this just issues the timed request and reports the `Result`.
+    ///
+    /// LM Studio carries `reasoning_effort: none` so a reasoning-capable model does not blow the
+    /// cleanup timeout thinking. The key is added HERE, not in `requestBody`, because `cleanup(_:)`
+    /// hands that same body to `transport.ollamaChat` and Ollama's request must stay byte-for-byte
+    /// unchanged. A model that rejects the field is retried once without it (see
+    /// `LMStudioReasoningEffort.send`).
     private static func sendRequest(_ raw: String,
                                     timeout: TimeInterval,
                                     model: String,
@@ -309,19 +315,12 @@ enum CleanupClient {
                                     systemPrompt: String,
                                     transport: LocalChatTransport,
                                     completion: @escaping (Result) -> Void) {
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "POST"
-        req.timeoutInterval = timeout
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
         let body = requestBody(raw, model: model, systemPrompt: systemPrompt)
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
-            completion(.unavailable("encode failed")); return
-        }
-        req.httpBody = data
-
         let t0 = Date()
-        transport.sendLMStudio(req) { data, response, error in
+        LMStudioReasoningEffort.send(
+            baseBody: body, modelID: model, endpoint: endpoint, timeout: timeout,
+            transport: transport
+        ) { data, response, error in
             finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
                           completion: completion)
         }

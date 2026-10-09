@@ -56,6 +56,7 @@ enum OllamaClientWiringFixtureSelfTest {
         checkResidentContextReuse(reporter)
         checkVisionHelperChoice(reporter)
         checkProductionCallSites(reporter)
+        checkReasoningOff(reporter)
         checkNegativeControls(reporter)
 
         print(reporter.passed
@@ -77,6 +78,8 @@ enum OllamaClientWiringFixtureSelfTest {
         var generates: [[String: Any]] { ollamaRequests.filter { $0.path == "/api/generate" }.compactMap(\.body) }
         /// What OllamaBackend.chat handed the client, already translated to the OpenAI shape.
         var translated: [Data] = []
+        /// The OpenAI-shaped bodies the clients handed `transport.ollamaChat`, before translation.
+        var ollamaChatBodies: [[String: Any]] = []
         var resident: [String: Int] = [:]
         var webSearches: [String] = []
         /// Whether LM Studio's readiness reports a cold load (the scripted answer to "was it resident").
@@ -111,6 +114,7 @@ enum OllamaClientWiringFixtureSelfTest {
                     return (prepared.result, prepared.contextTokens ?? context, self.alwaysCold || prepared.coldLoaded)
                 },
                 chatOllama: { body, keepAlive, context, think, timeout in
+                    self.ollamaChatBodies.append(body)
                     let result = self.backend.chat(openAIBody: body, keepAliveSeconds: keepAlive,
                                                    contextTokens: context, think: think, timeout: timeout)
                     if let data = result.0 { self.translated.append(data) }
@@ -314,6 +318,7 @@ enum OllamaClientWiringFixtureSelfTest {
                                          system: "fixture system prompt", user: "unused"))
             let expected: [String: Any] = [
                 "model": modelID, "temperature": Settings.cleanupTemperature, "max_tokens": 4096, "stream": false,
+                "reasoning_effort": "none",
                 "messages": [["role": "system", "content": "fixture system prompt"],
                              ["role": "user", "content": CleanupClient.wrap("fixture source text")]],
             ]
@@ -351,7 +356,7 @@ enum OllamaClientWiringFixtureSelfTest {
                                          system: "fixture email prompt", user: "unused"))
             let expected: [String: Any] = [
                 "model": modelID, "temperature": Settings.emailTemperature, "max_tokens": Settings.emailMaxTokens,
-                "stream": false,
+                "stream": false, "reasoning_effort": "none",
                 "messages": [["role": "system", "content": "fixture email prompt"],
                              ["role": "user", "content": EmailClient.wrap("fixture source text")]],
             ]
@@ -577,6 +582,174 @@ enum OllamaClientWiringFixtureSelfTest {
         reporter.record("the vision pass picks its helper and describer on the route's app",
                         vision.contains("localBackendLookup(mode) == .ollama")
                             && vision.contains("NoteToHandoffLocalVisionClient.describe(ref: ref"))
+    }
+
+    // MARK: - reasoning-off (the LM Studio send path only)
+
+    /// The model id the fallback checks use; deliberately distinct from `modelID` so marking it
+    /// "rejects the field" for the rest of the process cannot disturb any other check.
+    private static let reasoningOffFallbackModelID = "reasoning-off-fallback:7b"
+
+    /// Cleanup/selection transforms, email and the tail-check judge ask LM Studio for
+    /// `reasoning_effort: none`; a model that rejects it is retried once without it and remembered;
+    /// Ollama and the web-search loop are untouched.
+    private static func checkReasoningOff(_ reporter: SelfTestReporter) {
+        print("--- reasoning-off: LM Studio cleanup/selection/email/judge bodies, 400 fallback, Ollama untouched ---")
+
+        // (a) cleanup exact LM Studio body, every old key unchanged.
+        do {
+            let mac = ScriptedMac()
+            let result = complete(CleanupClient.localAdapter(surface: .cleanup, transport: mac.transport),
+                                  request(lmStudioBundle, route: .cleanupL1,
+                                          system: "fixture system prompt", user: "unused"))
+            let expected: [String: Any] = [
+                "model": modelID, "temperature": Settings.cleanupTemperature, "max_tokens": 4096,
+                "stream": false, "reasoning_effort": "none",
+                "messages": [["role": "system", "content": "fixture system prompt"],
+                             ["role": "user", "content": CleanupClient.wrap("fixture source text")]],
+            ]
+            reporter.record(
+                "reasoning-off: cleanup LM Studio body carries reasoning_effort none with every old key unchanged",
+                mac.lmRequests.count == 1 && same(mac.lmBodies.first, expected)
+                    && okText(result) == lmReply,
+                "reasoning_effort=\(mac.lmBodies.first?["reasoning_effort"] as? String ?? "absent")")
+        }
+
+        // (b) Option+P selection transform, through the same adapter the registry's row uses.
+        do {
+            let mac = ScriptedMac()
+            let result = complete(CleanupClient.localAdapter(surface: .promptPrep, transport: mac.transport),
+                                  request(lmStudioBundle, route: .promptPrep,
+                                          system: "fixture prep prompt", user: "unused"))
+            reporter.record(
+                "reasoning-off: Option+P selection transform LM Studio body carries reasoning_effort none",
+                mac.lmRequests.count == 1
+                    && mac.lmBodies.first?["reasoning_effort"] as? String == "none"
+                    && okText(result) == lmReply,
+                "reasoning_effort=\(mac.lmBodies.first?["reasoning_effort"] as? String ?? "absent")")
+        }
+
+        // (b2) email cleanup.
+        do {
+            let mac = ScriptedMac()
+            let result = complete(EmailClient.localAdapter(transport: mac.transport),
+                                  request(lmStudioBundle, route: .email,
+                                          system: "fixture email prompt", user: "unused"))
+            reporter.record(
+                "reasoning-off: email cleanup LM Studio body carries reasoning_effort none",
+                mac.lmRequests.count == 1
+                    && mac.lmBodies.first?["reasoning_effort"] as? String == "none"
+                    && okText(result) == lmReply,
+                "reasoning_effort=\(mac.lmBodies.first?["reasoning_effort"] as? String ?? "absent")")
+        }
+
+        // (b3) tail-check judge.
+        do {
+            let mac = ScriptedMac()
+            let judgeModel = "reasoning-off-judge:7b"
+            let judge = LocalRouteTailJudge(
+                routeResolver: { .pinned(.local(judgeModel)) }, transport: mac.transport)
+            let done = DispatchSemaphore(value: 0)
+            judge.judge(context: "fixture context", tail: "fixture tail", timeoutMs: 400) { _ in done.signal() }
+            _ = done.wait(timeout: .now() + 5)
+            let body = mac.lmBodies.first
+            let userCount = ((body?["messages"] as? [[String: Any]]) ?? [])
+                .filter { $0["role"] as? String == "user" }.count
+            reporter.record(
+                "reasoning-off: tail-check judge LM Studio body carries reasoning_effort none and one user message",
+                mac.lmRequests.count == 1 && body?["reasoning_effort"] as? String == "none" && userCount == 1,
+                "reasoning_effort=\(body?["reasoning_effort"] as? String ?? "absent") users=\(userCount)")
+        }
+
+        // (c)+(d) a 400 rejection retries once without the field and is remembered.
+        do {
+            let fallbackModel = reasoningOffFallbackModelID
+            var sentBodies: [[String: Any]] = []
+            let transport = LocalChatTransport(
+                sendLMStudio: { request, completion in
+                    let body = request.httpBody
+                        .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                    sentBodies.append(body)
+                    let url = request.url ?? Settings.cleanupEndpoint
+                    if body["reasoning_effort"] == nil {
+                        let reply: [String: Any] = ["choices": [[
+                            "index": 0, "message": ["role": "assistant", "content": lmReply],
+                            "finish_reason": "stop",
+                        ]]]
+                        completion(try? JSONSerialization.data(withJSONObject: reply),
+                                   HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                   headerFields: nil), nil)
+                    } else {
+                        let error = #"{"error":{"message":"unknown field reasoning_effort"}}"#
+                        completion(error.data(using: .utf8),
+                                   HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1",
+                                                   headerFields: nil), nil)
+                    }
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+
+            let first = complete(CleanupClient.localAdapter(surface: .cleanup, transport: transport),
+                                 request(LLMProviderBundle.local(fallbackModel), route: .cleanupL1,
+                                         system: "fixture system prompt", user: "unused"))
+            reporter.record(
+                "reasoning-off: an LM Studio 400 naming the field retries once without it and returns the good result",
+                sentBodies.count == 2 && sentBodies[0]["reasoning_effort"] as? String == "none"
+                    && sentBodies[1]["reasoning_effort"] == nil && okText(first) == lmReply,
+                "calls=\(sentBodies.count) fields=\(sentBodies.map { $0["reasoning_effort"] as? String ?? "absent" })")
+
+            let second = complete(CleanupClient.localAdapter(surface: .cleanup, transport: transport),
+                                  request(LLMProviderBundle.local(fallbackModel), route: .cleanupL1,
+                                          system: "fixture system prompt", user: "unused"))
+            reporter.record(
+                "reasoning-off: after a rejection the same model id is never sent the field again",
+                sentBodies.count == 3 && sentBodies[2]["reasoning_effort"] == nil && okText(second) == lmReply,
+                "calls=\(sentBodies.count) last=\(sentBodies.last?["reasoning_effort"] as? String ?? "absent")")
+        }
+
+        // (e) web-search synthesis and the tool loop never carry the field.
+        do {
+            let mac = ScriptedMac()
+            let synthesis = SearchClient.makeSynthesisRequest(
+                route: .searchLocalSynth, question: "fixture question", resultsBlock: "fixture results",
+                selected: lmStudioBundle, systemPrompt: "fixture synth prompt", timeout: 30)
+            _ = SearchClient.localSynthesis(synthesis, transport: mac.transport)
+            let retrievalMac = ScriptedMac()
+            _ = SearchClient.agenticLoop(
+                question: "fixture question", retrieval: lmStudioBundle.localRef,
+                transport: retrievalMac.transport, webSearch: { retrievalMac.search($0) })
+            reporter.record(
+                "reasoning-off: web-search synthesis and tool-loop bodies never carry reasoning_effort",
+                !mac.lmBodies.isEmpty && !retrievalMac.lmBodies.isEmpty
+                    && mac.lmBodies.allSatisfy { $0["reasoning_effort"] == nil }
+                    && retrievalMac.lmBodies.allSatisfy { $0["reasoning_effort"] == nil },
+                "synth=\(mac.lmBodies.count) retrieval=\(retrievalMac.lmBodies.count)")
+        }
+
+        // (f) Ollama's shared body is unchanged, key and all.
+        do {
+            let mac = ScriptedMac()
+            _ = complete(CleanupClient.localAdapter(surface: .cleanup, transport: mac.transport),
+                         request(ollamaBundle, route: .cleanupL1,
+                                 system: "fixture system prompt", user: "unused"))
+            let expected: [String: Any] = [
+                "model": modelID, "temperature": Settings.cleanupTemperature, "max_tokens": 4096,
+                "stream": false,
+                "messages": [["role": "system", "content": "fixture system prompt"],
+                             ["role": "user", "content": CleanupClient.wrap("fixture source text")]],
+            ]
+            reporter.record(
+                "reasoning-off: the shared Ollama cleanup body is byte-for-byte unchanged (no reasoning_effort)",
+                mac.chats.count == 1 && same(mac.ollamaChatBodies.first, expected)
+                    && mac.ollamaChatBodies.first?["reasoning_effort"] == nil,
+                "reasoning_effort=\(mac.ollamaChatBodies.first?["reasoning_effort"] as? String ?? "absent")")
+        }
     }
 
     // MARK: - Negative controls

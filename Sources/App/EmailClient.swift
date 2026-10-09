@@ -106,7 +106,9 @@ enum EmailClient {
         ]
     }
 
-    /// A single chat-completions attempt. No retry, no JIT — `email(_:)` owns that.
+    /// A single chat-completions attempt. No retry, no JIT — `email(_:)` owns that. LM Studio carries
+    /// `reasoning_effort: none`; the key is added here, never in the shared `requestBody` the Ollama
+    /// branch hands `transport.ollamaChat`.
     private static func request(_ selection: String,
                                 timeout: TimeInterval,
                                 model: String,
@@ -117,19 +119,12 @@ enum EmailClient {
         let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(.badOutput("empty input")); return }
 
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "POST"
-        req.timeoutInterval = timeout
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
         let body = requestBody(selection, model: model, systemPrompt: systemPrompt)
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
-            completion(.unavailable("encode failed")); return
-        }
-        req.httpBody = data
-
         let t0 = Date()
-        transport.sendLMStudio(req) { data, response, error in
+        LMStudioReasoningEffort.send(
+            baseBody: body, modelID: model, endpoint: endpoint, timeout: timeout,
+            transport: transport
+        ) { data, response, error in
             finish(selection, data: data, response: response, error: error, startedAt: t0,
                    completion: completion)
         }
