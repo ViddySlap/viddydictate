@@ -131,3 +131,105 @@ extension LocalInstalledModel {
         }
     }
 }
+
+/// LM Studio's `reasoning_effort` key and the process-wide memory of the models that reject it.
+///
+/// A reasoning-capable local model answers a cleanup/selection request in a fraction of the time when
+/// told not to think, which is what keeps those surfaces inside `Settings.cleanupTimeout`. LM Studio's
+/// OpenAI-compatible server refuses the field for a model that does not accept it with HTTP 400 (or an
+/// error body naming the field), and such a model must keep working. A rejection is therefore
+/// remembered for the rest of the process, so every later request for that model omits the field: one
+/// retry per model, never one per call.
+///
+/// The key is added on the LM Studio send path ONLY. Ollama's `transport.ollamaChat` receives the same
+/// app-built body it always did, byte for byte.
+enum LMStudioReasoningEffort {
+    static let key = "reasoning_effort"
+    static let off = "none"
+
+    private static let lock = NSLock()
+    private static var rejectedModels: Set<String> = []
+
+    /// Whether `modelID` has already rejected the field in this process.
+    static func isRejected(_ modelID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return rejectedModels.contains(modelID)
+    }
+
+    /// Remember that `modelID` does not accept the field, so later calls omit it.
+    static func rememberRejected(_ modelID: String) {
+        lock.lock(); defer { lock.unlock() }
+        rejectedModels.insert(modelID)
+    }
+
+    /// `baseBody` plus the field, unless the model is known to reject it. Never mutates `baseBody`.
+    static func body(_ baseBody: [String: Any], modelID: String) -> [String: Any] {
+        guard !isRejected(modelID) else { return baseBody }
+        var out = baseBody
+        out[key] = off
+        return out
+    }
+
+    /// True when LM Studio's answer means it rejected the field: HTTP 400, or an error body naming it.
+    /// A success-shaped completion that merely mentions the key (choices present) is never a rejection.
+    static func rejected(_ data: Data?, _ response: URLResponse?, _ error: Error?) -> Bool {
+        if let http = response as? HTTPURLResponse, http.statusCode == 400 { return true }
+        guard let data, let text = String(data: data, encoding: .utf8), text.contains(key) else {
+            return false
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["choices"] != nil {
+            return false
+        }
+        return true
+    }
+
+    /// Build one JSON `POST` for `body` (nil when it cannot be encoded).
+    static func request(_ body: [String: Any], endpoint: URL, timeout: TimeInterval) -> URLRequest? {
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        req.httpBody = data
+        return req
+    }
+
+    /// The one LM Studio send path for the reasoning-capable surfaces: send with the field, and on a
+    /// rejection retry the same body exactly once without it and remember the model. The completion runs
+    /// on the transport's queue, exactly as a bare `sendLMStudio` would.
+    static func send(
+        baseBody: [String: Any],
+        modelID: String,
+        endpoint: URL,
+        timeout: TimeInterval,
+        transport: LocalChatTransport,
+        completion: @escaping (Data?, URLResponse?, Error?) -> Void
+    ) {
+        let alreadyRejected = isRejected(modelID)
+        let outbound = alreadyRejected ? baseBody : body(baseBody, modelID: modelID)
+        guard let outboundRequest = request(outbound, endpoint: endpoint, timeout: timeout) else {
+            completion(nil, nil, encodeError())
+            return
+        }
+        transport.sendLMStudio(outboundRequest) { data, response, error in
+            guard !alreadyRejected, rejected(data, response, error) else {
+                completion(data, response, error)
+                return
+            }
+            rememberRejected(modelID)
+            guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout) else {
+                completion(nil, nil, encodeError())
+                return
+            }
+            transport.sendLMStudio(retry, completion)
+        }
+    }
+
+    /// An encode failure carried like an ordinary transport error, so every existing classifier reports
+    /// the same "encode failed" reason it did before this helper existed.
+    private static func encodeError() -> Error {
+        NSError(domain: "ViddyDictate.LMStudioReasoningEffort", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "encode failed"])
+    }
+}
