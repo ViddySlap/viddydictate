@@ -19,12 +19,15 @@ enum InstallerReworkSelfTest {
         case setupChoice = "setup-choice"
         case readyStep = "ready-step"
         case preferenceControl = "preference-control"
+        case tapLaunch = "tap-launch"
     }
 
     static func run(arguments: [String]) -> Int32 {
-        guard let i = arguments.firstIndex(of: "--only"), i + 1 < arguments.count,
-              let arm = Arm(rawValue: arguments[i + 1])
-        else {
+        guard let i = arguments.firstIndex(of: "--only") else {
+            // No --only: the hotkey-tap launch checks are the acceptance gate's default arm.
+            return runTapLaunch() ? 0 : 1
+        }
+        guard i + 1 < arguments.count, let arm = Arm(rawValue: arguments[i + 1]) else {
             let names = Arm.allCases.map(\.rawValue).joined(separator: "|")
             print("[installer-rework-selftest] FAIL: --only <\(names)> is required")
             return 2
@@ -41,6 +44,7 @@ enum InstallerReworkSelfTest {
         case .setupChoice: ok = runSetupChoice()
         case .readyStep: ok = runReadyStep()
         case .preferenceControl: ok = runPreferenceControl()
+        case .tapLaunch: ok = runTapLaunch()
         }
         return ok ? 0 : 1
     }
@@ -106,6 +110,176 @@ enum InstallerReworkSelfTest {
     private final class PermissionRequestSpy {
         private(set) var calls: [String] = []
         func record(_ name: String, prompt: Bool) { calls.append("\(name)(prompt:\(prompt))") }
+    }
+
+    // MARK: - tap-launch
+
+    /// The hotkey-tap launch defect (Ben, 2026-10-08): a launch whose first-run Setup window shows must
+    /// STILL arm the tap when Accessibility and Input Monitoring are already granted, checked silently
+    /// (no prompt, no Microphone request). When either is missing it must do exactly what it did before:
+    /// prompt nothing and leave the explanation to the Setup window. A launch with no Setup window keeps
+    /// the old full prompting sequence. `LaunchPermissionPolicy.shouldStartControllerWithoutPrompt` is
+    /// the pure decision; `LaunchPermissionSequence.runLaunch` is the injectable wiring.
+    private static func runTapLaunch() -> Bool {
+        print("=== installer-rework — tap-launch ===")
+        let reporter = SelfTestReporter()
+
+        // (a) Setup window will show + both grants present -> start, with no prompting and no mic.
+        do {
+            let spy = TapLaunchRequesterSpy(accessibility: true, inputMonitoring: true)
+            var started = 0
+            LaunchPermissionSequence.runLaunch(
+                setupWindowWillShow: true,
+                requester: spy.requester,
+                startController: { started += 1 },
+                setStatus: { _ in })
+            reporter.record(
+                "tap-launch: setup window + both grants starts the controller",
+                started == 1, "started=\(started)")
+            reporter.record(
+                "tap-launch: setup window + both grants checks accessibility silently",
+                spy.accessibilityPrompts == [false], "\(spy.accessibilityPrompts)")
+            reporter.record(
+                "tap-launch: setup window + both grants checks input monitoring silently",
+                spy.inputMonitoringPrompts == [false], "\(spy.inputMonitoringPrompts)")
+            reporter.record(
+                "tap-launch: setup window + both grants never requests the microphone",
+                spy.microphoneCalls == 0, "calls=\(spy.microphoneCalls)")
+        }
+
+        // (b) Setup window will show + Accessibility missing -> no start, no prompt at all.
+        do {
+            let spy = TapLaunchRequesterSpy(accessibility: false, inputMonitoring: true)
+            var started = 0
+            LaunchPermissionSequence.runLaunch(
+                setupWindowWillShow: true,
+                requester: spy.requester,
+                startController: { started += 1 },
+                setStatus: { _ in })
+            reporter.record(
+                "tap-launch: setup window + accessibility missing does not start the controller",
+                started == 0, "started=\(started)")
+            reporter.record(
+                "tap-launch: setup window + accessibility missing never prompts",
+                spy.promptingCalls == 0 && spy.microphoneCalls == 0,
+                "prompts=\(spy.promptingCalls) mic=\(spy.microphoneCalls)")
+        }
+
+        // (c) Setup window will show + Input Monitoring missing -> no start, no prompt at all.
+        do {
+            let spy = TapLaunchRequesterSpy(accessibility: true, inputMonitoring: false)
+            var started = 0
+            LaunchPermissionSequence.runLaunch(
+                setupWindowWillShow: true,
+                requester: spy.requester,
+                startController: { started += 1 },
+                setStatus: { _ in })
+            reporter.record(
+                "tap-launch: setup window + input monitoring missing does not start the controller",
+                started == 0, "started=\(started)")
+            reporter.record(
+                "tap-launch: setup window + input monitoring missing never prompts",
+                spy.promptingCalls == 0 && spy.microphoneCalls == 0,
+                "prompts=\(spy.promptingCalls) mic=\(spy.microphoneCalls)")
+        }
+
+        // (d) No Setup window + both grants -> the old full request sequence, prompts allowed.
+        do {
+            let spy = TapLaunchRequesterSpy(accessibility: true, inputMonitoring: true)
+            var started = 0
+            LaunchPermissionSequence.runLaunch(
+                setupWindowWillShow: false,
+                requester: spy.requester,
+                startController: { started += 1 },
+                setStatus: { _ in })
+            reporter.record(
+                "tap-launch: no setup window + both grants runs the old full request sequence",
+                spy.accessibilityPrompts == [true] && spy.inputMonitoringPrompts == [true]
+                    && spy.microphoneCalls == 1,
+                "ax=\(spy.accessibilityPrompts) im=\(spy.inputMonitoringPrompts) mic=\(spy.microphoneCalls)")
+            reporter.record(
+                "tap-launch: no setup window + both grants starts the controller",
+                started == 1, "started=\(started)")
+        }
+
+        // (e) No Setup window + a grant missing -> no start, the old status text.
+        do {
+            let spy = TapLaunchRequesterSpy(accessibility: false, inputMonitoring: true)
+            var started = 0
+            var status = ""
+            LaunchPermissionSequence.runLaunch(
+                setupWindowWillShow: false,
+                requester: spy.requester,
+                startController: { started += 1 },
+                setStatus: { status = $0 })
+            reporter.record(
+                "tap-launch: no setup window + missing grant does not start the controller",
+                started == 0, "started=\(started)")
+            reporter.record(
+                "tap-launch: no setup window + missing grant keeps the old status text",
+                status == "Dictation: grant Accessibility + Input Monitoring, then relaunch", status)
+        }
+
+        // (f) The decision is pure (same inputs, same output; no global state).
+        let first = LaunchPermissionPolicy.shouldStartControllerWithoutPrompt(
+            setupWindowWillShow: true, accessibilityGranted: true, inputMonitoringGranted: true)
+        let second = LaunchPermissionPolicy.shouldStartControllerWithoutPrompt(
+            setupWindowWillShow: true, accessibilityGranted: true, inputMonitoringGranted: true)
+        reporter.record(
+            "tap-launch: shouldStartControllerWithoutPrompt is pure",
+            first == second && first == true, "first=\(first) second=\(second)")
+        let truthTable: [(show: Bool, ax: Bool, im: Bool, expected: Bool)] = [
+            (true, true, true, true),
+            (true, false, true, false),
+            (true, true, false, false),
+            (false, true, true, false),
+        ]
+        let tableMatches = truthTable.allSatisfy { row in
+            LaunchPermissionPolicy.shouldStartControllerWithoutPrompt(
+                setupWindowWillShow: row.show, accessibilityGranted: row.ax,
+                inputMonitoringGranted: row.im) == row.expected
+        }
+        reporter.record(
+            "tap-launch: controller starts only when setup shows and both grants are present",
+            tableMatches, "matches=\(tableMatches)")
+
+        return finish(reporter, prefix: "installer-rework tap-launch")
+    }
+
+    /// Records every Accessibility/Input-Monitoring read (with its prompt flag) and every Microphone
+    /// request against a scripted grant, so a check can prove the setup-window path neither prompts nor
+    /// touches the microphone while the no-setup path still does.
+    private final class TapLaunchRequesterSpy {
+        private let accessibilityResult: Bool
+        private let inputMonitoringResult: Bool
+        private(set) var accessibilityPrompts: [Bool] = []
+        private(set) var inputMonitoringPrompts: [Bool] = []
+        private(set) var microphoneCalls = 0
+
+        init(accessibility: Bool, inputMonitoring: Bool) {
+            self.accessibilityResult = accessibility
+            self.inputMonitoringResult = inputMonitoring
+        }
+
+        var promptingCalls: Int {
+            accessibilityPrompts.filter { $0 }.count + inputMonitoringPrompts.filter { $0 }.count
+        }
+
+        var requester: LaunchPermissionRequester {
+            LaunchPermissionRequester(
+                accessibility: { [unowned self] prompt in
+                    self.accessibilityPrompts.append(prompt)
+                    return self.accessibilityResult
+                },
+                inputMonitoring: { [unowned self] prompt in
+                    self.inputMonitoringPrompts.append(prompt)
+                    return self.inputMonitoringResult
+                },
+                microphone: { [unowned self] completion in
+                    self.microphoneCalls += 1
+                    completion(false)
+                })
+        }
     }
 
     // MARK: - im-request
