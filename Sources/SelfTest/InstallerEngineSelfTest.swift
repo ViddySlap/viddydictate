@@ -12,6 +12,7 @@ enum InstallerEngineSelfTest {
         checkChecksumAndRealError(reporter)
         checkRowsContinueAfterFailure(reporter)
         checkNoDepsGuard(reporter)
+        checkSlashEscaping(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "installer engine"))
@@ -235,6 +236,42 @@ enum InstallerEngineSelfTest {
         check.record("a fully-resolved row runs no import check",
                      !webSearch.contains { $0.first == "-c" },
                      webSearch.map { $0.joined(separator: " ") }.joined(separator: " | "))
+    }
+
+    /// Regression for the first-run voice-model download that died with
+    /// `Repo id must use alphanumeric chars ... 'mlx-community\/whisper-large-v3-turbo'`.
+    /// `pythonString` builds a Python literal with JSONSerialization, and Foundation's default escapes
+    /// every `/` as `\/`. Python keeps that backslash (with a SyntaxWarning), so both the repo id and the
+    /// cache path arrive corrupted. These checks pin real slashes AND pin that removing the slash escape
+    /// did not turn the literal into an injection hole.
+    private static func checkSlashEscaping(_ check: SelfTestReporter) {
+        let cachePath = "/Users/x/Library/Application Support/ViddyDictate/models"
+        let cache = URL(fileURLWithPath: cachePath, isDirectory: true)
+
+        let repository = "mlx-community/whisper-large-v3-turbo"
+        let script = InstallerEngine.modelDownloadArguments(
+            for: InstallerModelArtifact(repository: repository), cacheDirectory: cache).last ?? ""
+        check.record("slash-escape: repository and cache literals keep real slashes",
+                     script.contains("repo = \"\(repository)\"")
+                        && script.contains("cache = \"\(cachePath)\""))
+        check.record("slash-escape: no backslash-slash sequence appears anywhere in the script",
+                     !script.contains("\\/"))
+
+        let revisionScript = InstallerEngine.modelDownloadArguments(
+            for: InstallerModelArtifact(repository: repository, revision: "refs/pr/42"),
+            cacheDirectory: cache).last ?? ""
+        check.record("slash-escape: a revision containing a slash stays slash-clean",
+                     revisionScript.contains("revision=\"refs/pr/42\"")
+                        && !revisionScript.contains("\\/"))
+
+        let hostile = "a\"b\\c\u{00E9}/x"
+        let hostileScript = InstallerEngine.modelDownloadArguments(
+            for: InstallerModelArtifact(repository: hostile), cacheDirectory: cache).last ?? ""
+        let rawExpected = "repo = \"a\\\"b\\\\cé/x\""
+        let escapedExpected = "repo = \"a\\\"b\\\\c\\u00e9/x\""
+        check.record("slash-escape: quotes, backslashes and non-ASCII stay safely escaped",
+                     (hostileScript.contains(rawExpected) || hostileScript.contains(escapedExpected))
+                        && !hostileScript.contains("\\/"))
     }
 
     private static func testPaths(root: URL) -> InstallerPaths {

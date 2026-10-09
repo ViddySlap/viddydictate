@@ -1032,7 +1032,8 @@ final class InstallerEngine {
     }
 
     private static func pythonString(_ value: String) -> String {
-        let data = try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        let data = try! JSONSerialization.data(withJSONObject: value,
+                                               options: [.fragmentsAllowed, .withoutEscapingSlashes])
         return String(decoding: data, as: UTF8.self)
     }
 
