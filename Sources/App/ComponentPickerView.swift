@@ -478,6 +478,9 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// there is one installer entered from here and from the point-of-use offer rather than two.
     var onContinue: ((ComponentPicker.InstallPlan) -> Void)?
     var onSetUpLater: (() -> Void)?
+    /// Called when a welcome card choice needs to persist the explicit Preferred local app (Recommended
+    /// + Ollama). The presenter owns that write; the controller only knows the choice was made.
+    var onWelcomeChoice: ((FirstRunSetupFlow.SetupChoice, LocalBackendID) -> Void)?
     /// B10's Retry, forwarded to whatever owns the queue. Re-entering the same installer is the whole
     /// point: a retry must not become a second install path.
     var onRetry: ((ComponentPicker.RowID) -> Void)?
@@ -580,7 +583,9 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
         scroll.autoresizingMask = [.width, .height]
-        let welcome = WelcomeChooseView(width: contentWidth)
+        let welcome = WelcomeChooseView(
+            width: contentWidth,
+            selector: WelcomeChoose.RecommendedSelector(environment: environment))
         // Consumes `FirstRunSetupFlow.setupChoices()` rather than a parallel list of card callbacks:
         // Advanced swaps to the existing picker page, Recommended/Dictation-only start the install.
         welcome.onChoose = { [weak self] choice in
@@ -629,7 +634,12 @@ final class FirstRunSetupWindowController: NSObject, NSWindowDelegate {
     /// through the exact `gate.startDownload` -> `begin(plan)` path `continueTapped()` uses, so metered
     /// handling, the queue and the Permissions step behave identically.
     private func choose(_ choice: FirstRunSetupFlow.SetupChoice) {
-        let plan = FirstRunSetupFlow.plan(for: choice, facts: facts, environment: environment)
+        // The Recommended card's selector choice travels with the card click: it selects the plan and,
+        // for Ollama, pins the explicit Preferred local app before the bytes start.
+        let localApp = welcome?.localApp ?? .lmStudio
+        onWelcomeChoice?(choice, localApp)
+        let plan = FirstRunSetupFlow.plan(for: choice, facts: facts, environment: environment,
+                                          localApp: localApp)
         _ = gate.startDownload { [weak self] in self?.begin(plan) }
     }
 

@@ -21,6 +21,17 @@ final class FirstRunSetupPresenter {
     static let rerunIdentifier = "setup-rerun-first-run"
 
     private let coordinator: BootstrapInstallCoordinator
+    /// The app's one EXPLICIT Preferred local app write, injected so the welcome card reuses the Setup
+    /// tab's own setting and a selftest can observe it. Production is `Settings.preferredLocalBackend`.
+    var setPreferredLocalApp: (LocalBackendID?) -> Void = { Settings.preferredLocalBackend = $0 }
+    /// The welcome card's Recommended + Ollama choice pins the explicit Preferred local app, the same
+    /// `Settings.preferredLocalBackend` the Setup tab's popup stores. Every other choice writes nothing.
+    func welcomeCardChose(_ choice: FirstRunSetupFlow.SetupChoice, localApp: LocalBackendID) {
+        guard choice == .recommended, localApp == .ollama else { return }
+        setPreferredLocalApp(.ollama)
+        Log.write("first-run setup: welcome card chose Ollama - preferred local app set")
+    }
+
     /// Whether this launch's global key tap is live, asked by the permissions screen to decide whether
     /// to offer a relaunch (`PostLaunchGrantPolicy`). Defaults false, so a presenter built without a
     /// host (or in a selftest) never claims the tap is live.
@@ -104,6 +115,9 @@ final class FirstRunSetupPresenter {
         controller.onContinue = { [weak self] plan in self?.begin(plan) }
         controller.onRetry = { [weak self] _ in self?.retry() }
         controller.onSetUpLater = { [weak self] in self?.setUpLater() }
+        controller.onWelcomeChoice = { [weak self] choice, localApp in
+            self?.welcomeCardChose(choice, localApp: localApp)
+        }
         controller.onClose = { [weak self] in self?.closed() }
         controller.tapLive = hotkeyTapLive
         self.controller = controller
