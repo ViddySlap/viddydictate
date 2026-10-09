@@ -57,6 +57,7 @@ enum OllamaClientWiringFixtureSelfTest {
         checkVisionHelperChoice(reporter)
         checkProductionCallSites(reporter)
         checkReasoningOff(reporter)
+        checkStallTimeout(reporter)
         checkNegativeControls(reporter)
 
         print(reporter.passed
@@ -749,6 +750,552 @@ enum OllamaClientWiringFixtureSelfTest {
                 mac.chats.count == 1 && same(mac.ollamaChatBodies.first, expected)
                     && mac.ollamaChatBodies.first?["reasoning_effort"] == nil,
                 "reasoning_effort=\(mac.ollamaChatBodies.first?["reasoning_effort"] as? String ?? "absent")")
+        }
+    }
+
+    // MARK: - stall-timeout (opted-in streaming, guard: the tail judge is not opted in)
+
+    /// The LM Studio send closure's session seam and a scripted wire, no socket and no model. Every
+    /// `stall-timeout: new:` check asserts behaviour that did not exist before the streaming sender.
+    private static func checkStallTimeout(_ reporter: SelfTestReporter) {
+        print("--- stall-timeout: opted-in streaming, stall window and hard ceiling ---")
+        let stubbed = { stubSession() }
+
+        // (a) content and reasoning deltas accumulate; [DONE] ends the stream while the source is STILL
+        // OPEN. The script deliberately never closes after `[DONE]`, so an implementation that waits for
+        // the transport to close instead of acting on the marker cannot pass (the old script closed 20 ms
+        // after `[DONE]`, which is exactly why the defect slipped through).
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(reasoning: "think ").utf8)),
+                .init(delay: 0.02, data: Data(sseEvent(content: "Hello").utf8)),
+                .init(delay: 0.02, data: Data(sseEvent(content: " world").utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 4.0, data: nil), // never reached before the assertion; [DONE] must end the stream
+            ]))
+            let started = Date()
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []], timeout: 0.6),
+                               LocalStreamSender.sender(session: stubbed()))
+            let elapsed = Date().timeIntervalSince(started)
+            let fields = messageFields(out.data)
+            // No elapsed bound here: the first streamed session pays a one-time URLProtocol cold start.
+            // `out.error == nil` (not `.timedOut`) already proves the completion came from `[DONE]` and
+            // not from the stall window, since the source never closes.
+            reporter.record("stall-timeout: new: SSE content and reasoning deltas accumulate and [DONE] ends the stream",
+                            fields.content == "Hello world" && fields.reasoning == "think " && out.error == nil
+                                && !isTimedOut(out),
+                            "content=\(fields.content ?? "nil") reasoning=\(fields.reasoning ?? "nil") elapsed=\(String(format: "%.3f", elapsed))")
+        }
+
+        // (b) [DONE] then a source that stays open far past the stall window: the request must return the
+        // complete answer promptly (never `.timedOut`) instead of waiting for the connection to close.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "Complete").utf8)),
+                .init(delay: 0.05, data: Data(sseDone.utf8)),
+                .init(delay: 3.0, data: nil), // held open longer than the 1.0 s stall window, after [DONE]
+            ]))
+            let started = Date()
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []], timeout: 1.0),
+                               LocalStreamSender.sender(session: stubbed()))
+            let elapsed = Date().timeIntervalSince(started)
+            reporter.record("stall-timeout: new: [DONE] with the source left open past the stall window returns the full answer promptly",
+                            messageFields(out.data).content == "Complete" && out.error == nil && !isTimedOut(out)
+                                && elapsed < 0.8,
+                            "content=\(messageFields(out.data).content ?? "nil") error=\(String(describing: out.error)) elapsed=\(String(format: "%.3f", elapsed))")
+        }
+
+        // (c) EOF arrives after [DONE]: completion is delivered exactly once (a later
+        // `didCompleteWithError` must be a no-op) and it happens at [DONE], not at the EOF.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "once").utf8)),
+                .init(delay: 0.10, data: Data(sseDone.utf8)),
+                .init(delay: 0.80, data: nil), // the old "success" path: EOF after [DONE]
+            ]))
+            let out = sendCounting(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                                  "messages": []], timeout: 1.0),
+                                   LocalStreamSender.sender(session: stubbed()))
+            reporter.record("stall-timeout: new: [DONE] completes exactly once when EOF follows and never a second time",
+                            out.completions == 1 && messageFields(out.data).content == "once" && out.error == nil
+                                && out.firstElapsed < 0.7,
+                            "completions=\(out.completions) content=\(messageFields(out.data).content ?? "nil") firstElapsed=\(String(format: "%.3f", out.firstElapsed))")
+        }
+
+        // (d) the stall polling detects silence no later than window + window/4 + epsilon (short windows,
+        // no long sleeps): one token then quiet must fail `.timedOut` inside the bound.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let window: TimeInterval = 0.3
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "tick").utf8)),
+                .init(delay: 2.0, data: nil), // a backstop finish, long past the stall window
+            ]))
+            let started = Date()
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []], timeout: window),
+                               LocalStreamSender.sender(session: stubbed()))
+            let elapsed = Date().timeIntervalSince(started)
+            let bound = window + window / 4 + 0.2
+            reporter.record("stall-timeout: guard: stall polling detects silence no later than window + window/4 + epsilon",
+                            isTimedOut(out) && elapsed >= window * 0.5 && elapsed <= bound,
+                            "timedOut=\(isTimedOut(out)) elapsed=\(String(format: "%.3f", elapsed)) bound=\(String(format: "%.3f", bound))")
+        }
+
+        // guard: a stream that never sends [DONE] and closes normally still completes on EOF.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "eof").utf8)),
+                .init(delay: 0.05, data: Data(sseEvent(content: " answer").utf8)),
+                .init(delay: 0.05, data: nil),
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []], timeout: 1.0),
+                               LocalStreamSender.sender(session: stubbed()))
+            reporter.record("stall-timeout: new: a stream with no [DONE] that closes normally still completes on EOF",
+                            messageFields(out.data).content == "eof answer" && out.error == nil,
+                            "content=\(messageFields(out.data).content ?? "nil") error=\(String(describing: out.error))")
+        }
+
+        // (a) an event split across two network chunks still parses, and a keep-alive comment is ignored.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let first = "data: {\"choices\":[{\"delta\":{\"cont"
+            let second = "ent\":\"split\"}}]}\n\n"
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(first.utf8)),
+                .init(delay: 0.02, data: Data(second.utf8)),
+                .init(delay: 0.02, data: Data(": keep-alive\n\n".utf8)),
+                .init(delay: 0.02, data: Data(sseEvent(content: " together").utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []]), LocalStreamSender.sender(session: stubbed()))
+            reporter.record("stall-timeout: new: SSE events split across chunk boundaries parse and a keep-alive comment is ignored",
+                            messageFields(out.data).content == "split together" && out.error == nil,
+                            "content=\(messageFields(out.data).content ?? "nil")")
+        }
+
+        // (a) malformed JSON in one event never crashes; later content still arrives.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data("data: {not json}\n\n".utf8)),
+                .init(delay: 0.02, data: Data(sseEvent(content: "ok").utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []]), LocalStreamSender.sender(session: stubbed()))
+            reporter.record("stall-timeout: new: malformed JSON in one event does not crash and later content still arrives",
+                            messageFields(out.data).content == "ok" && out.error == nil,
+                            "content=\(messageFields(out.data).content ?? "nil") error=\(String(describing: out.error))")
+        }
+
+        // (b) the re-assembled JSON is the exact non-stream shape CleanupClient classifies to .ok(text).
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let usage: [String: Any] = ["prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5]
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "Clean text.", usage: usage).utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false,
+                                              "messages": []]), LocalStreamSender.sender(session: stubbed()))
+            let object = out.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            let message = (object?["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+            var classifiedOK = false
+            if case .content(let text) = CleanupClient.classifyChatResponse(
+                data: out.data, response: out.response, error: out.error, logPrefix: "stall", elapsed: 0) {
+                classifiedOK = text == "Clean text."
+            }
+            reporter.record("stall-timeout: new: re-assembled stream JSON feeds CleanupClient's classifier to .ok(text)",
+                            message?["role"] as? String == "assistant" && message?["content"] as? String == "Clean text."
+                                && object?["usage"] != nil && classifiedOK,
+                            "content=\(message?["content"] as? String ?? "nil") usage=\(object?["usage"] != nil)")
+        }
+
+        // (c) a slow stream longer than the fixed window succeeds when every gap is under the stall window.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let stall: TimeInterval = 0.5
+            var chunks: [LMStudioStreamStubProtocol.Chunk] = []
+            for index in 0..<6 {
+                chunks.append(.init(delay: index == 0 ? 0 : 0.15,
+                                    data: Data(sseEvent(content: "c\(index)").utf8)))
+            }
+            chunks.append(.init(delay: 0.15, data: Data(sseDone.utf8)))
+            chunks.append(.init(delay: 0.05, data: nil))
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: chunks))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false, "messages": []], timeout: stall),
+                               LocalStreamSender.sender(session: stubbed()))
+            reporter.record("stall-timeout: new: a slow stream longer than the fixed window with every gap under the stall window succeeds",
+                            messageFields(out.data).content == "c0c1c2c3c4c5" && out.error == nil,
+                            "content=\(messageFields(out.data).content ?? "nil") error=\(String(describing: out.error))")
+        }
+
+        // (d) a stream silent past the stall window fails .timedOut.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 2.0, data: nil), // a backstop finish, long past the stall window
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false, "messages": []],
+                                       timeout: 0.3),
+                               LocalStreamSender.sender(session: stubbed()))
+            let streamedBody = LMStudioStreamStubProtocol.snapshot().bodies.first?["stream"] as? Bool
+            reporter.record("stall-timeout: new: a stream silent longer than the stall window fails .timedOut",
+                            isTimedOut(out) && out.data == nil && streamedBody == true,
+                            "error=\(String(describing: out.error)) data=\(out.data?.count ?? -1) stream=\(String(describing: streamedBody))")
+        }
+
+        // (e) reasoning-only deltas reset the stall clock; a following content delta succeeds.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(reasoning: "r0").utf8)),
+                .init(delay: 0.15, data: Data(sseEvent(reasoning: "r1").utf8)),
+                .init(delay: 0.15, data: Data(sseEvent(reasoning: "r2").utf8)),
+                .init(delay: 0.15, data: Data(sseEvent(content: "answer").utf8)),
+                .init(delay: 0.15, data: Data(sseDone.utf8)),
+                .init(delay: 0.10, data: nil),
+            ]))
+            let out = sendSync(optedIn(body: ["model": "stall-fixture:7b", "stream": false, "messages": []],
+                                       timeout: 0.5),
+                               LocalStreamSender.sender(session: stubbed()))
+            let fields = messageFields(out.data)
+            reporter.record("stall-timeout: new: reasoning-only deltas reset the stall clock and a later content delta succeeds",
+                            fields.content == "answer" && fields.reasoning == "r0r1r2" && out.error == nil,
+                            "content=\(fields.content ?? "nil") reasoning=\(fields.reasoning ?? "nil")")
+        }
+
+        // (f) the hard ceiling stops an endless trickle (injected clock; no 45 s wait).
+        do {
+            let policy = LocalStreamStallPolicy(stallWindow: 12)
+            let start = Date()
+            var clock = LocalStreamProgressClock(policy: policy, startedAt: start)
+            var now = start
+            for _ in 0..<48 {
+                now = now.addingTimeInterval(1)
+                clock.recordProgress(at: now)
+            }
+            let verdict = clock.verdict(at: start.addingTimeInterval(policy.hardCeiling))
+            let classified = isTimedOut((data: nil, response: nil,
+                                        error: LocalStreamStallPolicy.timedOutError()))
+            reporter.record("stall-timeout: new: the hard ceiling stops an endless trickle with .timedOut",
+                            policy.hardCeiling == 48 && verdict == .ceiling && classified,
+                            "ceiling=\(policy.hardCeiling) verdict=\(String(describing: verdict))")
+        }
+
+        // (g) an ordinary request keeps today's untouched dataTask path; an opted-in one streams.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let session = stubbed()
+            let sender = LocalStreamSender.sender(session: session)
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "application/json", chunks: [
+                .init(delay: 0, data: plainMessageJSON("plain answer")),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let plain = LMStudioReasoningEffort.request(
+                ["model": "stall-fixture:7b", "stream": false, "messages": []],
+                endpoint: Settings.cleanupEndpoint, timeout: 2, progressTimeout: false)!
+            let plainOut = sendSync(plain, sender)
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "streamed answer").utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let opted = optedIn(body: ["model": "stall-fixture:7b", "stream": false, "messages": []])
+            let optedOut = sendSync(opted, sender)
+            let snapshot = LMStudioStreamStubProtocol.snapshot()
+            let plainStream = snapshot.bodies.first?["stream"] as? Bool
+            let optedStream = snapshot.bodies.count > 1 ? snapshot.bodies[1]["stream"] as? Bool : nil
+            reporter.record("stall-timeout: new: a non-opted-in request takes the untouched dataTask path",
+                            messageFields(plainOut.data).content == "plain answer" && plainStream == false
+                                && messageFields(optedOut.data).content == "streamed answer" && optedStream == true,
+                            "plainStream=\(String(describing: plainStream)) optedStream=\(String(describing: optedStream))")
+        }
+
+        // (h) a 400 error body passes through unchanged so the retry-without-field gets the good stream.
+        do {
+            LMStudioStreamStubProtocol.reset()
+            let retryModel = "stall-timeout-retry:7b"
+            LMStudioStreamStubProtocol.queue(.init(status: 400, contentType: "application/json", chunks: [
+                .init(delay: 0, data: Data("{\"error\":\"unknown field\"}".utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            LMStudioStreamStubProtocol.queue(.init(status: 200, contentType: "text/event-stream", chunks: [
+                .init(delay: 0, data: Data(sseEvent(content: "retry answer").utf8)),
+                .init(delay: 0.02, data: Data(sseDone.utf8)),
+                .init(delay: 0.02, data: nil),
+            ]))
+            let transport = stallTransport(session: stubbed())
+            let result = complete(CleanupClient.localAdapter(surface: .cleanup, transport: transport),
+                                  request(LLMProviderBundle.local(retryModel), route: .cleanupL1,
+                                          system: "fixture system prompt", user: "unused"))
+            let snapshot = LMStudioStreamStubProtocol.snapshot()
+            reporter.record("stall-timeout: new: a 400 error body passes through unchanged so retry-without-reasoning_effort returns the good stream",
+                            okText(result) == "retry answer" && snapshot.requests.count == 2
+                                && snapshot.bodies.first?["reasoning_effort"] as? String == "none"
+                                && snapshot.bodies.count > 1 && snapshot.bodies[1]["reasoning_effort"] == nil,
+                            "result=\(result) calls=\(snapshot.requests.count)")
+        }
+
+        // guard: the tail-check judge resolves LM Studio but must stay on the untouched non-streaming path.
+        do {
+            var caught: URLRequest?
+            let transport = LocalChatTransport(
+                sendLMStudio: { req, completion in
+                    caught = req
+                    completion(plainMessageJSON("{\"tail\":\"clean\"}"),
+                               req.url.flatMap {
+                                   HTTPURLResponse(url: $0, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)
+                               }, nil)
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+            let judge = LocalRouteTailJudge(routeResolver: { .pinned(.local("stall-guard-judge:7b")) },
+                                           transport: transport)
+            let done = DispatchSemaphore(value: 0)
+            judge.judge(context: "fixture context", tail: "fixture tail", timeoutMs: 400) { _ in done.signal() }
+            _ = done.wait(timeout: .now() + 5)
+            let header = caught?.value(forHTTPHeaderField: LocalStreamSender.progressHeader)
+            let streamed = caught?.httpBody.flatMap {
+                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+            }?["stream"] as? Bool
+            reporter.record("stall-timeout: guard: the tail-check judge request is not opted in (no progress header, stream false)",
+                            caught != nil && header == nil && streamed == false,
+                            "header=\(header ?? "absent") stream=\(String(describing: streamed))")
+        }
+    }
+
+    /// An opted-in request body: a header-bearing `LMStudioReasoningEffort.request` with the default
+    /// `stream: false` the clients still build (the sender sets the stream copy itself).
+    private static func optedIn(body: [String: Any], timeout: TimeInterval = 2) -> URLRequest {
+        LMStudioReasoningEffort.request(body, endpoint: Settings.cleanupEndpoint,
+                                        timeout: timeout, progressTimeout: true)!
+    }
+
+    /// The transport shape the stall checks need: the real streaming sender over a scripted session,
+    /// every other seam inert.
+    private static func stallTransport(session: URLSession) -> LocalChatTransport {
+        LocalChatTransport(
+            sendLMStudio: LocalStreamSender.sender(session: session),
+            prepareLMStudio: { _, _ in (.ready, false) },
+            unloadLMStudio: { _ in },
+            prepareOllama: { _, context, _ in (.ready, context, false) },
+            chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+            unloadOllama: { _ in },
+            keepAliveSeconds: { keepAlive },
+            beginRequest: { _ in },
+            endRequest: { _ in })
+    }
+
+    private static func stubSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LMStudioStreamStubProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    @discardableResult
+    private static func sendSync(_ request: URLRequest,
+                                 _ sender: (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void)
+        -> (data: Data?, response: URLResponse?, error: Error?) {
+        let done = DispatchSemaphore(value: 0)
+        var data: Data?
+        var response: URLResponse?
+        var error: Error?
+        sender(request) { d, r, e in
+            data = d
+            response = r
+            error = e
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 10)
+        return (data, response, error)
+    }
+
+    /// Like `sendSync`, but counts every completion call and records how soon the first one arrived, so a
+    /// second `didCompleteWithError` after `[DONE]` is visible. The settle sleep (well under 2 s) lets an
+    /// incorrect second completion arrive before the count is read.
+    @discardableResult
+    private static func sendCounting(_ request: URLRequest,
+                                     _ sender: (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void,
+                                     settle: TimeInterval = 0.3)
+        -> (data: Data?, response: URLResponse?, error: Error?, completions: Int, firstElapsed: TimeInterval) {
+        let started = Date()
+        let done = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var data: Data?
+        var response: URLResponse?
+        var error: Error?
+        var completions = 0
+        var firstElapsed = TimeInterval.infinity
+        sender(request) { d, r, e in
+            lock.lock()
+            completions += 1
+            let first = completions == 1
+            if first {
+                data = d
+                response = r
+                error = e
+                firstElapsed = Date().timeIntervalSince(started)
+            }
+            lock.unlock()
+            if first { done.signal() }
+        }
+        _ = done.wait(timeout: .now() + 5)
+        Thread.sleep(forTimeInterval: settle)
+        lock.lock(); defer { lock.unlock() }
+        return (data, response, error, completions, firstElapsed)
+    }
+
+    private static func messageFields(_ data: Data?) -> (content: String?, reasoning: String?) {
+        guard let data,
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let message = (object["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+        else { return (nil, nil) }
+        return (message["content"] as? String, message["reasoning_content"] as? String)
+    }
+
+    private static func isTimedOut(_ out: (data: Data?, response: URLResponse?, error: Error?)) -> Bool {
+        if case .failure(.timedOut) = CleanupClient.classifyChatResponse(
+            data: out.data, response: out.response, error: out.error, logPrefix: "stall", elapsed: 0) {
+            return true
+        }
+        return false
+    }
+
+    private static let sseDone = "data: [DONE]\n\n"
+
+    private static func sseEvent(content: String? = nil, reasoning: String? = nil,
+                                 usage: [String: Any]? = nil) -> String {
+        var delta: [String: Any] = [:]
+        if let content { delta["content"] = content }
+        if let reasoning { delta["reasoning_content"] = reasoning }
+        var object: [String: Any] = ["choices": [["index": 0, "delta": delta]]]
+        if let usage { object["usage"] = usage }
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+        return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+    }
+
+    private static func plainMessageJSON(_ content: String) -> Data {
+        let message: [String: Any] = ["role": "assistant", "content": content]
+        let object: [String: Any] = ["choices": [["index": 0, "message": message, "finish_reason": "stop"]]]
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+    }
+
+    /// A scripted URLProtocol that feeds SSE chunks on a schedule with no socket. Non-2xx replies carry
+    /// a raw JSON error body, exactly as LM Studio's 400 does.
+    private final class LMStudioStreamStubProtocol: URLProtocol {
+        struct Chunk {
+            let delay: TimeInterval
+            let data: Data? // nil finishes loading
+        }
+        struct Reply {
+            let status: Int
+            let contentType: String
+            let chunks: [Chunk]
+        }
+
+        private static let lock = NSLock()
+        private static var replies: [Reply] = []
+        private static var recordedRequests: [URLRequest] = []
+        private static var recordedBodies: [[String: Any]] = []
+
+        private var pendingChunks: [Chunk] = []
+        private let deliveryQueue = DispatchQueue(label: "viddydictate.stall-stub.delivery")
+
+        static func reset() {
+            lock.lock(); defer { lock.unlock() }
+            replies = []
+            recordedRequests = []
+            recordedBodies = []
+        }
+
+        static func queue(_ reply: Reply) {
+            lock.lock(); defer { lock.unlock() }
+            replies.append(reply)
+        }
+
+        static func snapshot() -> (requests: [URLRequest], bodies: [[String: Any]]) {
+            lock.lock(); defer { lock.unlock() }
+            return (recordedRequests, recordedBodies)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            LMStudioStreamStubProtocol.lock.lock()
+            LMStudioStreamStubProtocol.recordedRequests.append(request)
+            if let body = LMStudioStreamStubProtocol.body(of: request) {
+                LMStudioStreamStubProtocol.recordedBodies.append(body)
+            }
+            let reply = LMStudioStreamStubProtocol.replies.isEmpty
+                ? nil : LMStudioStreamStubProtocol.replies.removeFirst()
+            LMStudioStreamStubProtocol.lock.unlock()
+
+            guard let reply else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            let url = request.url ?? URL(string: "http://127.0.0.1:1234/v1/chat/completions")!
+            let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",
+                                           headerFields: ["Content-Type": reply.contentType])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            pendingChunks = reply.chunks
+            deliver(index: 0)
+        }
+
+        /// Deliver one chunk at a time, scheduling the next only after the previous landed, so even a
+        /// 20 ms gap cannot reorder chunks on a concurrent queue.
+        private func deliver(index: Int) {
+            guard index < pendingChunks.count else { return }
+            let chunk = pendingChunks[index]
+            deliveryQueue.asyncAfter(deadline: .now() + chunk.delay) { [weak self] in
+                guard let self else { return }
+                if let data = chunk.data {
+                    self.client?.urlProtocol(self, didLoad: data)
+                    self.deliver(index: index + 1)
+                } else {
+                    self.client?.urlProtocolDidFinishLoading(self)
+                }
+            }
+        }
+
+        override func stopLoading() {}
+
+        /// URLSession hands a custom protocol the body as a stream more often than as `httpBody`.
+        private static func body(of request: URLRequest) -> [String: Any]? {
+            if let data = request.httpBody {
+                return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            }
+            guard let stream = request.httpBodyStream else { return nil }
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         }
     }
 
