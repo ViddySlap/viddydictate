@@ -33,11 +33,28 @@ enum FirstRunSetupFlow {
     /// What choosing `choice` installs. Recommended and Advanced both default to today's picker
     /// selection (Advanced then lets the user change it on the picker page itself); Dictation only skips
     /// every local-model app. No branch ever reaches a Codex component.
+    ///
+    /// `localApp` is the welcome card's "Local models app" choice and is honored by `.recommended` alone:
+    /// `.lmStudio` keeps today's plan exactly (the default, so every pre-existing caller is unchanged),
+    /// while `.ollama` asks the picker's own `selecting(.ollama, ...)` for the Ollama rows and their
+    /// model pulls. `.advanced` and `.dictationOnly` ignore it, as their own screens own that choice.
     static func plan(for choice: SetupChoice, facts: ComponentPicker.MachineFacts,
-                     environment: ComponentPicker.Environment) -> ComponentPicker.InstallPlan {
+                     environment: ComponentPicker.Environment,
+                     localApp: LocalBackendID = .lmStudio) -> ComponentPicker.InstallPlan {
         let selection: ComponentPicker.Selection
         switch choice {
-        case .recommended, .advanced:
+        case .recommended:
+            // The welcome card's selector is honored here and ONLY here. Ollama asks the picker for its
+            // own Ollama selection (`selecting(.ollama, ...)`, the same call its Ollama radio makes), so
+            // the two Ollama rows and their tags come from the picker rather than a hand-built list. LM
+            // Studio (the default) keeps the historical `defaultSelection` path byte for byte.
+            if localApp == .ollama {
+                selection = ComponentPicker.selecting(.ollama, from: ComponentPicker.Selection(),
+                                                      facts: facts, environment: environment)
+            } else {
+                selection = ComponentPicker.defaultSelection(facts: facts, environment: environment)
+            }
+        case .advanced:
             selection = ComponentPicker.defaultSelection(facts: facts, environment: environment)
         case .dictationOnly:
             selection = ComponentPicker.selecting(.skip, from: ComponentPicker.Selection(),
