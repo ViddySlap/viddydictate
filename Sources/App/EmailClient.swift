@@ -123,7 +123,7 @@ enum EmailClient {
         let t0 = Date()
         LMStudioReasoningEffort.send(
             baseBody: body, modelID: model, endpoint: endpoint, timeout: timeout,
-            transport: transport
+            transport: transport, progressTimeout: true
         ) { data, response, error in
             finish(selection, data: data, response: response, error: error, startedAt: t0,
                    completion: completion)

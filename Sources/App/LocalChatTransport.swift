@@ -65,9 +65,9 @@ struct LocalChatTransport {
     /// `live` with the idle window overridden, for the services gate that watches a model unload on its own.
     static func live(keepAliveOverride: Int?) -> LocalChatTransport {
         LocalChatTransport(
-            sendLMStudio: { request, completion in
-                URLSession.shared.dataTask(with: request, completionHandler: completion).resume()
-            },
+            // The one LM Studio send path: an ordinary request is today's `dataTask`; one that opted in
+            // with `LocalStreamSender.progressHeader` gets the stall-based streaming sender.
+            sendLMStudio: LocalStreamSender.sender(),
             prepareLMStudio: { model, ttl in
                 // Exactly `ensureReady(model, ttlOverrideSeconds: ttl)`, which is this call minus `coldLoaded`.
                 let prepared = ModelManager.shared.ensureReadyForChat(
@@ -184,12 +184,18 @@ enum LMStudioReasoningEffort {
         return true
     }
 
-    /// Build one JSON `POST` for `body` (nil when it cannot be encoded).
-    static func request(_ body: [String: Any], endpoint: URL, timeout: TimeInterval) -> URLRequest? {
+    /// Build one JSON `POST` for `body` (nil when it cannot be encoded). `progressTimeout` opts the
+    /// request into the streaming sender (a header only, default off), so every direct `sendLMStudio`
+    /// caller and the tail-check judge keep today's non-streaming bytes.
+    static func request(_ body: [String: Any], endpoint: URL, timeout: TimeInterval,
+                        progressTimeout: Bool = false) -> URLRequest? {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.timeoutInterval = timeout
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if progressTimeout {
+            req.setValue("1", forHTTPHeaderField: LocalStreamSender.progressHeader)
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         req.httpBody = data
         return req
@@ -204,11 +210,13 @@ enum LMStudioReasoningEffort {
         endpoint: URL,
         timeout: TimeInterval,
         transport: LocalChatTransport,
+        progressTimeout: Bool = false,
         completion: @escaping (Data?, URLResponse?, Error?) -> Void
     ) {
         let alreadyRejected = isRejected(modelID)
         let outbound = alreadyRejected ? baseBody : body(baseBody, modelID: modelID)
-        guard let outboundRequest = request(outbound, endpoint: endpoint, timeout: timeout) else {
+        guard let outboundRequest = request(outbound, endpoint: endpoint, timeout: timeout,
+                                            progressTimeout: progressTimeout) else {
             completion(nil, nil, encodeError())
             return
         }
@@ -218,7 +226,9 @@ enum LMStudioReasoningEffort {
                 return
             }
             rememberRejected(modelID)
-            guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout) else {
+            // The retry stays opted-in: it is the same cleanup/email request, not the tail judge.
+            guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout,
+                                      progressTimeout: progressTimeout) else {
                 completion(nil, nil, encodeError())
                 return
             }

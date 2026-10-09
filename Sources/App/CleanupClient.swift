@@ -319,7 +319,7 @@ enum CleanupClient {
         let t0 = Date()
         LMStudioReasoningEffort.send(
             baseBody: body, modelID: model, endpoint: endpoint, timeout: timeout,
-            transport: transport
+            transport: transport, progressTimeout: true
         ) { data, response, error in
             finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
                           completion: completion)
