@@ -210,6 +210,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case installerReworkSelftest = "--installer-rework-selftest"
     // vdinga G1's render gate, NOT protected: every installer screen that exists, light and dark.
     case installerReworkRender = "--installer-rework-render"
+    // chain/stt-nonfinite-20261010: the daemon's JSON-safe encoding, the app's tolerant
+    // `parseTranscribeBody`/metric default, and the retained-take recovery cap. Appended, so every
+    // earlier flag keeps its first-wins dispatch position.
+    case sttNonFiniteSelftest = "--stt-nonfinite-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

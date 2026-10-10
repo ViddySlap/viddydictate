@@ -23,6 +23,12 @@ final class RetainedTakeRecovery {
     private let transcribe: Transcribe
     private let schedule: Schedule
     private let progress: Progress
+    /// Give-up cap for consecutive transcribe failures against a daemon that reported ready. A
+    /// warm-up error (`model loading`) and a not-ready pass never count. The count is scoped to ONE
+    /// `recover(...)` call -- threaded through `attempt` as a parameter -- so it starts fresh for
+    /// every take and nothing survives a capped finish, a stale/cancelled recovery, or a success.
+    /// (A field on this long-lived instance leaked the cap from one take into the next.)
+    let maxTranscribeFailures: Int
 
     init(
         load: @escaping Load = { id, done in
@@ -39,13 +45,15 @@ final class RetainedTakeRecovery {
         schedule: @escaping Schedule = { work in
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: work)
         },
-        progress: @escaping Progress = { _, _ in }
+        progress: @escaping Progress = { _, _ in },
+        maxTranscribeFailures: Int = 5
     ) {
         self.load = load
         self.ensureReady = ensureReady
         self.transcribe = transcribe
         self.schedule = schedule
         self.progress = progress
+        self.maxTranscribeFailures = maxTranscribeFailures
     }
 
     func recover(takeID: UUID, retentionWasEnabled: Bool,
@@ -65,12 +73,12 @@ final class RetainedTakeRecovery {
                             completion: completion)
                 return
             }
-            self.attempt(wav: wav, takeID: takeID, stillCurrent: stillCurrent,
-                         completion: completion)
+            self.attempt(wav: wav, takeID: takeID, readyFailures: 0,
+                         stillCurrent: stillCurrent, completion: completion)
         }
     }
 
-    private func attempt(wav: Data, takeID: UUID,
+    private func attempt(wav: Data, takeID: UUID, readyFailures: Int,
                          stillCurrent: @escaping () -> Bool,
                          completion: @escaping (RetainedTakeRecoveryResult) -> Void) {
         guard stillCurrent() else { progress(takeID, false); return }
@@ -80,8 +88,8 @@ final class RetainedTakeRecovery {
             guard ready else {
                 Log.write("stt.recovery take=\(takeID.uuidString) daemon not ready; retry scheduled")
                 self.schedule {
-                    self.attempt(wav: wav, takeID: takeID, stillCurrent: stillCurrent,
-                                 completion: completion)
+                    self.attempt(wav: wav, takeID: takeID, readyFailures: readyFailures,
+                                 stillCurrent: stillCurrent, completion: completion)
                 }
                 return
             }
@@ -93,11 +101,37 @@ final class RetainedTakeRecovery {
                     self.finish(takeID: takeID, result: .recovered(text), completion: completion)
                     return
                 }
+                // Still warming the model: the clip is fine, the engine is not. Retry unlimited and
+                // never count it against the give-up cap.
+                if (error ?? "").lowercased().contains("model loading") {
+                    Log.write("stt.recovery take=\(takeID.uuidString) still warming "
+                        + "error=\(error ?? "none"); retry scheduled")
+                    self.schedule {
+                        self.attempt(wav: wav, takeID: takeID, readyFailures: readyFailures,
+                                     stillCurrent: stillCurrent, completion: completion)
+                    }
+                    return
+                }
+                // The daemon said it was ready and still could not read this clip. Retrying an
+                // unreadable take forever is the endless spinner; give up after a bounded run. The
+                // retained WAV is deliberately left on disk for History playback and a manual retry.
+                // The count is carried through this attempt chain, never stored, so it belongs to
+                // this one recovery and dies with it.
+                let newReadyFailures = readyFailures + 1
+                if newReadyFailures >= self.maxTranscribeFailures {
+                    Log.write("stt.recovery take=\(takeID.uuidString) gave up after "
+                        + "\(newReadyFailures) non-warm-up failures; retained clip kept")
+                    self.finish(
+                        takeID: takeID,
+                        result: .unavailable("the speech engine could not read this recording"),
+                        completion: completion)
+                    return
+                }
                 Log.write("stt.recovery take=\(takeID.uuidString) retry unavailable "
                     + "error=\(error ?? "none"); retry scheduled")
                 self.schedule {
-                    self.attempt(wav: wav, takeID: takeID, stillCurrent: stillCurrent,
-                                 completion: completion)
+                    self.attempt(wav: wav, takeID: takeID, readyFailures: newReadyFailures,
+                                 stillCurrent: stillCurrent, completion: completion)
                 }
             }
         }

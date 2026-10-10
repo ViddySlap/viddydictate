@@ -139,7 +139,7 @@ enum DaemonClient {
         URLSession.shared.dataTask(with: req) { data, _, error in
             if let error = error { completion(nil, error.localizedDescription, []); return }
             guard let data = data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                  let obj = parseTranscribeBody(data) else {
                 completion(nil, "bad response", []); return
             }
             if let t = obj["transcript"] as? String {
@@ -160,6 +160,19 @@ enum DaemonClient {
         }.resume()
     }
 
+    /// Parse a `/transcribe` response body into a dictionary, tolerating the non-JSON
+    /// `NaN`/`Infinity`/`-Infinity` tokens Python's `json.dumps` can emit for a non-finite segment
+    /// metric. The first parse is the exact historical one; when it fails, a second parse with
+    /// `.json5Allowed` accepts those tokens (proven on this macOS before this was written). A body
+    /// that is still unparseable -- or is a JSON array, not an object -- returns nil, which
+    /// `transcribe` reports as the unchanged `bad response`.
+    static func parseTranscribeBody(_ data: Data) -> [String: Any]? {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return object
+        }
+        return (try? JSONSerialization.jsonObject(with: data, options: .json5Allowed)) as? [String: Any]
+    }
+
     /// Parse the `/transcribe` response's `segments` field (I1's additive per-segment diagnostics --
     /// `viddydictate_whisperd.py`'s `_clean_segments`, proven by `scripts/test-tailcheck-diagnostics.py`)
     /// into `[TailCheck.Segment]`.
@@ -174,7 +187,10 @@ enum DaemonClient {
     static func parseSegments(from responseObject: [String: Any]) -> [TailCheck.Segment] {
         guard let rawSegments = responseObject["segments"] as? [[String: Any]] else { return [] }
         func metric(_ dict: [String: Any], _ key: String) -> Double {
-            (dict[key] as? Double) ?? TailCheck.missingSegmentMetricDefault
+            guard let value = dict[key] as? Double, value.isFinite else {
+                return TailCheck.missingSegmentMetricDefault
+            }
+            return value
         }
         return rawSegments.compactMap { entry in
             guard let start = entry["start"] as? Double,

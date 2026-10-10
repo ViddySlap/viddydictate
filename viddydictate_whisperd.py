@@ -57,6 +57,7 @@ optional future extension.
 import base64
 import http.server
 import json
+import math
 import os
 import re
 import socketserver
@@ -135,6 +136,32 @@ SNAPSHOT_WEIGHTS = ("weights.safetensors", "weights.npz")
 
 def _log(msg: str) -> None:
     print(f"[viddydictate-whisperd] {msg}", flush=True)
+
+
+def _json_safe(obj):
+    """Recursively replace non-finite floats (`nan`, `inf`, `-inf`) with None.
+
+    `json.dumps`'s default `allow_nan=True` writes `NaN`/`Infinity`/`-Infinity`, which are not JSON;
+    Apple's `JSONSerialization` then rejects the WHOLE success body and the app logs `bad response`.
+    A non-finite per-segment metric is the only way one reaches the wire here. Every finite value,
+    key and order is left exactly as it was.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {key: _json_safe(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(value) for value in obj]
+    return obj
+
+
+def _encode_json(obj) -> bytes:
+    """The daemon's only wire encoder: scrub non-finite floats, then refuse them (`allow_nan=False`).
+
+    `allow_nan=False` is the belt to `_json_safe`'s braces: if a non-finite value ever bypasses the
+    helper, `json.dumps` raises instead of silently emitting an unreadable token.
+    """
+    return json.dumps(_json_safe(obj), allow_nan=False).encode("utf-8")
 
 
 def _set_phase(name: str, detail: Optional[str] = None) -> None:
@@ -549,7 +576,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _send(self, code: int, obj: dict) -> None:
-        body = json.dumps(obj).encode("utf-8")
+        body = _encode_json(obj)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
