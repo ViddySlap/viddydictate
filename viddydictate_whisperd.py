@@ -69,9 +69,67 @@ from typing import Optional
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("VIDDYDICTATE_WHISPER_PORT", "8765"))
-MODEL = os.environ.get("VIDDYDICTATE_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
 IDLE_S = float(os.environ.get("VIDDYDICTATE_WHISPER_IDLE_S", "1800"))
 LANG = os.environ.get("VIDDYDICTATE_WHISPER_LANG") or None
+
+# The Whisper repos this daemon will run. Matching this hard-coded list is what stops a stale,
+# hand-edited, or hostile `whisper-model` file from steering the daemon at an arbitrary Hub repo.
+# Ordered default-first. Medium/Small are deliberately NOT offered yet (part 3 may add them).
+OFFERED_MODELS = (
+    "mlx-community/whisper-large-v3-turbo",
+    "mlx-community/whisper-large-v3-mlx",
+    "mlx-community/whisper-large-v2-mlx",
+    "mlx-community/whisper-large-mlx",
+)
+DEFAULT_MODEL = OFFERED_MODELS[0]
+_MODEL_CHOICE_NAME = "whisper-model"
+_MODEL_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def _model_choice_file() -> Optional[str]:
+    """<Application Support>/ViddyDictate/whisper-model, which is the directory this daemon is
+    installed into. None when loaded from a string (a test harness), matching _app_model_cache_dirs."""
+    here = globals().get("__file__")
+    if not isinstance(here, str) or not os.path.isabs(here):
+        return None
+    return os.path.join(os.path.dirname(here), _MODEL_CHOICE_NAME)
+
+
+def _choose_model(environ=None, choice_path=None) -> str:
+    """The model repo to run, decided once at start.
+
+    Precedence is the contract: an explicit VIDDYDICTATE_WHISPER_MODEL always wins, unchanged (it
+    may name a local directory, so it is not validated here). Otherwise the app's one-line
+    `whisper-model` file is used only when its first line is a syntactically valid repo id AND one
+    of the offered repos. Anything else falls back to the default turbo repo, so a stale, malformed,
+    or unvetted file never points the daemon at an arbitrary model. PURE: only the mapping and the
+    file path it is given are read; imports nothing and touches no network."""
+    env = os.environ if environ is None else environ
+    # Key PRESENCE, not truthiness: the base daemon is `os.environ.get(key, default)`, so an
+    # explicitly present value wins even when it is the empty string, and the choice file is then
+    # ignored. `if env_model:` would let an empty value fall through to the file and change that.
+    if "VIDDYDICTATE_WHISPER_MODEL" in env:
+        return env["VIDDYDICTATE_WHISPER_MODEL"]
+    path = _model_choice_file() if choice_path is None else choice_path
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                line = f.readline()
+        except OSError:
+            line = ""
+        # Remove ONLY the line ending (a trailing \r\n, \n, or \r); spaces and tabs are content and
+        # must make the first line fail the exact repo-id pattern, so a space-padded offered repo
+        # falls back to the default. `.strip()` would wrongly accept it.
+        if line.endswith("\r\n"):
+            line = line[:-2]
+        elif line.endswith("\n") or line.endswith("\r"):
+            line = line[:-1]
+        if _MODEL_REPO_RE.match(line) and line in OFFERED_MODELS:
+            return line
+    return DEFAULT_MODEL
+
+
+MODEL = _choose_model()
 
 
 def _envbool(name: str, default: bool) -> bool:
