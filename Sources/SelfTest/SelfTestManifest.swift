@@ -562,6 +562,13 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         return InstallerReworkRender.run(outDir: arguments[i + 1]) ? 0 : 1
     },
+    // chain/stt-nonfinite-20261010: non-finite STT metrics must not strand the spinner. Synthetic
+    // /transcribe bodies exercise `parseTranscribeBody`/`parseSegments`, and injected recovery
+    // closures exercise `RetainedTakeRecovery.maxTranscribeFailures`. Deterministic: no daemon, no
+    // real recordings, no AppKit. Reached by `--stt-nonfinite-selftest`; wired into verify.sh.
+    .sttNonFiniteSelftest: .init(tier: .deterministic) { _ in
+        SttNonFiniteSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

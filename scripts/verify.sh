@@ -442,6 +442,9 @@ tier_deterministic() {
     run_gate deterministic "Whisper daemon offline-first warm and phase health (socket-guarded, mutants)" \
         python3 "$ROOT/scripts/test-whisperd-offline-warm.py" || true
 
+    run_gate deterministic "Whisper daemon JSON-safe encoding (non-finite metrics -> null, strict parse)" \
+        python3 "$ROOT/scripts/test-whisperd-json-safe.py" || true
+
     run_gate deterministic "TailCheck Swift-vs-Python differential fuzz (2000 synthetic Unicode cases, seed 1337)" \
         python3 "$ROOT/Tools/tailcheck/differential_fuzz.py" || true
 
@@ -470,6 +473,9 @@ tier_deterministic() {
         run_gate deterministic "custom-mode scratch selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --custommode-selftest || true
+        run_gate deterministic "non-finite STT body parsing and retained-recovery cap selftest" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --stt-nonfinite-selftest || true
         run_gate deterministic "sticky skill model/store/registry scratch selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --sticky-skill-selftest || true
