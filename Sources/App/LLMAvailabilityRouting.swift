@@ -1,34 +1,32 @@
 import Foundation
 
-/// A local-model substitution that keeps a route useful without hiding that the preferred model was not
-/// the one that ran. The identifiers come from route settings and the local apps' installed catalogs, never
-/// from dictated text or provider output.
+/// A local-model substitution in the OTHER local app (spec D2): the pinned app was not answering or
+/// nothing installed in it fit, so the route ran in the other one. The message says which app was
+/// skipped and why. The identifiers come from route settings and the local apps' installed catalogs,
+/// never from dictated text or provider output.
 ///
-/// `crossing` is set only when the substitute runs in the OTHER local app (spec D2). The message then says
-/// which app was skipped and why instead of offering an install, because the preferred model may well be
-/// installed; its app was down or it did not fit. Nil keeps every same-app substitution byte-identical.
+/// This is only the honest crossing notice. The staff-pick "Install …" nudge that used to accompany a
+/// same-app substitution was removed with the offer that carried it: a same-app substitution now runs
+/// with no offer at all, so no crossing-less offer can exist.
 struct LLMRouteUpgradeOffer: Equatable {
     let preferredModelID: String
     let runningModelID: String
-    let crossing: LocalBackendCrossing?
+    let crossing: LocalBackendCrossing
 
-    init(preferredModelID: String, runningModelID: String, crossing: LocalBackendCrossing? = nil) {
+    init(preferredModelID: String, runningModelID: String, crossing: LocalBackendCrossing) {
         self.preferredModelID = preferredModelID
         self.runningModelID = runningModelID
         self.crossing = crossing
     }
 
     var message: String {
-        if let crossing {
-            let opening = crossing.cause.clause(pinned: crossing.from, sentenceStart: true)
-            return "\(opening), so this ran on \(runningModelID) in \(crossing.to.displayName)."
-        }
-        return "Running on \(runningModelID). Install \(preferredModelID) for the preferred local model."
+        let opening = crossing.cause.clause(pinned: crossing.from, sentenceStart: true)
+        return "\(opening), so this ran on \(runningModelID) in \(crossing.to.displayName)."
     }
 
     var logToken: String {
-        let crossed = crossing.map { " crossed=\($0.from.rawValue)>\($0.to.rawValue)" } ?? ""
-        return "preferred=\(preferredModelID) running=\(runningModelID)\(crossed)"
+        "preferred=\(preferredModelID) running=\(runningModelID) "
+            + "crossed=\(crossing.from.rawValue)>\(crossing.to.rawValue)"
     }
 }
 
@@ -262,7 +260,8 @@ enum LLMAvailabilityRouting {
 
         /// Resolve the configured Local arm against the measured installed catalog, preferring the
         /// configured model only when this machine can actually hold it. When it cannot, the largest
-        /// installed model that DOES fit runs instead; the substitution still carries the upgrade offer.
+        /// installed model that DOES fit runs instead; the substitution is still reported as degraded but
+        /// carries no offer (the staff-pick install nudge was removed).
         /// `localCapacity` is injected (never read here) so this stays a pure policy function.
         ///
         /// A Local pin is `(app, model)`: the configured bundle's `resolvedLocalBackend` and its id, and
@@ -276,7 +275,8 @@ enum LLMAvailabilityRouting {
         /// ordinary first-attempt behavior byte-for-byte.
         func localCandidate(
             excluding exclusion: LLMLocalRouteFailure? = nil
-        ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?, crossing: LocalBackendCrossing?)? {
+        ) -> (bundle: LLMProviderBundle, offer: LLMRouteUpgradeOffer?,
+              crossing: LocalBackendCrossing?, substituted: Bool)? {
             guard let configured = bundle(.local) else { return nil }
             guard let localModels, !localModels.isEmpty else { return nil }
 
@@ -297,14 +297,10 @@ enum LLMAvailabilityRouting {
             if !excluded(pinnedRef),
                localModels.contains(where: { $0.ref == pinnedRef }),
                fits(pinnedRef) {
-                return (configured, nil, nil)
+                return (configured, nil, nil, false)
             }
             if let replacement = largestFitting(in: pinnedRef.backend) {
-                return (
-                    .local(ref: replacement.ref),
-                    LLMRouteUpgradeOffer(
-                        preferredModelID: configured.modelID, runningModelID: replacement.modelID),
-                    nil)
+                return (.local(ref: replacement.ref), nil, nil, true)
             }
 
             // D2: the pinned app cannot run this route. Say why in terms of that app, then take the largest
@@ -334,7 +330,7 @@ enum LLMAvailabilityRouting {
                     LLMRouteUpgradeOffer(
                         preferredModelID: configured.modelID, runningModelID: replacement.modelID,
                         crossing: crossing),
-                    crossing)
+                    crossing, true)
             }
             return nil
         }
@@ -367,12 +363,12 @@ enum LLMAvailabilityRouting {
                     + detail(for: .local, state: pinState, localModels: localModels,
                              bundle: bundle, failedProviders: failedProviders))
             }
-            if let offer = candidate.offer {
+            if candidate.substituted {
                 return .degraded(
                     candidate.bundle, from: .local,
                     reason: candidate.crossing?.reason
                         ?? "preferred local model \(pin.modelID) is not installed",
-                    upgradeOffer: offer)
+                    upgradeOffer: candidate.offer)
             }
             return .pinned(candidate.bundle)
         }

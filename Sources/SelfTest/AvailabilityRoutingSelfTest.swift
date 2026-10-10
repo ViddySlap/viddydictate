@@ -23,6 +23,7 @@ enum AvailabilityRoutingSelfTest {
         checkPinIsNeverRewritten(reporter.record)
         checkOffReasonSpecificity(reporter.record)
         checkContentSafety(reporter.record)
+        checkNoNudge(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.passed ? "AVAILABILITY ROUTING GREEN" : "AVAILABILITY ROUTING FAILED")
@@ -191,11 +192,8 @@ enum AvailabilityRoutingSelfTest {
                 && from == .local && run.ran == [.local]
                 && run.modelIDs == [alternate.modelID]
                 && reason.contains(preferred.modelID))
-        check("the Local substitution carries an adjacent upgrade offer",
-              offer == LLMRouteUpgradeOffer(
-                  preferredModelID: preferred.modelID, runningModelID: alternate.modelID)
-                && resolution.upgradeOffer == offer
-                && offer?.message.contains(preferred.modelID) == true)
+        check("the Local substitution carries no upgrade offer (the staff-pick nudge was removed)",
+              offer == nil && resolution.upgradeOffer == nil)
 
         let pinned = fixture(
             present: [.local], pin: .local,
@@ -332,6 +330,156 @@ enum AvailabilityRoutingSelfTest {
         check("the off reason tracks the live availability state",
               updated.contains("claude: subscription credentials unreadable")
                 && !updated.contains("claude: CLI unavailable"))
+    }
+
+    // MARK: - no-nudge: the staff-pick install offer is gone
+
+    /// One controlled direct-policy fixture for the no-nudge checks: an explicit pin, an injected
+    /// installed catalog, an injected availability map, and optional capacity facts. No store, no
+    /// kernel read, no app. This is the same `LLMAvailabilityRouting.resolve` production runs.
+    private static func noNudgeResolve(
+        pin: LLMProviderBundle,
+        catalog: [LMStudioModelOption],
+        localBundle: LLMProviderBundle? = nil,
+        availability: [LLMProvider: LLMProviderAvailabilityState],
+        capacity: LLMLocalCapacityFacts? = nil
+    ) -> LLMRouteResolution {
+        LLMAvailabilityRouting.resolve(
+            pin: pin,
+            bundle: { provider -> LLMProviderBundle? in
+                if provider == .local { return localBundle ?? pin }
+                return LLMProviderDefaults.testedBundle(for: provider, route: .cleanupL1)
+            },
+            availability: { availability[$0] ?? .unavailable("no-nudge fixture: \($0.rawValue) off") },
+            localModels: catalog,
+            localCapacity: capacity)
+    }
+
+    /// Seven `new:` checks (each fails on the unfixed code) and three `guard:` checks (each passes on
+    /// the unfixed code and pins a decision that must not move). None constructs an AppKit object.
+    private static func checkNoNudge(_ reporter: SelfTestReporter) {
+        print("--- no-nudge: the staff-pick install offer is removed ---")
+
+        let preferred = "no-nudge-fixture-preferred"
+        let installed = "no-nudge-fixture-installed"
+        let alternate = LMStudioModelOption(modelID: "no-nudge-fixture-alternate", label: "Alternate")
+
+        // 1. A Local pin whose preferred model is not installed runs the installed model, no offer.
+        let substitution = noNudgeResolve(
+            pin: .local(preferred),
+            catalog: [LMStudioModelOption(modelID: installed, label: "Installed")],
+            availability: [.local: .available])
+        reporter.record(
+            "no-nudge: new: a Local pin whose preferred model is unavailable runs the installed model with no upgrade offer",
+            substitution.bundle?.provider == .local && substitution.bundle?.modelID == installed
+                && substitution.upgradeOffer == nil,
+            substitution.logToken)
+
+        // 2. The same for an unavailable staff pick with a smaller model running.
+        let smallerRunning = noNudgeResolve(
+            pin: .local(LLMProviderDefaults.localCleanupModelID),
+            catalog: [LMStudioModelOption(modelID: installed, label: "Installed")],
+            availability: [.local: .available])
+        reporter.record(
+            "no-nudge: new: an unavailable staff pick with a smaller model running offers no upgrade",
+            smallerRunning.bundle?.modelID == installed && smallerRunning.upgradeOffer == nil,
+            smallerRunning.logToken)
+
+        // 3. The dictation HUD path: `upgradeOffer?.message` is the exact string the cleanup landing
+        //    hands to `hud.toast`. It must be nil for a Local substitution.
+        let dictationToast = substitution.upgradeOffer?.message
+        reporter.record(
+            "no-nudge: new: the dictation HUD's upgrade toast is gone for a Local substitution",
+            dictationToast == nil,
+            "toast=\(dictationToast ?? "nil")")
+
+        // 4. The sticky-skill provenance path: the real pure line builder over the real provider report.
+        let ran = CustomModeRunProvider(substitution)
+        let provenance = ran.map { StickySkillPrompt.providerProvenanceLine($0) } ?? ""
+        reporter.record(
+            "no-nudge: new: the sticky-skill note provenance records no Install or upgrade text for a Local substitution",
+            !provenance.contains("Install") && !provenance.contains("for the preferred local model")
+                && !provenance.contains("Upgrade available"),
+            provenance.replacingOccurrences(of: "\n", with: " | "))
+
+        // 5. The custom-mode run provider must report no nudge offer.
+        reporter.record(
+            "no-nudge: new: the custom-mode run provider reports no upgrade offer for a Local substitution",
+            ran?.upgradeOffer == nil,
+            ran?.upgradeOffer?.message ?? "offer=nil")
+
+        // 6. A cloud pin that falls back onto a substituted local model carries no nudge either.
+        let cloudToLocal = noNudgeResolve(
+            pin: .claude("no-nudge-fixture-claude"),
+            catalog: [LMStudioModelOption(modelID: installed, label: "Installed")],
+            localBundle: .local(preferred),
+            availability: [.local: .available, .claude: .unavailable("CLI unavailable")])
+        reporter.record(
+            "no-nudge: new: a cloud pin that falls back to a substituted local model carries no upgrade offer",
+            cloudToLocal.bundle?.provider == .local && cloudToLocal.bundle?.modelID == installed
+                && cloudToLocal.upgradeOffer == nil,
+            cloudToLocal.logToken)
+
+        // 7. No built-in or custom route's Local substitution carries the offer any more.
+        let store = fixture(present: [.local], pin: .local, localModels: [alternate])
+        defer { discard(store) }
+        let noRouteNudges = routes.allSatisfy { route in
+            let resolution = store.resolveRoute(route)
+            guard case .degraded(let bundle, .local, _, let offer) = resolution,
+                  bundle.modelID == alternate.modelID else { return true }
+            return offer == nil
+        }
+        reporter.record(
+            "no-nudge: new: no built-in or custom route's Local substitution carries a staff-pick install offer",
+            noRouteNudges, "routes=\(routes.count)")
+
+        // GUARD 1: the crossing notice is untouched, message and cause included.
+        let crossing = noNudgeResolve(
+            pin: .local("no-nudge-fixture-lm-pin"),
+            catalog: [LMStudioModelOption(modelID: "no-nudge-fixture-ollama-model",
+                                          label: "Ollama Model", backend: .ollama)],
+            availability: [.local: .available])
+        let expectedCrossing = LocalBackendCrossing(
+            from: .lmStudio, to: .ollama, cause: .pinnedAppNotRunning)
+        reporter.record(
+            "no-nudge: guard: the crossing notice (pinned app not answering, ran in the other app) still yields its exact message",
+            crossing.bundle?.modelID == "no-nudge-fixture-ollama-model"
+                && crossing.upgradeOffer?.crossing == expectedCrossing
+                && crossing.upgradeOffer?.message
+                    == "LM Studio wasn't running, so this ran on no-nudge-fixture-ollama-model in Ollama.",
+            crossing.upgradeOffer?.message ?? "offer=nil")
+
+        // GUARD 2: the existing provider/bundle choice is unchanged.
+        let pinnedFixture = fixture(present: [.claude], pin: .codex)
+        defer { discard(pinnedFixture) }
+        let pinnedResolution = pinnedFixture.resolveRoute(.email)
+        let pinnedRan = CustomModeRunProvider(pinnedResolution)
+        reporter.record(
+            "no-nudge: guard: the existing codex-pin fixture still runs Claude with the same bundle and skipped pin",
+            pinnedResolution.bundle?.provider == .claude && pinnedRan?.degradedFrom == .codex,
+            pinnedResolution.logToken)
+
+        let localFixture = fixture(present: [.local], pin: .local, localModels: [alternate])
+        defer { discard(localFixture) }
+        let localResolution = localFixture.resolveRoute(.cleanupL1)
+        reporter.record(
+            "no-nudge: guard: the existing Local-substitution fixture still chooses the installed model on Local",
+            localResolution.bundle?.provider == .local
+                && localResolution.bundle?.modelID == alternate.modelID,
+            localResolution.logToken)
+
+        // GUARD 3: a degraded provider hop still reports degradedFrom/degradedReason.
+        let cloudFixture = fixture(
+            present: [.local], pin: .codex,
+            localModels: [LMStudioModelOption(modelID: alternate.modelID, label: "Alternate")])
+        defer { discard(cloudFixture) }
+        let cloudResolution = cloudFixture.resolveRoute(.cleanupL1)
+        let cloudRan = CustomModeRunProvider(cloudResolution)
+        reporter.record(
+            "no-nudge: guard: a degraded cloud-to-local hop still reports degradedFrom and degradedReason",
+            cloudRan?.provider == .local && cloudRan?.degradedFrom == .codex
+                && cloudRan?.degradedReason == "not connected",
+            cloudRan?.degradedReason ?? "nil")
     }
 
     private static func checkContentSafety(_ check: (String, Bool) -> Void) {

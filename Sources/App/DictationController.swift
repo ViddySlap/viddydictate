@@ -1256,7 +1256,7 @@ final class DictationController {
         // moment earlier; when the actual load disagrees, the only thing left was the raw transcript. One
         // re-resolve, excluding the model that ACTUALLY ran (not the pin - routing may already have
         // substituted), lands the next largest installed model that fits. `effectiveResolution` tracks
-        // which resolution finally ran so the upgrade offer below describes the model the user got.
+        // which resolution finally ran so a crossing notice below still describes the model the user got.
         var effectiveResolution = resolution
         let capacityStepDown: TextTransformClient.CapacityStepDown = { ranModelID in
             let stepped = Settings.modelsPower.resolveRoute(
