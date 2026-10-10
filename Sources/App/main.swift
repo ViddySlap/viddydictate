@@ -197,6 +197,11 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // with three negative controls. Host gate: on the Mac it needs codesign and runs on APFS (where the
     // 74b34e6 rename order failed); without codesign it abstains, and on macOS a missing codesign fails.
     case codexBundleSnapshotHostSelftest = "--codex-bundle-snapshot-host-selftest"
+    // Selectable Whisper versions, part 1 (backend only): catalog, the one global Settings choice,
+    // the pure installed-probe, and the effects-injected switch. Pure/scratch-only; no UI.
+    // Declared before whisperdAgentLoadSelftest so the acceptance flag-extraction regex
+    // `whisper[a-zA-Z]*Selftest = "--[a-z-]*"` (head -1) resolves to this flag.
+    case whisperModelSelftest = "--whisper-model-selftest"
     // A fresh account's whisperd LaunchAgent is bootstrapped when launchd has not loaded it, and a loaded one
     // is never bootstrapped twice. A fake launchctl domain, the old kickstart-only strategy as its negative
     // control. Named so neither it nor --daemon-install-selftest contains the other.

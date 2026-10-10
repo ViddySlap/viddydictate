@@ -542,6 +542,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .whisperdAgentLoadSelftest: .init(tier: .deterministic) { _ in
         WhisperdAgentLoadSelfTest.run() ? 0 : 1
     },
+    // Selectable Whisper versions, part 1 (backend only): pure catalog data, the one global Settings
+    // choice, the hub-layout installed-probe over TMPDIR fixtures, and the effects-injected switch.
+    .whisperModelSelftest: .init(tier: .deterministic) { _ in
+        WhisperModelSelfTest.run() ? 0 : 1
+    },
     // Pure: the remedy strings and a read of SetupSettingsView.swift. No view, no window. The AppKit half
     // (the button on screen, clicked once) is --setup-render.
     .setupRemedyCopySelftest: .init(tier: .deterministic) { _ in

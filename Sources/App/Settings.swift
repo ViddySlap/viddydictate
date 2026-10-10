@@ -137,6 +137,9 @@ enum Settings {
         // Appearance: the one monochromatic theme accent ("#rrggbb"). Phosphor derives the whole palette
         // (native panels + the sticky-notes web island) from it; default = the phosphor green.
         static let themeColor      = "themeColorHex"
+        // The ONE global Whisper choice (selectable Whisper versions, part 1, backend only). A repo id
+        // from `WhisperModelCatalog`; the daemon reads the app's `whisper-model` file, not this key.
+        static let whisperModelRepo = "whisperModelRepo"
     }
 
     /// The ONE home for every persisted default. `registerDefaults()` registers exactly these values
@@ -206,6 +209,8 @@ enum Settings {
         static let hudPillScale = 1.0
         static let hudSpinnerScale = 1.0
         static let themeColor = Phosphor.defaultAccentHex   // "#00ff41" — the untouched phosphor green
+        // Default stays Large V3 Turbo on the simple install (never silently changed).
+        static let whisperModelRepo = WhisperModelCatalog.default.repo
     }
 
     /// Allowed range for the per-tab history retention caps.
@@ -275,6 +280,7 @@ enum Settings {
             K.hudPillScale: Defaults.hudPillScale,
             K.hudSpinnerScale: Defaults.hudSpinnerScale,
             K.themeColor: Defaults.themeColor,
+            K.whisperModelRepo: Defaults.whisperModelRepo,
         ])
     }
 
@@ -919,4 +925,27 @@ enum Settings {
         url(K.searchEndpoint, fallback: Defaults.searchEndpoint)
     }
     static var geminiModel: String { d.string(forKey: K.geminiModel) ?? Defaults.geminiModel }
+
+    // MARK: Whisper model (selectable Whisper versions, part 1, backend only)
+
+    /// The ONE global Whisper model choice, as an offered repo id. It is what the app writes into the
+    /// `whisper-model` file the daemon reads at start. Reading an unknown or garbage stored value
+    /// safely falls back to the default (never crashes, never passes an unvetted string on); writing
+    /// only accepts an offered repo, so a stale value cannot become the active choice.
+    static var whisperModelRepo: String {
+        get { whisperModelRepo(in: d) }
+        set {
+            guard WhisperModelCatalog.isOffered(repo: newValue) else { return }
+            d.set(newValue, forKey: K.whisperModelRepo)
+            notify()
+        }
+    }
+
+    /// The same read as `whisperModelRepo`, against a caller-supplied store. The deterministic
+    /// selftest injects a scratch `UserDefaults` suite here so it can prove the unset and
+    /// invalid/non-offered fallback without reading or writing the real preferences.
+    static func whisperModelRepo(in defaults: UserDefaults) -> String {
+        let stored = defaults.string(forKey: K.whisperModelRepo) ?? Defaults.whisperModelRepo
+        return WhisperModelCatalog.isOffered(repo: stored) ? stored : Defaults.whisperModelRepo
+    }
 }
