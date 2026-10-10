@@ -42,7 +42,8 @@ struct CustomModeRunProvider: Equatable {
     let degradedFrom: LLMProvider?
     /// Why the pin could not run. Non-nil only alongside `degradedFrom`.
     let degradedReason: String?
-    /// A local preferred-model substitution is offered beside the result rather than blocking the run.
+    /// The crossing notice when the substitute ran in the OTHER local app, or nil. The staff-pick
+    /// install nudge that used to live here was removed; a same-app substitution carries no offer.
     let upgradeOffer: LLMRouteUpgradeOffer?
 
     /// nil when the route resolved `.off`: no provider executed, so there is nothing to report.

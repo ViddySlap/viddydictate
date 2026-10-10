@@ -224,7 +224,7 @@ enum LocalBackendRoutingFixtureSelfTest {
         let preferPinned = resolve(Input(pin: pin(.ollama, ollamaTooBigID), models: both, localState: .available))
         var sameApp = false
         if case .degraded(let bundle, .local, let reason, let offer) = preferPinned {
-            sameApp = bundle.localBackend == .ollama && bundle.modelID == sharedID && offer?.crossing == nil
+            sameApp = bundle.localBackend == .ollama && bundle.modelID == sharedID && offer == nil
                 && reason == "preferred local model \(ollamaTooBigID) is not installed"
         }
         reporter.record(
@@ -294,14 +294,13 @@ enum LocalBackendRoutingFixtureSelfTest {
 
         let fit = realResolver(Input(pin: .local(qwenID), models: catalog, localState: .available, capacity: facts))
         reporter.record(
-            "LM Studio only, qwen over budget: 1.1.0's exact degraded result (gemma, same reason, same offer)",
+            "LM Studio only, qwen over budget: 1.1.0's exact degraded result, now with no upgrade offer",
             fit == .degraded(.local(gemmaID), from: .local,
                              reason: "preferred local model \(qwenID) is not installed",
-                             upgradeOffer: LLMRouteUpgradeOffer(preferredModelID: qwenID, runningModelID: gemmaID)),
+                             upgradeOffer: nil),
             fit.logToken)
-        reporter.record("LM Studio only: the offer's toast is 1.1.0's sentence",
-                        fit.upgradeOffer?.message
-                            == "Running on \(gemmaID). Install \(qwenID) for the preferred local model.")
+        reporter.record("LM Studio only: the removed staff-pick nudge no longer produces a toast",
+                        fit.upgradeOffer == nil)
 
         let generous = LLMLocalCapacityFacts(sizeBytes: facts.sizeBytes, wiredBytes: 0,
                                              budgetBytes: 100_000_000_000)
@@ -316,7 +315,7 @@ enum LocalBackendRoutingFixtureSelfTest {
         reporter.record(
             "LM Studio only, a bare-id capacity refusal: 1.1.0's exact step-down (gemma, the refusal sentence)",
             retry == .degraded(.local(gemmaID), from: .local, reason: CleanupClient.overBudgetMessage,
-                               upgradeOffer: LLMRouteUpgradeOffer(preferredModelID: qwenID, runningModelID: gemmaID)),
+                               upgradeOffer: nil),
             retry.logToken)
 
         let unmeasured = realResolver(Input(pin: .local(qwenID), models: nil, localState: .available))

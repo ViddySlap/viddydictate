@@ -159,11 +159,11 @@ enum ResidentFitFixtureSelfTest {
         let coldCleanup = cold.resolveRoute(.cleanupL1)
         reporter.record("not resident: cleanup still steps down to the installed model that fits",
                         coldCleanup.bundle?.modelID == smallID
-                            && coldCleanup.upgradeOffer?.preferredModelID == coderID,
+                            && coldCleanup.upgradeOffer == nil,
                         coldCleanup.logToken)
         let coldEmail = cold.resolveRoute(.email)
         reporter.record("not resident: email still steps down to the installed model that fits",
-                        coldEmail.bundle?.modelID == smallID && coldEmail.upgradeOffer?.preferredModelID == mailID,
+                        coldEmail.bundle?.modelID == smallID && coldEmail.upgradeOffer == nil,
                         coldEmail.logToken)
 
         print("--- the resident set is (app, id) ---")
@@ -461,7 +461,7 @@ enum ResidentFitFixtureSelfTest {
         // Charged again it does not fit, so email steps down (to the coder model, resident and free).
         reporter.record(ownExpiryCheck,
                         !mailStillExempt && !isPinned(expiredEmail, on: mailID)
-                            && expiredEmail.upgradeOffer?.preferredModelID == mailID,
+                            && expiredEmail.upgradeOffer == nil,
                         expiredEmail.logToken)
 
         print("--- ViddyDictate's own unload ---")
@@ -541,7 +541,7 @@ enum ResidentFitFixtureSelfTest {
         let healed = store.resolveRoute(.email)
         reporter.record("stale: the read that found it absent ends the record, so email steps down next time",
                         probe.facts?.isResident(lm(mailID)) == false && !isPinned(healed, on: mailID)
-                            && healed.upgradeOffer?.preferredModelID == mailID,
+                            && healed.upgradeOffer == nil,
                         healed.logToken)
     }
 
