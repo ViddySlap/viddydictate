@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 # shellcheck source=scripts/service-gate-classify.sh
 source "$ROOT/scripts/service-gate-classify.sh"
+# shellcheck source=scripts/verify-defaults-reset.sh
+source "$ROOT/scripts/verify-defaults-reset.sh"
 
 APP="$ROOT/build/ViddyDictate.app/Contents/MacOS/ViddyDictate"
 TEST_APP="$ROOT/build/ViddyDictateTests.app/Contents/MacOS/ViddyDictateTests"
@@ -433,6 +435,13 @@ tier_deterministic() {
     local skipped_before=$SKIPPED
     local build_ok=1
 
+    # FIRST action of the deterministic tier: clear the test bundle's defaults domain so no saved
+    # preference from the user's real test domain can decide a gate.
+    if ! vd_reset_test_defaults; then
+        record_failure deterministic "test-domain defaults reset refused"
+        return 1
+    fi
+
     run_gate deterministic "Whisper tail corpus harness structural selftest" \
         python3 "$ROOT/scripts/proof-tail-clock-corpus.py" --self-test || true
 
@@ -441,6 +450,9 @@ tier_deterministic() {
 
     run_gate deterministic "Whisper daemon offline-first warm and phase health (socket-guarded, mutants)" \
         python3 "$ROOT/scripts/test-whisperd-offline-warm.py" || true
+
+    run_gate deterministic "test-domain defaults reset isolation and static guards" \
+        python3 "$ROOT/scripts/test-verify-defaults-reset.py" || true
 
     run_gate deterministic "TailCheck Swift-vs-Python differential fuzz (2000 synthetic Unicode cases, seed 1337)" \
         python3 "$ROOT/Tools/tailcheck/differential_fuzz.py" || true
