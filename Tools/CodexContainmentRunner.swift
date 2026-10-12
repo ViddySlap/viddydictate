@@ -2140,6 +2140,68 @@ private func runSelftest(arguments: [String]) throws {
     }
 }
 
+private func codexLoginFixtureDiagnosticLine(
+    caseName: String,
+    status: Int32,
+    timedOut: Bool,
+    overflow: Bool,
+    stdoutBytes: Int,
+    stderrBytes: Int,
+    elapsed: TimeInterval,
+    timeout: TimeInterval,
+    limit: Int,
+    uptime: TimeInterval
+) -> String {
+    let timeoutText =
+        timeout == timeout.rounded() ? String(Int(timeout)) : String(timeout)
+    return "[codex-login-fixture][diag]"
+        + " case=\(caseName)"
+        + " status=\(status)"
+        + " timed_out=\(timedOut)"
+        + " overflow=\(overflow)"
+        + " stdout_bytes=\(stdoutBytes)"
+        + " stderr_bytes=\(stderrBytes)"
+        + " elapsed_s=\(String(format: "%.3f", elapsed))"
+        + " timeout_s=\(timeoutText)"
+        + " limit=\(limit)"
+        + " uptime_s=\(String(format: "%.3f", uptime))"
+}
+
+private func codexLoginFixtureShouldEmitDiagnostic(
+    timedOut: Bool,
+    overflow: Bool,
+    expectationPassed: Bool
+) -> Bool {
+    timedOut || overflow || !expectationPassed
+}
+
+/// Pure decision helper for the non-login authenticated audit warning. The audit is expected to
+/// refuse the warning (`auditAccepted == false`), in which case nothing is emitted. If it
+/// unexpectedly accepts the warning, one counts-only diagnostic line is produced so a red run
+/// explains the unexpected acceptance. Returning nil on refusal keeps the expected path silent.
+private func codexLoginFixtureAuditAcceptedDiagnostic(
+    caseName: String,
+    auditAccepted: Bool,
+    result: BoundedCaptureResult,
+    timeout: TimeInterval,
+    limit: Int,
+    elapsed: TimeInterval,
+    uptime: TimeInterval
+) -> String? {
+    guard auditAccepted else { return nil }
+    return codexLoginFixtureDiagnosticLine(
+        caseName: caseName,
+        status: result.status,
+        timedOut: result.timedOut,
+        overflow: result.overflow,
+        stdoutBytes: result.stdout.count,
+        stderrBytes: result.stderr.count,
+        elapsed: elapsed,
+        timeout: timeout,
+        limit: limit,
+        uptime: uptime)
+}
+
 private func runAuthenticatedLoginStatusSelftest() throws {
     let root =
         "/private/tmp/viddydictate-codex-login-fixture-\(UUID().uuidString)"
@@ -2159,7 +2221,11 @@ private func runAuthenticatedLoginStatusSelftest() throws {
         return path
     }
 
-    func captureFakeCodex(_ path: String) throws -> BoundedCaptureResult {
+    func captureFakeCodex(
+        _ path: String,
+        timeout: TimeInterval,
+        limit: Int
+    ) throws -> BoundedCaptureResult {
         try captureBounded(
             executable: path,
             arguments: ["login", "status"],
@@ -2169,8 +2235,51 @@ private func runAuthenticatedLoginStatusSelftest() throws {
                 "LC_ALL": "en_US.UTF-8",
             ],
             currentDirectory: root,
-            timeout: 2,
-            limit: 4_096)
+            timeout: timeout,
+            limit: limit)
+    }
+
+    // Wraps every fixture capture so a timeout, an overflow, or a failed case
+    // expectation leaves exactly one content-free diagnostic line.
+    @discardableResult
+    func captureFakeCodexDiagnosed(
+        _ path: String,
+        caseName: String,
+        timeout: TimeInterval,
+        limit: Int,
+        expectation: (BoundedCaptureResult) -> Bool,
+        emit: (String) -> Void = { print($0) }
+    ) throws -> (result: BoundedCaptureResult, diagnostic: String?) {
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try captureFakeCodex(
+            path, timeout: timeout, limit: limit)
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        let expectationPassed = expectation(result)
+        guard codexLoginFixtureShouldEmitDiagnostic(
+            timedOut: result.timedOut,
+            overflow: result.overflow,
+            expectationPassed: expectationPassed) else {
+            return (result, nil)
+        }
+        let line = codexLoginFixtureDiagnosticLine(
+            caseName: caseName,
+            status: result.status,
+            timedOut: result.timedOut,
+            overflow: result.overflow,
+            stdoutBytes: result.stdout.count,
+            stderrBytes: result.stderr.count,
+            elapsed: elapsed,
+            timeout: timeout,
+            limit: limit,
+            uptime: ProcessInfo.processInfo.systemUptime)
+        emit(line)
+        return (result, line)
+    }
+
+    var gateDiagnosticFailures: [String] = []
+    func gateRow(_ name: String, _ ok: Bool) {
+        print("  [\(ok ? "ok " : "FAIL")] \(name)")
+        if !ok { gateDiagnosticFailures.append(name) }
     }
 
     let connectedPath = try makeFakeCodex(
@@ -2180,9 +2289,20 @@ private func runAuthenticatedLoginStatusSelftest() throws {
         printf '%s\\n' 'Logged in using ChatGPT' >&2
         exit 0
         """)
+    let connectedCapture = try captureFakeCodexDiagnosed(
+        connectedPath,
+        caseName: "connected",
+        timeout: 2,
+        limit: 4_096,
+        expectation: {
+            $0.status == 0
+                && $0.stdout.isEmpty
+                && String(decoding: $0.stderr, as: UTF8.self)
+                    == "Logged in using ChatGPT\n"
+        })
     let connected = try authenticatedAuditOutput(
         operation: "login",
-        result: captureFakeCodex(connectedPath))
+        result: connectedCapture.result)
     guard connected.status == 0,
           connected.stdout.isEmpty,
           String(decoding: connected.stderr, as: UTF8.self)
@@ -2198,9 +2318,20 @@ private func runAuthenticatedLoginStatusSelftest() throws {
         printf '%s\\n' 'Not logged in' >&2
         exit 1
         """)
+    let disconnectedCapture = try captureFakeCodexDiagnosed(
+        disconnectedPath,
+        caseName: "disconnected",
+        timeout: 2,
+        limit: 4_096,
+        expectation: {
+            $0.status == 1
+                && $0.stdout.isEmpty
+                && String(decoding: $0.stderr, as: UTF8.self)
+                    == "Not logged in\n"
+        })
     let disconnected = try authenticatedAuditOutput(
         operation: "login",
-        result: captureFakeCodex(disconnectedPath))
+        result: disconnectedCapture.result)
     guard disconnected.status == 1,
           disconnected.stdout.isEmpty,
           String(decoding: disconnected.stderr, as: UTF8.self)
@@ -2216,9 +2347,20 @@ private func runAuthenticatedLoginStatusSelftest() throws {
         printf '%s\\n' 'Logged in using ChatGPT'
         exit 0
         """)
+    let legacyCapture = try captureFakeCodexDiagnosed(
+        legacyPath,
+        caseName: "legacy-stdout",
+        timeout: 2,
+        limit: 4_096,
+        expectation: {
+            $0.status == 0
+                && String(decoding: $0.stdout, as: UTF8.self)
+                    == "Logged in using ChatGPT\n"
+                && $0.stderr.isEmpty
+        })
     let legacy = try authenticatedAuditOutput(
         operation: "login",
-        result: captureFakeCodex(legacyPath))
+        result: legacyCapture.result)
     guard legacy.status == 0,
           String(decoding: legacy.stdout, as: UTF8.self)
             == "Logged in using ChatGPT\n",
@@ -2234,10 +2376,31 @@ private func runAuthenticatedLoginStatusSelftest() throws {
         printf '%s\\n' 'SYNTHETIC_CONFIG_WARNING' >&2
         exit 0
         """)
+    let warningSink: (String) -> Void = { print($0) }
     do {
+        let warningStarted = ProcessInfo.processInfo.systemUptime
+        let warningCapture = try captureFakeCodexDiagnosed(
+            warningPath,
+            caseName: "non-login-warning",
+            timeout: 2,
+            limit: 4_096,
+            expectation: { $0.status != 0 || !$0.stderr.isEmpty },
+            emit: warningSink)
+        let warningElapsed =
+            ProcessInfo.processInfo.systemUptime - warningStarted
         _ = try authenticatedAuditOutput(
             operation: "features",
-            result: captureFakeCodex(warningPath))
+            result: warningCapture.result)
+        if let line = codexLoginFixtureAuditAcceptedDiagnostic(
+            caseName: "non-login-warning",
+            auditAccepted: true,
+            result: warningCapture.result,
+            timeout: 2,
+            limit: 4_096,
+            elapsed: warningElapsed,
+            uptime: ProcessInfo.processInfo.systemUptime) {
+            warningSink(line)
+        }
         throw RunnerError.failed(
             "non-login authenticated audit warning was accepted")
     } catch let error as RunnerError {
@@ -2245,6 +2408,103 @@ private func runAuthenticatedLoginStatusSelftest() throws {
                 == "authenticated metadata audit command failed" else {
             throw error
         }
+    }
+
+    let syntheticLine = codexLoginFixtureDiagnosticLine(
+        caseName: "synthetic",
+        status: 7,
+        timedOut: true,
+        overflow: false,
+        stdoutBytes: 11,
+        stderrBytes: 22,
+        elapsed: 0.25,
+        timeout: 2,
+        limit: 4_096,
+        uptime: 123.5)
+    gateRow(
+        "gate-diag: new: gate-2 login-fixture formatter names case/status/timed_out/overflow/stdout_bytes/stderr_bytes/elapsed_s/timeout_s/limit/uptime_s",
+        syntheticLine.contains("case=synthetic")
+            && syntheticLine.contains("status=7")
+            && syntheticLine.contains("timed_out=true")
+            && syntheticLine.contains("overflow=false")
+            && syntheticLine.contains("stdout_bytes=11")
+            && syntheticLine.contains("stderr_bytes=22")
+            && syntheticLine.contains("elapsed_s=")
+            && syntheticLine.contains("timeout_s=2")
+            && syntheticLine.contains("limit=4096")
+            && syntheticLine.contains("uptime_s="))
+
+    let slowPath = try makeFakeCodex(
+        name: "fake-codex-slow",
+        body: """
+        #!/bin/sh
+        sleep 5
+        """)
+    var slowDiagnostics: [String] = []
+    let slowCapture = try captureFakeCodexDiagnosed(
+        slowPath,
+        caseName: "slow-timeout",
+        timeout: 0.3,
+        limit: 4_096,
+        expectation: { _ in true },
+        emit: { slowDiagnostics.append($0) })
+    gateRow(
+        "gate-diag: new: gate-2 wrapper timeout on a slow fake emits timed_out=true",
+        slowDiagnostics.contains { $0.contains("timed_out=true") }
+            && slowCapture.diagnostic?.contains("timed_out=true") == true)
+
+    let auditAcceptedProbe = BoundedCaptureResult(
+        status: 0,
+        stdout: Data(),
+        stderr: Data("SYNTHETIC_CONFIG_WARNING\n".utf8),
+        timedOut: false,
+        overflow: false)
+    var auditAcceptedDiagnostics: [String] = []
+    let auditAcceptedSink: (String) -> Void = {
+        auditAcceptedDiagnostics.append($0)
+    }
+    if let line = codexLoginFixtureAuditAcceptedDiagnostic(
+        caseName: "non-login-warning",
+        auditAccepted: true,
+        result: auditAcceptedProbe,
+        timeout: 2,
+        limit: 4_096,
+        elapsed: 0.01,
+        uptime: 123.5) {
+        auditAcceptedSink(line)
+    }
+    let refusedAuditLine = codexLoginFixtureAuditAcceptedDiagnostic(
+        caseName: "non-login-warning",
+        auditAccepted: false,
+        result: auditAcceptedProbe,
+        timeout: 2,
+        limit: 4_096,
+        elapsed: 0.01,
+        uptime: 123.5)
+    gateRow(
+        "gate-diag: new: gate-2 non-login-warning audit acceptance emits one counts-only diagnostic",
+        auditAcceptedDiagnostics.count == 1
+            && auditAcceptedDiagnostics[0].contains("case=non-login-warning")
+            && auditAcceptedDiagnostics[0].contains("status=0")
+            && auditAcceptedDiagnostics[0].contains("timed_out=false")
+            && auditAcceptedDiagnostics[0].contains("overflow=false")
+            && auditAcceptedDiagnostics[0].contains("stdout_bytes=0")
+            && auditAcceptedDiagnostics[0].contains("stderr_bytes=")
+            && auditAcceptedDiagnostics[0].contains("elapsed_s=")
+            && auditAcceptedDiagnostics[0].contains("timeout_s=2")
+            && auditAcceptedDiagnostics[0].contains("limit=4096")
+            && auditAcceptedDiagnostics[0].contains("uptime_s=")
+            && refusedAuditLine == nil)
+
+    gateRow(
+        "gate-diag: guard: gate-2 pass path returns no diagnostic line",
+        !codexLoginFixtureShouldEmitDiagnostic(
+            timedOut: false, overflow: false, expectationPassed: true))
+
+    guard gateDiagnosticFailures.isEmpty else {
+        throw RunnerError.failed(
+            "gate diagnostics failed: "
+                + gateDiagnosticFailures.joined(separator: "; "))
     }
 
     print("[codex-login-fixture][PASS] stderr status and exit code pass through only for login")
