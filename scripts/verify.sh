@@ -442,6 +442,9 @@ tier_deterministic() {
         return 1
     fi
 
+    run_gate deterministic "Codex gate failure diagnostics static source check" \
+        python3 "$ROOT/scripts/test-gate-diagnostics.py" || true
+
     run_gate deterministic "Whisper tail corpus harness structural selftest" \
         python3 "$ROOT/scripts/proof-tail-clock-corpus.py" --self-test || true
 

@@ -75,6 +75,7 @@ enum CodexModelCatalogSelfTest {
         checkFixtureWarmupOwnership(reporter.record)
         checkRealProcessDeadline(reporter.record)
         checkLaunchIdentityAndRetryableReap(reporter.record)
+        checkGateDiagnostics(reporter.record)
         checkLaunchTimeSharesOverallDeadline(reporter.record)
         checkCacheAndSeams(reporter.record)
         CodexModelMigrationPlannerSelfTest.run(reporter.record)
@@ -875,6 +876,226 @@ enum CodexModelCatalogSelfTest {
         }
     }
 
+    // Pinned reap-retry budget (do not change): the first reap deadline is `now + 0.5`, the whole
+    // test is bounded at `now + 3`, and the synthetic fixture drain delay is 1 second.
+    private static let retryableReapFirstDeadlineGraceSeconds: TimeInterval = 0.5
+    private static let retryableReapOverallDeadlineSeconds: TimeInterval = 3
+
+    /// Pure formatter for the retryable-reap failure diagnostic. Every failure path (the
+    /// `!retryPassed` branch and the `catch`) prints exactly one line built from this function.
+    static func retryableReapDiagnosticLine(
+        leaderPIDMatches: Bool,
+        firstDrainsIncomplete: Bool,
+        firstLeaderReaped: Bool,
+        firstNoResidual: Bool,
+        secondLeaderReaped: Bool,
+        secondNoResidual: Bool,
+        secondDrainsComplete: Bool,
+        opsStableAfterTreeGone: Bool,
+        noReplacementTouched: Bool,
+        termCount: Int,
+        killCount: Int,
+        processesGone: Bool,
+        launchToFixtureSeconds: TimeInterval,
+        firstReapSeconds: TimeInterval,
+        secondReapSeconds: TimeInterval,
+        firstDeadlineRemainingSeconds: TimeInterval,
+        secondDeadlineRemainingSeconds: TimeInterval,
+        firstDeadlineSeconds: TimeInterval,
+        overallDeadlineSeconds: TimeInterval,
+        drainDelaySeconds: TimeInterval,
+        errorDescription: String? = nil
+    ) -> String {
+        var fields = [
+            "leader_pid_matches=\(leaderPIDMatches)",
+            "first_drains_incomplete=\(firstDrainsIncomplete)",
+            "first_leader_reaped=\(firstLeaderReaped)",
+            "first_no_residual=\(firstNoResidual)",
+            "second_leader_reaped=\(secondLeaderReaped)",
+            "second_no_residual=\(secondNoResidual)",
+            "second_drains_complete=\(secondDrainsComplete)",
+            "ops_stable_after_tree_gone=\(opsStableAfterTreeGone)",
+            "no_replacement_touched=\(noReplacementTouched)",
+            "term_count=\(termCount)",
+            "kill_count=\(killCount)",
+            "processes_gone=\(processesGone)",
+            "launch_to_fixture_s=\(formattedSeconds(launchToFixtureSeconds))",
+            "first_reap_s=\(formattedSeconds(firstReapSeconds))",
+            "second_reap_s=\(formattedSeconds(secondReapSeconds))",
+            "first_deadline_remaining_s=\(formattedSeconds(firstDeadlineRemainingSeconds))",
+            "second_deadline_remaining_s=\(formattedSeconds(secondDeadlineRemainingSeconds))",
+            "first_deadline_s=\(formattedSeconds(firstDeadlineSeconds))",
+            "overall_deadline_s=\(formattedSeconds(overallDeadlineSeconds))",
+            "drain_delay_s=\(formattedSeconds(drainDelaySeconds))",
+        ]
+        if let errorDescription {
+            fields.append("error=\(errorDescription)")
+        }
+        return fields.joined(separator: " ")
+    }
+
+    /// Emits a line only on failure; asserting on this return value keeps the guard test off stdout.
+    static func retryableReapDiagnostic(
+        passed: Bool,
+        leaderPIDMatches: Bool,
+        firstDrainsIncomplete: Bool,
+        firstLeaderReaped: Bool,
+        firstNoResidual: Bool,
+        secondLeaderReaped: Bool,
+        secondNoResidual: Bool,
+        secondDrainsComplete: Bool,
+        opsStableAfterTreeGone: Bool,
+        noReplacementTouched: Bool,
+        termCount: Int,
+        killCount: Int,
+        processesGone: Bool,
+        launchToFixtureSeconds: TimeInterval,
+        firstReapSeconds: TimeInterval,
+        secondReapSeconds: TimeInterval,
+        firstDeadlineRemainingSeconds: TimeInterval,
+        secondDeadlineRemainingSeconds: TimeInterval,
+        firstDeadlineSeconds: TimeInterval,
+        overallDeadlineSeconds: TimeInterval,
+        drainDelaySeconds: TimeInterval,
+        errorDescription: String? = nil
+    ) -> String? {
+        guard !passed else { return nil }
+        return retryableReapDiagnosticLine(
+            leaderPIDMatches: leaderPIDMatches,
+            firstDrainsIncomplete: firstDrainsIncomplete,
+            firstLeaderReaped: firstLeaderReaped,
+            firstNoResidual: firstNoResidual,
+            secondLeaderReaped: secondLeaderReaped,
+            secondNoResidual: secondNoResidual,
+            secondDrainsComplete: secondDrainsComplete,
+            opsStableAfterTreeGone: opsStableAfterTreeGone,
+            noReplacementTouched: noReplacementTouched,
+            termCount: termCount,
+            killCount: killCount,
+            processesGone: processesGone,
+            launchToFixtureSeconds: launchToFixtureSeconds,
+            firstReapSeconds: firstReapSeconds,
+            secondReapSeconds: secondReapSeconds,
+            firstDeadlineRemainingSeconds: firstDeadlineRemainingSeconds,
+            secondDeadlineRemainingSeconds: secondDeadlineRemainingSeconds,
+            firstDeadlineSeconds: firstDeadlineSeconds,
+            overallDeadlineSeconds: overallDeadlineSeconds,
+            drainDelaySeconds: drainDelaySeconds,
+            errorDescription: errorDescription)
+    }
+
+    private static func formattedSeconds(_ value: TimeInterval) -> String {
+        var text = String(format: "%.3f", value)
+        while text.contains(".") && (text.hasSuffix("0") || text.hasSuffix(".")) {
+            text.removeLast()
+        }
+        return text
+    }
+
+    private static func checkGateDiagnostics(
+        _ check: (String, Bool) -> Void
+    ) {
+        let syntheticLine = retryableReapDiagnosticLine(
+            leaderPIDMatches: true,
+            firstDrainsIncomplete: true,
+            firstLeaderReaped: true,
+            firstNoResidual: true,
+            secondLeaderReaped: true,
+            secondNoResidual: true,
+            secondDrainsComplete: true,
+            opsStableAfterTreeGone: true,
+            noReplacementTouched: true,
+            termCount: 1,
+            killCount: 1,
+            processesGone: true,
+            launchToFixtureSeconds: 0.02,
+            firstReapSeconds: 0.5,
+            secondReapSeconds: 0.06,
+            firstDeadlineRemainingSeconds: 0.4,
+            secondDeadlineRemainingSeconds: 2.4,
+            firstDeadlineSeconds: 0.5,
+            overallDeadlineSeconds: 3,
+            drainDelaySeconds: 1)
+        let predicateFields = [
+            "leader_pid_matches=",
+            "first_drains_incomplete=",
+            "first_leader_reaped=",
+            "first_no_residual=",
+            "second_leader_reaped=",
+            "second_no_residual=",
+            "second_drains_complete=",
+            "ops_stable_after_tree_gone=",
+            "no_replacement_touched=",
+            "term_count=",
+            "kill_count=",
+            "processes_gone=",
+        ]
+        let measuredFields = [
+            "launch_to_fixture_s=",
+            "first_reap_s=",
+            "second_reap_s=",
+            "first_deadline_remaining_s=",
+            "second_deadline_remaining_s=",
+            "first_deadline_s=0.5",
+            "overall_deadline_s=3",
+            "drain_delay_s=1",
+        ]
+        check(
+            "gate-diag: new: gate-1 retryable-reap formatter names all twelve predicates and measured fields",
+            syntheticLine.contains("leader_pid_matches=true")
+                && predicateFields.allSatisfy { syntheticLine.contains($0) }
+                && measuredFields.allSatisfy { syntheticLine.contains($0) })
+        let thrownLine = retryableReapDiagnosticLine(
+            leaderPIDMatches: false,
+            firstDrainsIncomplete: false,
+            firstLeaderReaped: false,
+            firstNoResidual: false,
+            secondLeaderReaped: false,
+            secondNoResidual: false,
+            secondDrainsComplete: false,
+            opsStableAfterTreeGone: false,
+            noReplacementTouched: false,
+            termCount: 0,
+            killCount: 0,
+            processesGone: false,
+            launchToFixtureSeconds: 0,
+            firstReapSeconds: 0,
+            secondReapSeconds: 0,
+            firstDeadlineRemainingSeconds: 0,
+            secondDeadlineRemainingSeconds: 0,
+            firstDeadlineSeconds: 0.5,
+            overallDeadlineSeconds: 3,
+            drainDelaySeconds: 1,
+            errorDescription: "CacheWriteFault()")
+        check(
+            "gate-diag: new: gate-1 retryable-reap formatter includes the thrown error description",
+            thrownLine.contains("error=CacheWriteFault()"))
+        check(
+            "gate-diag: guard: gate-1 pass path returns no diagnostic line",
+            retryableReapDiagnostic(
+                passed: true,
+                leaderPIDMatches: true,
+                firstDrainsIncomplete: true,
+                firstLeaderReaped: true,
+                firstNoResidual: true,
+                secondLeaderReaped: true,
+                secondNoResidual: true,
+                secondDrainsComplete: true,
+                opsStableAfterTreeGone: true,
+                noReplacementTouched: true,
+                termCount: 1,
+                killCount: 1,
+                processesGone: true,
+                launchToFixtureSeconds: 0.02,
+                firstReapSeconds: 0.5,
+                secondReapSeconds: 0.06,
+                firstDeadlineRemainingSeconds: 0.4,
+                secondDeadlineRemainingSeconds: 2.4,
+                firstDeadlineSeconds: 0.5,
+                overallDeadlineSeconds: 3,
+                drainDelaySeconds: 1) == nil)
+    }
+
     private static func checkRetryableReap(
         _ check: (String, Bool) -> Void
     ) {
@@ -889,6 +1110,24 @@ enum CodexModelCatalogSelfTest {
                 pids: [leaderPID, childPID].compactMap { $0 })
             try? FileManager.default.removeItem(at: root)
         }
+        var launchToFixtureSeconds: TimeInterval = 0
+        var firstReapSeconds: TimeInterval = 0
+        var secondReapSeconds: TimeInterval = 0
+        var firstDeadlineRemainingSeconds: TimeInterval = 0
+        var secondDeadlineRemainingSeconds: TimeInterval = 0
+        var drainDelaySeconds: TimeInterval = 0
+        var leaderPIDMatches = false
+        var firstDrainsIncomplete = false
+        var firstLeaderReaped = false
+        var firstNoResidual = false
+        var secondLeaderReaped = false
+        var secondNoResidual = false
+        var secondDrainsComplete = false
+        var opsStableAfterTreeGone = false
+        var noReplacementTouched = false
+        var termCount = 0
+        var killCount = 0
+        var processesGone = false
         do {
             try CodexIsolationFoundation.secureDirectory(root)
             let executable = root.appendingPathComponent("catalog-fixture")
@@ -911,8 +1150,9 @@ enum CodexModelCatalogSelfTest {
             var processOperations: [CodexCatalogProcessOperation] = []
             var numericIdentityReused = false
             var replacementTouched = false
+            let launchStart = ProcessInfo.processInfo.systemUptime
             let overallDeadline =
-                ProcessInfo.processInfo.systemUptime + 3
+                launchStart + retryableReapOverallDeadlineSeconds
             let launch = CodexCatalogProcessLaunch(
                 executable: executable.path,
                 arguments: ["app-server"],
@@ -936,52 +1176,116 @@ enum CodexModelCatalogSelfTest {
                     }
                 },
                 absoluteDeadline: overallDeadline)
+            drainDelaySeconds = launch.drainCompletionDelayForTesting
             let session = try CodexCatalogPOSIXSession.start(launch)
             guard waitForFixtureFile(leaderFile),
                   waitForFixtureFile(childFile) else {
                 throw CacheWriteFault()
             }
+            launchToFixtureSeconds =
+                ProcessInfo.processInfo.systemUptime - launchStart
             let reportedLeaderPID = try fixturePID(leaderFile)
             childPID = try fixturePID(childFile)
+            leaderPIDMatches = leaderPID == reportedLeaderPID
+            let firstDeadline = min(
+                overallDeadline,
+                ProcessInfo.processInfo.systemUptime
+                    + retryableReapFirstDeadlineGraceSeconds)
+            firstDeadlineRemainingSeconds =
+                firstDeadline - ProcessInfo.processInfo.systemUptime
+            let firstStart = ProcessInfo.processInfo.systemUptime
             let first = session.terminateAndReap(
-                absoluteDeadline: min(
-                    overallDeadline,
-                    ProcessInfo.processInfo.systemUptime + 0.5))
+                absoluteDeadline: firstDeadline)
+            firstReapSeconds =
+                ProcessInfo.processInfo.systemUptime - firstStart
             let processOperationsAfterTreeGone = processOperations.count
             numericIdentityReused = true
+            secondDeadlineRemainingSeconds =
+                overallDeadline - ProcessInfo.processInfo.systemUptime
+            let secondStart = ProcessInfo.processInfo.systemUptime
             let second = session.terminateAndReap(
                 absoluteDeadline: overallDeadline)
-            let processesGone = waitForFixtureProcessesGone(
+            secondReapSeconds =
+                ProcessInfo.processInfo.systemUptime - secondStart
+            processesGone = waitForFixtureProcessesGone(
                 [leaderPID, childPID].compactMap { $0 })
+            firstDrainsIncomplete = !first.drainsComplete
+            firstLeaderReaped = first.leaderReaped
+            firstNoResidual = !first.residualProcessGroup
+            secondLeaderReaped = second.leaderReaped
+            secondNoResidual = !second.residualProcessGroup
+            secondDrainsComplete = second.drainsComplete
+            opsStableAfterTreeGone =
+                processOperations.count == processOperationsAfterTreeGone
+            noReplacementTouched = !replacementTouched
+            termCount = processOperations.filter { $0 == .termSignal }.count
+            killCount = processOperations.filter { $0 == .killSignal }.count
             let retryPassed =
-                leaderPID == reportedLeaderPID
-                && !first.drainsComplete
-                && first.leaderReaped
-                && !first.residualProcessGroup
-                && second.leaderReaped
-                && !second.residualProcessGroup
-                && second.drainsComplete
-                && processOperations.count
-                    == processOperationsAfterTreeGone
-                && !replacementTouched
-                && processOperations.filter { $0 == .termSignal }.count == 1
-                && processOperations.filter { $0 == .killSignal }.count == 1
+                leaderPIDMatches
+                && firstDrainsIncomplete
+                && firstLeaderReaped
+                && firstNoResidual
+                && secondLeaderReaped
+                && secondNoResidual
+                && secondDrainsComplete
+                && opsStableAfterTreeGone
+                && noReplacementTouched
+                && termCount == 1
+                && killCount == 1
                 && processesGone
-            if !retryPassed {
-                print(
-                    "  [diag] drain_retry first_reaped=\(first.leaderReaped) "
-                        + "first_residual=\(first.residualProcessGroup) "
-                        + "first_drains=\(first.drainsComplete) "
-                        + "second_reaped=\(second.leaderReaped) "
-                        + "second_residual=\(second.residualProcessGroup) "
-                        + "second_drains=\(second.drainsComplete) "
-                        + "ops_before=\(processOperationsAfterTreeGone) "
-                        + "ops_after=\(processOperations.count)")
+            if let line = retryableReapDiagnostic(
+                passed: retryPassed,
+                leaderPIDMatches: leaderPIDMatches,
+                firstDrainsIncomplete: firstDrainsIncomplete,
+                firstLeaderReaped: firstLeaderReaped,
+                firstNoResidual: firstNoResidual,
+                secondLeaderReaped: secondLeaderReaped,
+                secondNoResidual: secondNoResidual,
+                secondDrainsComplete: secondDrainsComplete,
+                opsStableAfterTreeGone: opsStableAfterTreeGone,
+                noReplacementTouched: noReplacementTouched,
+                termCount: termCount,
+                killCount: killCount,
+                processesGone: processesGone,
+                launchToFixtureSeconds: launchToFixtureSeconds,
+                firstReapSeconds: firstReapSeconds,
+                secondReapSeconds: secondReapSeconds,
+                firstDeadlineRemainingSeconds: firstDeadlineRemainingSeconds,
+                secondDeadlineRemainingSeconds: secondDeadlineRemainingSeconds,
+                firstDeadlineSeconds: retryableReapFirstDeadlineGraceSeconds,
+                overallDeadlineSeconds: retryableReapOverallDeadlineSeconds,
+                drainDelaySeconds: drainDelaySeconds) {
+                print("  [diag] \(line)")
             }
             check(
                 "incomplete first reap remains retryable with positive cleanup grace",
                 retryPassed)
         } catch {
+            if let line = retryableReapDiagnostic(
+                passed: false,
+                leaderPIDMatches: leaderPIDMatches,
+                firstDrainsIncomplete: firstDrainsIncomplete,
+                firstLeaderReaped: firstLeaderReaped,
+                firstNoResidual: firstNoResidual,
+                secondLeaderReaped: secondLeaderReaped,
+                secondNoResidual: secondNoResidual,
+                secondDrainsComplete: secondDrainsComplete,
+                opsStableAfterTreeGone: opsStableAfterTreeGone,
+                noReplacementTouched: noReplacementTouched,
+                termCount: termCount,
+                killCount: killCount,
+                processesGone: processesGone,
+                launchToFixtureSeconds: launchToFixtureSeconds,
+                firstReapSeconds: firstReapSeconds,
+                secondReapSeconds: secondReapSeconds,
+                firstDeadlineRemainingSeconds: firstDeadlineRemainingSeconds,
+                secondDeadlineRemainingSeconds: secondDeadlineRemainingSeconds,
+                firstDeadlineSeconds: retryableReapFirstDeadlineGraceSeconds,
+                overallDeadlineSeconds: retryableReapOverallDeadlineSeconds,
+                drainDelaySeconds: drainDelaySeconds,
+                errorDescription: String(describing: error)) {
+                print("  [diag] \(line)")
+            }
             check(
                 "incomplete first reap remains retryable with positive cleanup grace",
                 false)
