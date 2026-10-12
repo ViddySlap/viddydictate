@@ -969,6 +969,12 @@ enum TailCheckSelfTest {
             "umbrella", "harbor", "canvas", "ledger", "orbit", "granite", "willow", "compass",
             "ember", "quartz", "lantern", "meadow", "cipher", "anchor", "ripple", "thicket",
             "beacon", "marble", "thistle", "copper", "driftwood", "satchel", "paddock", "kestrel",
+            "gable", "tundra", "prairie", "almond", "cinder", "basalt", "cavern", "dune",
+            "fjord", "geyser", "lagoon", "mesa", "oasis", "plateau", "ravine", "reef",
+            "summit", "valley", "bramble", "cobble", "fetter", "garland", "ingot", "juniper",
+            "kindling", "lattice", "mantel", "niche", "obelisk", "parlor", "quiver", "rampart",
+            "spigot", "trellis", "urn", "vestibule", "warren", "yarrow", "zephyr", "acorn",
+            "boulder", "cobblestone", "dapple", "eave", "furrow", "gully", "hollow", "inlet",
         ]
     }
 
@@ -1035,8 +1041,11 @@ enum TailCheckSelfTest {
         // fixed seed, so a value captured by reading one run's output is already wrong on the next.
         var usedWords: Set<String> = []
         func freshWord() -> String {
-            let word = RandomFixtureWords.bank.filter { !usedWords.contains($0) }.randomElement()
-                ?? RandomFixtureWords.bank.randomElement()!
+            let unusedWords = RandomFixtureWords.bank.filter { !usedWords.contains($0) }
+            guard let word = unusedWords.randomElement() else {
+                fatalError("[judge-request-shape] fixture word bank exhausted: bank="
+                    + "\(RandomFixtureWords.bank.count) draws=\(usedWords.count)")
+            }
             usedWords.insert(word)
             return word
         }
@@ -1091,6 +1100,27 @@ enum TailCheckSelfTest {
                      respondOllama: { ollamaOK("not json") },
                      wantAnswer: .some(nil)),
         ]
+
+        // vdtpwg5 repair (fixture tooling): the NOT-in-tail scenario's whole point is that the word
+        // its answer carries as the suffix is not one of the words in its own tail. Unique draws make
+        // that true by construction; this row reads the scenario's own tail string and the suffix it
+        // actually answers with, so a fixture edit that reuses the word (a forced collision) fails
+        // here instead of leaving the collision to odds.
+        let notInTailLabel = "LM Studio: well-formed junk whose suffix is NOT in the tail"
+        if let notInTail = scenarios.first(where: { $0.label == notInTailLabel }),
+           let answerData = notInTail.respondLMStudio().0,
+           let answerJSON = try? JSONSerialization.jsonObject(with: answerData) as? [String: Any],
+           let suffixWord = answerJSON["junk_suffix"] as? String {
+            let tailWords = notInTail.tail.split(separator: " ").map(String.init)
+            reporter.record(
+                "[judge-request-shape] fixture: the NOT-in-tail scenario's suffix word occurs in none of its tail words",
+                !tailWords.contains(suffixWord),
+                "suffix=\(suffixWord) tail=\(notInTail.tail)")
+        } else {
+            reporter.record(
+                "[judge-request-shape] fixture: the NOT-in-tail scenario's suffix word occurs in none of its tail words",
+                false, "could not read the NOT-in-tail scenario's own tail and suffix answer")
+        }
 
         for s in scenarios {
             var capturedLMStudioRequests: [URLRequest] = []
