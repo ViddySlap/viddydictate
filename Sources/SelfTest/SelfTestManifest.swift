@@ -574,6 +574,13 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .sttNonFiniteSelftest: .init(tier: .deterministic) { _ in
         SttNonFiniteSelfTest.run() ? 0 : 1
     },
+    // chain/app-first-picker-20261011: the Local picker as app first, then that app's own models,
+    // as data beside the flat `build` rule. The pure-model rows use no AppKit/store/LM Studio/Ollama;
+    // the shot rows additionally build the AppKit preview window and drive its controls over scratch stores.
+    // Flag: --local-app-picker-selftest.
+    .localAppPickerSelftest: .init(tier: .deterministic) { _ in
+        LocalAppPickerSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

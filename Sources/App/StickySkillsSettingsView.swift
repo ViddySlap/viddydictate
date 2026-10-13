@@ -214,7 +214,12 @@ final class StickySkillsSettingsView: NSView {
         card.addSubview(SettingsSectionKit.label(
             "Model", x: 14, y: 133, width: 40,
             size: 10.5, weight: .regular, color: .secondaryLabelColor))
-        card.addSubview(modelPopup(skill: skill, selected: selected, x: 58, y: 128, width: 300))
+        if selected.provider == .local {
+            addLocalModelControls(to: card, skill: skill, selected: selected,
+                                  x: 58, y: 128, width: 300)
+        } else {
+            card.addSubview(modelPopup(skill: skill, selected: selected, x: 58, y: 128, width: 300))
+        }
         card.addSubview(SettingsSectionKit.label(
             "Effort", x: 370, y: 133, width: 42,
             size: 10.5, weight: .regular, color: .secondaryLabelColor))
@@ -358,6 +363,45 @@ final class StickySkillsSettingsView: NSView {
                 for: skill.routeID, on: settingsStore.effectiveLocalBackend())))
     }
 
+    /// The Local picker when more than one app has models: an app popup (LM Studio first) then that
+    /// app's own model popup, both laid out in the width the flat picker used. With one app this is the
+    /// flat picker unchanged, so an LM-Studio-only Mac is byte-identical to 1.1.0.
+    private func addLocalModelControls(to card: NSView, skill: StickySkill,
+                                       selected: LLMProviderBundle,
+                                       x: CGFloat, y: CGFloat, width: CGFloat) {
+        let tested = LLMProviderDefaults.testedLocalBundle(
+            for: skill.routeID, on: settingsStore.effectiveLocalBackend())
+        let options = LocalModelPickerItems.stickySkillOptions(
+            catalog: localCatalog, pinned: selected, tested: tested)
+        guard LocalModelPickerItems.appChoices(options: options).count > 1 else {
+            let popup = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25),
+                                      pullsDown: false)
+            popup.identifier = NSUserInterfaceItemIdentifier("sticky-skill-model|\(skill.id)")
+            popup.target = self
+            popup.action = #selector(modelChanged(_:))
+            addLocalModelItems(to: popup, skill: skill, selected: selected)
+            card.addSubview(popup)
+            return
+        }
+        let appWidth: CGFloat = 96
+        let gap: CGFloat = 6
+        let appPopup = NSPopUpButton(frame: NSRect(x: x, y: y, width: appWidth, height: 25),
+                                     pullsDown: false)
+        appPopup.identifier = NSUserInterfaceItemIdentifier("sticky-skill-local-app|\(skill.id)")
+        appPopup.target = self
+        appPopup.action = #selector(localAppChanged(_:))
+        let model = NSPopUpButton(frame: NSRect(x: x + appWidth + gap, y: y,
+                                                width: width - appWidth - gap, height: 25),
+                                  pullsDown: false)
+        model.identifier = NSUserInterfaceItemIdentifier("sticky-skill-model|\(skill.id)")
+        model.target = self
+        model.action = #selector(modelChanged(_:))
+        LocalModelPickerItems.populateAppModel(appPopup, model, options: options,
+                                               pinned: selected.localRef)
+        card.addSubview(appPopup)
+        card.addSubview(model)
+    }
+
     private func effortPopup(skill: StickySkill, selected: LLMProviderBundle,
                              x: CGFloat, y: CGFloat, width: CGFloat) -> NSPopUpButton {
         let popup = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25),
@@ -437,6 +481,24 @@ final class StickySkillsSettingsView: NSView {
             try settingsStore.selectProvider(provider, for: skill.routeID)
             status("\(skill.name) now uses \(provider.displayName).")
         } catch { status(error.localizedDescription, error: true) }
+    }
+
+    /// The app popup changed. Repopulate the model list for the chosen app only; the pin is written by
+    /// `modelChanged` when (and only when) the user picks a model. Until then the old pin stays in
+    /// effect, and a rebuild reverts the app popup to the pin's app.
+    @objc private func localAppChanged(_ sender: NSPopUpButton) {
+        guard let skill = skill(for: sender, prefix: "sticky-skill-local-app|"),
+              let raw = sender.selectedItem?.representedObject as? String,
+              let app = LocalBackendID(rawValue: raw),
+              let modelPopup = descendant(id: "sticky-skill-model|\(skill.id)") as? NSPopUpButton
+        else { return }
+        let selected = settingsStore.displayedBundle(for: skill.routeID)
+        let tested = LLMProviderDefaults.testedLocalBundle(
+            for: skill.routeID, on: settingsStore.effectiveLocalBackend())
+        let options = LocalModelPickerItems.stickySkillOptions(
+            catalog: localCatalog, pinned: selected, tested: tested)
+        LocalModelPickerItems.populateModelPopup(modelPopup, for: app, options: options,
+                                                 selected: selected.localRef)
     }
 
     @objc private func modelChanged(_ sender: NSPopUpButton) {

@@ -568,8 +568,13 @@ final class ModelsPowerSettingsView: NSView {
         let selected = settingsStore.displayedBundle(for: route)
         card.addSubview(text("Model", x: xOffset, y: y + 4, width: 44,
                              size: 10.5, weight: .regular, color: .secondaryLabelColor))
-        card.addSubview(modelPopup(route: route, selected: selected,
-                                   x: xOffset + 48, y: y, width: 250))
+        if selected.provider == .local {
+            addLocalModelControls(to: card, route: route, selected: selected,
+                                  x: xOffset + 48, y: y, width: 250)
+        } else {
+            card.addSubview(modelPopup(route: route, selected: selected,
+                                       x: xOffset + 48, y: y, width: 250))
+        }
         card.addSubview(text("Effort", x: xOffset + 310, y: y + 4, width: 42,
                              size: 10.5, weight: .regular, color: .secondaryLabelColor))
         card.addSubview(effortPopup(route: route, selected: selected,
@@ -637,6 +642,44 @@ final class ModelsPowerSettingsView: NSView {
         LocalModelPickerItems.populate(p, with: LocalModelPickerItems.routingGrid(
             catalog: localCatalog, pinned: selected,
             tested: LLMProviderDefaults.testedBundle(for: .local, route: route)))
+    }
+
+    /// The Local picker when more than one app has models: an app popup (LM Studio first) then that
+    /// app's own model popup, both laid out in the width the flat picker used. With one app this is the
+    /// flat picker unchanged, so the common LM-Studio-only Mac is byte-identical to 1.1.0.
+    private func addLocalModelControls(to card: NSView, route: LLMRouteID,
+                                       selected: LLMProviderBundle,
+                                       x: CGFloat, y: CGFloat, width: CGFloat) {
+        let tested = LLMProviderDefaults.testedBundle(for: .local, route: route)
+        let options = LocalModelPickerItems.routingGridOptions(catalog: localCatalog, pinned: selected)
+        guard LocalModelPickerItems.appChoices(options: options).count > 1 else {
+            let p = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25),
+                                  pullsDown: false)
+            p.identifier = NSUserInterfaceItemIdentifier("model|\(route.rawValue)")
+            p.target = self
+            p.action = #selector(modelChanged(_:))
+            addLocalModelItems(to: p, route: route, selected: selected)
+            card.addSubview(p)
+            return
+        }
+        let appWidth: CGFloat = 96
+        let gap: CGFloat = 6
+        let appPopup = NSPopUpButton(frame: NSRect(x: x, y: y, width: appWidth, height: 25),
+                                     pullsDown: false)
+        appPopup.identifier = NSUserInterfaceItemIdentifier("local-app|\(route.rawValue)")
+        appPopup.target = self
+        appPopup.action = #selector(localAppChanged(_:))
+        let model = NSPopUpButton(frame: NSRect(x: x + appWidth + gap, y: y,
+                                                width: width - appWidth - gap, height: 25),
+                                  pullsDown: false)
+        model.identifier = NSUserInterfaceItemIdentifier("model|\(route.rawValue)")
+        model.target = self
+        model.action = #selector(modelChanged(_:))
+        LocalModelPickerItems.populateAppModel(
+            appPopup, model, options: options, pinned: selected.localRef,
+            suffix: LocalModelPickerItems.routingGridSuffix(pinned: selected, tested: tested))
+        card.addSubview(appPopup)
+        card.addSubview(model)
     }
 
     private func effortPopup(route: LLMRouteID, selected: LLMProviderBundle,
@@ -836,6 +879,22 @@ final class ModelsPowerSettingsView: NSView {
             try settingsStore.setSelectedBundle(bundle, for: route)
             status("Saved \(Self.displayName(for: route)) model \(compactModelName(id)).")
         } catch { status(error.localizedDescription, error: true) }
+    }
+
+    /// The app popup changed. Repopulate the model list for the chosen app only; the route's pin is
+    /// written by `modelChanged` when (and only when) the user picks a model. Until then the old pin
+    /// stays in effect, and a rebuild reverts the app popup to the pin's app.
+    @objc private func localAppChanged(_ sender: NSPopUpButton) {
+        guard let route = Self.routeFrom(sender.identifier, prefix: "local-app|"),
+              let raw = sender.selectedItem?.representedObject as? String,
+              let app = LocalBackendID(rawValue: raw),
+              let modelPopup = descendant(id: "model|\(route.rawValue)") as? NSPopUpButton else { return }
+        let selected = settingsStore.displayedBundle(for: route)
+        let tested = LLMProviderDefaults.testedBundle(for: .local, route: route)
+        let options = LocalModelPickerItems.routingGridOptions(catalog: localCatalog, pinned: selected)
+        LocalModelPickerItems.populateModelPopup(
+            modelPopup, for: app, options: options, selected: selected.localRef,
+            suffix: LocalModelPickerItems.routingGridSuffix(pinned: selected, tested: tested))
     }
 
     @objc private func effortChanged(_ sender: NSPopUpButton) {

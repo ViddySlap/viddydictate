@@ -532,6 +532,9 @@ tier_deterministic() {
         run_gate deterministic "Local model picker over both local apps, labelled only when both (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --local-picker-merge-selftest || true
+        run_gate deterministic "Local model picker: app first, then that app's own models (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --local-app-picker-selftest || true
         run_system_memory_selftest_gate || true
         run_gate deterministic "local model capacity policy fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
