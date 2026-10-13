@@ -219,6 +219,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // `parseTranscribeBody`/metric default, and the retained-take recovery cap. Appended, so every
     // earlier flag keeps its first-wins dispatch position.
     case sttNonFiniteSelftest = "--stt-nonfinite-selftest"
+    // chain/app-first-picker-20261011: the Local picker as app first, then that app's own models, as
+    // data, beside the flat `build` rule it must not disturb. Pure, no AppKit; wired into verify.sh.
+    // Appended, so every earlier flag keeps its first-wins dispatch position.
+    case localAppPickerSelftest = "--local-app-picker-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

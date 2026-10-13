@@ -574,6 +574,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .sttNonFiniteSelftest: .init(tier: .deterministic) { _ in
         SttNonFiniteSelfTest.run() ? 0 : 1
     },
+    // chain/app-first-picker-20261011: the Local picker as app first, then that app's own models,
+    // as data beside the flat `build` rule. Pure: no AppKit, no store, no LM Studio, no Ollama.
+    // Flag: --local-app-picker-selftest.
+    .localAppPickerSelftest: .init(tier: .deterministic) { _ in
+        LocalAppPickerSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

@@ -60,6 +60,53 @@ enum LocalModelPickerItems {
         return items
     }
 
+    // MARK: - App first, then model (the two-step picker)
+
+    /// The title the model popup shows as its selected row when the shown app carries none of the pinned
+    /// ref: the user switched apps and has not chosen one of that app's models yet. The pin is untouched
+    /// until a model row is picked.
+    static let modelPlaceholder = "Choose a model"
+
+    /// The apps the app popup offers: only those that have at least one model, in `LocalBackendID.allCases`
+    /// order, so LM Studio (the app the simple install recommends) is always first.
+    static func appChoices(options: [LMStudioModelOption]) -> [LocalBackendID] {
+        LocalBackendID.allCases.filter { backend in
+            options.contains { $0.backend == backend }
+        }
+    }
+
+    /// The app the app popup shows for `selected`: the pinned ref's app when the rows carry it (the pin's
+    /// app may be a row the view appended, e.g. a pin whose app is not running), otherwise the first app
+    /// choice. Nil only when no app has a model.
+    static func shownApp(options: [LMStudioModelOption], selected: LocalModelRef?) -> LocalBackendID? {
+        let choices = appChoices(options: options)
+        if let selected, choices.contains(selected.backend) { return selected.backend }
+        return choices.first
+    }
+
+    /// One app's model rows for the two-step picker, deduped by `(app, id)` exactly as `build` dedupes:
+    /// that app's models only, plain labels with NO app prefix (the app popup already names the app), and
+    /// the view's `suffix` qualifier ("  ·  Staff pick", "  ·  Custom", ...) appended after the label. The
+    /// pin's model is selected only when the pin belongs to `app`; otherwise nothing is selected and the
+    /// view shows `modelPlaceholder` instead.
+    static func models(for app: LocalBackendID, options: [LMStudioModelOption],
+                       selected: LocalModelRef?,
+                       suffix: (LocalModelRef) -> String = { _ in "" }) -> [Item] {
+        var seen = Set<LocalModelRef>()
+        let unique = options.filter { $0.backend == app && seen.insert($0.ref).inserted }
+        return unique.map { option in
+            Item(ref: option.ref, title: option.label + suffix(option.ref),
+                 isSelected: option.ref == selected)
+        }
+    }
+
+    /// True when the model popup must show `modelPlaceholder` as its selected row: the shown app carries
+    /// none of the pin, which is exactly the moment the user switches apps before choosing a model (or
+    /// there is no pin at all). The PIN itself is never read or written here; only the popup's selection.
+    static func showsModelPlaceholder(for app: LocalBackendID, selected: LocalModelRef?) -> Bool {
+        selected?.backend != app
+    }
+
     /// The routing grid's Local picker (Hotkeys tab, `ModelsPowerSettingsView`): the catalog (or the shipped
     /// fallback list when discovery has not answered), then the pin when the catalog lacks it. The pin's row
     /// reads "  ·  Custom" and each app's copy of the route's default "  ·  Staff pick" (D11), both matched by
@@ -67,10 +114,19 @@ enum LocalModelPickerItems {
     /// copy of LM Studio's default id is not called a staff pick.
     static func routingGrid(catalog: [LMStudioModelOption]?, pinned: LLMProviderBundle,
                             tested: LLMProviderBundle?) -> [Item] {
+        build(options: routingGridOptions(catalog: catalog, pinned: pinned),
+              selected: pinned.localRef,
+              suffix: routingGridSuffix(pinned: pinned, tested: tested))
+    }
+
+    /// The routing grid's per-row qualifier, shared by the flat picker and the two-step model popup: each
+    /// app's copy of the route's shipped default reads "  ·  Staff pick", the pin reads "  ·  Custom", both
+    /// matched by `(app, id)` so the same id on the other app keeps its own qualifier.
+    static func routingGridSuffix(pinned: LLMProviderBundle, tested: LLMProviderBundle?)
+        -> (LocalModelRef) -> String {
         let pin = pinned.localRef
-        let options = routingGridOptions(catalog: catalog, pinned: pinned)
         let staffPicks = StaffPicks.localRefs(tested: tested)
-        return build(options: options, selected: pin) { ref in
+        return { ref in
             if staffPicks.contains(ref) { return StaffPicks.gridQualifier }
             return ref == pin ? StaffPicks.gridCustomQualifier : ""
         }
@@ -111,6 +167,15 @@ enum LocalModelPickerItems {
     /// Local bundle carries no app, which means LM Studio.
     static func stickySkill(catalog: [LMStudioModelOption]?, pinned: LLMProviderBundle,
                             tested: LLMProviderBundle?) -> [Item] {
+        build(options: stickySkillOptions(catalog: catalog, pinned: pinned, tested: tested),
+              selected: pinned.localRef)
+    }
+
+    /// The rows a Sticky Skill card's Local picker is built from: the catalog (or the fallback list), then the
+    /// shipped default's " - Staff pick" qualifier and the pin's " - Current", both by `(app, id)`. The
+    /// two-step picker filters these same rows by app, so the two shapes cannot drift.
+    static func stickySkillOptions(catalog: [LMStudioModelOption]?, pinned: LLMProviderBundle,
+                                   tested: LLMProviderBundle?) -> [LMStudioModelOption] {
         var options = LMStudioModelCatalog.pickerOptions(discovered: catalog)
         if let tested {
             options.append(LMStudioModelOption(
@@ -120,7 +185,7 @@ enum LocalModelPickerItems {
         options.append(LMStudioModelOption(
             modelID: pinned.modelID, label: shortName(pinned.modelID) + " - Current",
             backend: pinned.resolvedLocalBackend))
-        return build(options: options.filter { !$0.modelID.isEmpty }, selected: pinned.localRef)
+        return options.filter { !$0.modelID.isEmpty }
     }
 
     /// The short label both views give a Local id the catalog does not describe: the id without its org
