@@ -226,6 +226,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // chain/timeout-wording-20261013: a local-model timeout must say which model timed out and which
     // limit fired. Appended, so every earlier flag keeps its first-wins dispatch position.
     case timeoutWordingSelftest = "--timeout-wording-selftest"
+    // Selectable Whisper versions, part 2 of 3: the Speech Settings tab. Appended, so every earlier
+    // flag keeps its first-wins dispatch position.
+    case whisperSpeechSelftest = "--whisper-speech-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

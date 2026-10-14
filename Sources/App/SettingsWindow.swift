@@ -10,6 +10,7 @@ enum SettingsTab: String, CaseIterable {
     case hotkeys = "Hotkeys"
     case stickySkills = "Sticky Skills"
     case audio = "Audio"
+    case speech = "Speech"
     case appearance = "Appearance"
     case dictionary = "Dictionary"
     case history = "History"
@@ -53,6 +54,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let contentWidth: CGFloat = 640
     private weak var modelsPowerView: ModelsPowerSettingsView?
     private weak var stickySkillsView: StickySkillsSettingsView?
+    private weak var speechView: WhisperSpeechSettingsView?
     private weak var setupView: SetupSettingsView?
     private weak var powerView: PowerSettingsView?
     /// One flow for getting a provider connected (Public V1 spec W4, item P9), shared by the Setup tab's
@@ -108,6 +110,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         modelsPowerView?.refreshAvailableLocalModels()
         stickySkillsView?.refresh()
         stickySkillsView?.refreshAvailableLocalModels()
+        speechView?.refresh()
         powerView?.refresh()
         CodexConnectionController.shared.refreshAvailability()
         NSApp.activate(ignoringOtherApps: true)
@@ -159,6 +162,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .hotkeys: content = scrollWrap(buildHotkeysContent())
             case .stickySkills: content = scrollWrap(buildStickySkillsContent())
             case .audio: content = scrollWrap(buildAudioContent())
+            case .speech: content = scrollWrap(buildSpeechContent())
             case .appearance: content = scrollWrap(buildAppearanceContent())
             case .dictionary: content = scrollWrap(buildDictionaryContent())
             // History manages its own internal scrolling, so it is embedded directly (no scrollWrap).
@@ -232,6 +236,16 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private func buildStickySkillsContent() -> NSView {
         let view = StickySkillsSettingsView(width: contentWidth)
         stickySkillsView = view
+        return view
+    }
+
+    private func buildSpeechContent() -> NSView {
+        let view = WhisperSpeechSettingsView(width: contentWidth)
+        view.onAction = { [weak view] action, repo in
+            view?.model.perform(action, repo: repo)
+            view?.render()
+        }
+        speechView = view
         return view
     }
 

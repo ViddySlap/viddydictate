@@ -806,6 +806,9 @@ tier_deterministic() {
         run_gate deterministic "Whisper model catalog, hub-layout store probe, and effects-injected switch (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --whisper-model-selftest || true
+        run_gate deterministic "Whisper Speech tab picker model selftest (pure checks; render via VD_RENDER_OUT)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --whisper-speech-selftest || true
         run_gate deterministic "Setup install remedy names the real first-run setup button (old wording control)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --setup-remedy-copy-selftest || true

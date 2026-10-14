@@ -547,6 +547,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .whisperModelSelftest: .init(tier: .deterministic) { _ in
         WhisperModelSelfTest.run() ? 0 : 1
     },
+    // Selectable Whisper versions, part 2: the Speech Settings tab. Pure model checks always; the AppKit
+    // render runs only when env VD_RENDER_OUT is set (the lane replay runs it natively).
+    .whisperSpeechSelftest: .init(tier: .deterministic) { _ in
+        WhisperSpeechTabRender.run() ? 0 : 1
+    },
     // Pure: the remedy strings and a read of SetupSettingsView.swift. No view, no window. The AppKit half
     // (the button on screen, clicked once) is --setup-render.
     .setupRemedyCopySelftest: .init(tier: .deterministic) { _ in

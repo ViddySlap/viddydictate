@@ -70,7 +70,7 @@ enum LowPowerSelfTest {
               labels.filter { $0 == "Sticky Skills" }.count == 1
                 && labels.firstIndex(of: "Sticky Skills") == 2)
         check("consolidation preserves every unrelated tab and their order",
-              labels == ["Setup", "Hotkeys", "Sticky Skills", "Audio", "Appearance",
+              labels == ["Setup", "Hotkeys", "Sticky Skills", "Audio", "Speech", "Appearance",
                          "Dictionary", "History", "Notes"])
 
         checkRetiredTabPointers(check, live: Set(labels))
