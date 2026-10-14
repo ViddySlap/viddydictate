@@ -55,6 +55,13 @@ final class OneShotRegistry {
 
     init(context: OneShotContext) { self.context = context }
 
+    /// The in-flight request's timeout-detail box, created when the client is dispatched and read by
+    /// `finish`'s failure landings. For the in-place built-ins the SAME box is passed into the request
+    /// builder (`makeCleanupSelectionRequest` / `makeEmailRequest`), so the classifier decodes the fired
+    /// limit back into it; search and custom modes build their request inside their own client and the
+    /// box stays empty, which is the explicit generic-sentence case (listed in notes/red-record.md).
+    private(set) var inFlightTimeoutDetail: LocalStreamTimeoutDetail?
+
     /// Test seam: override the custom-mode transform call so the headless selftest drives the shared
     /// flow with a stub instead of a live `CleanupClient` -> LM Studio round trip. nil in production
     /// (custom modes resolve through `CustomModeClient.run`, dispatching on the model kind).
@@ -83,20 +90,33 @@ final class OneShotRegistry {
     /// Pure request builders shared by the built-in rows and deterministic route-coverage tests.
     static func makeCleanupSelectionRequest(input: String, selected: LLMProviderBundle,
                                             systemPrompt: String,
-                                            timeout: TimeInterval) -> TextTransformRequest {
+                                            timeout: TimeInterval,
+                                            timeoutDetail: LocalStreamTimeoutDetail? = nil) -> TextTransformRequest {
         TextTransformRequest(
             route: .promptPrep, bundle: selected, sourceText: input,
             systemPrompt: systemPrompt,
-            userMessage: CleanupClient.wrap(input), timeout: timeout)
+            userMessage: CleanupClient.wrap(input), timeout: timeout,
+            timeoutDetail: timeoutDetail ?? LocalStreamTimeoutDetail())
     }
 
     static func makeEmailRequest(input: String, selected: LLMProviderBundle,
                                  systemPrompt: String,
-                                 timeout: TimeInterval) -> TextTransformRequest {
+                                 timeout: TimeInterval,
+                                 timeoutDetail: LocalStreamTimeoutDetail? = nil) -> TextTransformRequest {
         TextTransformRequest(
             route: .email, bundle: selected, sourceText: input,
             systemPrompt: systemPrompt,
-            userMessage: EmailClient.wrap(input), timeout: timeout)
+            userMessage: EmailClient.wrap(input), timeout: timeout,
+            timeoutDetail: timeoutDetail ?? LocalStreamTimeoutDetail())
+    }
+
+    /// Pure presentation seam shared by the registry's failure landings and the timeout-wording
+    /// selftest: turn a one-shot failure into the content-safe sentence a toast shows.
+    static func failurePresentation(
+        for result: CleanupClient.Result,
+        timeoutDetail: LocalStreamTimeoutDetail?
+    ) -> TextTransformClient.FailurePresentation? {
+        TextTransformClient.safeFailurePresentation(for: result, timeoutDetail: timeoutDetail)
     }
 
     /// Build the one-shot search failure log without exposing arbitrary result detail. Only Option+G
@@ -325,6 +345,9 @@ final class OneShotRegistry {
                            lateRecovery: Bool = false) {
         context.note(entry.workingNote)
         Log.write(entry.runLog(input, wordCount, level))
+        // One box per dispatch: the in-place client closures pass this exact instance into the request,
+        // and the classifier decodes the fired limit back into it for `finish`'s presentation.
+        inFlightTimeoutDetail = LocalStreamTimeoutDetail()
         // Snapshot both landing worlds before the first result consumes mutable registry/controller state.
         // The same immutable values stay captured by TextTransformClient's retry completion.
         let noteTarget = oneShotNoteTarget
@@ -356,6 +379,7 @@ final class OneShotRegistry {
                         historyID: UUID?, lateRecovery: Bool = false) {
         busy = false
         pending = nil
+        defer { inFlightTimeoutDetail = nil }
         defer { context.note(context.readyHint) }
         // B13: the landing below is unchanged - the text still lands, or the selection is still left
         // alone - and then the thing that was missing explains itself in place and offers to install
@@ -481,7 +505,7 @@ final class OneShotRegistry {
                 noSpeechToast: "", noQuestionToast: "",
                 workingNoun: "transforming",
                 landUINoun: "Transform",
-                client: { input, level, done in
+                client: { [weak self] input, level, done in
                     // Layer 2: the context-aware glossary rides the Cleanup-selection pass too. Model is
                     // Option+P's own choice (`promptPrepModeModel`, default = the cleanup model), so the P
                     // row's model is independent of the `?`-toggle model — mirroring how `promptPrepLevel`
@@ -497,7 +521,8 @@ final class OneShotRegistry {
                             local: Settings.cleanupTimeout, provider: bundle.provider)
                         return Self.makeCleanupSelectionRequest(
                             input: input, selected: bundle,
-                            systemPrompt: providerPrompt, timeout: timeout)
+                            systemPrompt: providerPrompt, timeout: timeout,
+                            timeoutDetail: self?.inFlightTimeoutDetail)
                     }
                     TextTransformClient.transformResolved(
                         resolution, route: .promptPrep, requestForBundle: requestForBundle,
@@ -516,7 +541,7 @@ final class OneShotRegistry {
                 noSpeechToast: "", noQuestionToast: "",
                 workingNoun: "writing",
                 landUINoun: "Email writer",
-                client: { input, _, done in
+                client: { [weak self] input, _, done in
                     // Option+M's system prompt expects the selection between EmailClient's NOTES markers, so
                     // every provider arm uses EmailClient.wrap (not the TRANSCRIPT wrap) to keep the prompt
                     // shape identical to the local gemma path.
@@ -529,7 +554,8 @@ final class OneShotRegistry {
                             local: Settings.emailTimeout, provider: bundle.provider)
                         return Self.makeEmailRequest(
                             input: input, selected: bundle,
-                            systemPrompt: providerPrompt, timeout: timeout)
+                            systemPrompt: providerPrompt, timeout: timeout,
+                            timeoutDetail: self?.inFlightTimeoutDetail)
                     }
                     TextTransformClient.transformResolved(
                         resolution, route: .email, requestForBundle: requestForBundle,
@@ -581,7 +607,8 @@ final class OneShotRegistry {
                                                            app: self.context.targetLabel,
                                                            id: historyID ?? UUID())
                     case .unavailable, .timedOut, .badOutput:
-                        let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+                        let presentation = Self.failurePresentation(
+                            for: result, timeoutDetail: self.inFlightTimeoutDetail)!
                         Log.write(Self.searchFailureLogLine(for: result, mode: mode))
                         self.context.hud.toast(
                             "⚠️ Search: \(presentation.userMessage) — no answer inserted.")
@@ -618,7 +645,8 @@ final class OneShotRegistry {
                                                        id: historyID ?? UUID())
                 case .unavailable, .timedOut, .badOutput:
                     let failure = TextTransformClient.safeFailure(for: result)!
-                    let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+                    let presentation = Self.failurePresentation(
+                        for: result, timeoutDetail: self.inFlightTimeoutDetail)!
                     Log.write("custom \(m.id) fallback classification=\(failure.logToken)")
                     self.context.hud.toast(
                         "⚠️ \(label): \(presentation.userMessage) — no output inserted. Retry under Models on the Hotkeys tab.")

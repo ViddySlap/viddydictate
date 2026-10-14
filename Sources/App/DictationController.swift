@@ -824,10 +824,11 @@ final class DictationController {
     /// by `CleanupLogic.landing(for:)`. Search and the inline cleanup switch keep bespoke fallbacks because
     /// their failure ACTION differs (answer-surface toast / paste-raw), so routing them here would be false
     /// unification.
-    private func failInPlace(_ result: CleanupClient.Result, uiNoun: String, logNoun: String) {
+    private func failInPlace(_ result: CleanupClient.Result, uiNoun: String, logNoun: String,
+                             timeoutDetail: LocalStreamTimeoutDetail?) {
         guard CleanupLogic.landing(for: result) == .rawFallback else { return }  // .ok: caller lands it
         guard let failure = TextTransformClient.safeFailure(for: result) else { return }
-        guard let presentation = TextTransformClient.safeFailurePresentation(for: result) else { return }
+        guard let presentation = TextTransformClient.safeFailurePresentation(for: result, timeoutDetail: timeoutDetail) else { return }
         Log.write("\(logNoun) fallback classification=\(failure.logToken) — text untouched")
         hud.toast(
             "⚠️ \(uiNoun): \(presentation.userMessage) — text left as-is. Retry under Models on the Hotkeys tab.")
@@ -948,10 +949,11 @@ final class DictationController {
         case .unavailable, .timedOut, .badOutput:
             switch CleanupLogic.inPlaceFailureLanding(for: inputSource) {
             case .leaveExistingText:
-                failInPlace(result, uiNoun: uiNoun, logNoun: logNoun)
+                failInPlace(result, uiNoun: uiNoun, logNoun: logNoun,
+                            timeoutDetail: oneShot.inFlightTimeoutDetail)
             case .deliverRawTranscript:
                 let failure = TextTransformClient.safeFailure(for: result)!
-                let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+                let presentation = TextTransformClient.safeFailurePresentation(for: result, timeoutDetail: oneShot.inFlightTimeoutDetail)!
                 Log.write("\(logNoun) fallback classification=\(failure.logToken) — raw")
                 hud.toast(
                     "⚠️ \(uiNoun): \(presentation.userMessage) — pasted raw. Retry under Models on the Hotkeys tab.")
@@ -1166,11 +1168,13 @@ final class DictationController {
     /// Pure request builder shared by the runtime cleanup path and deterministic route-coverage tests.
     static func makeCleanupRequest(route: LLMRouteID, input: String,
                                    selected: LLMProviderBundle, systemPrompt: String,
-                                   timeout: TimeInterval) -> TextTransformRequest {
+                                   timeout: TimeInterval,
+                                   timeoutDetail: LocalStreamTimeoutDetail? = nil) -> TextTransformRequest {
         TextTransformRequest(
             route: route, bundle: selected, sourceText: input,
             systemPrompt: systemPrompt,
-            userMessage: CleanupClient.wrap(input), timeout: timeout)
+            userMessage: CleanupClient.wrap(input), timeout: timeout,
+            timeoutDetail: timeoutDetail ?? LocalStreamTimeoutDetail())
     }
 
     /// Internal, not private (vdtpwg3 repair, point 3): `TailCheckSelfTest`'s `hook-wired` arm drives
@@ -1268,6 +1272,7 @@ final class DictationController {
         }
         // Every provider returns the shared `CleanupClient.Result`, so landing/raw fallback stays in one
         // closure. Power Mode never participates in the dispatch choice.
+        let timeoutDetail = LocalStreamTimeoutDetail()
         var fallbackReceipt: CleanupFallbackReceipt?
         var deferredRetryResult: CleanupClient.Result?
         let onResult: (CleanupClient.Result) -> Void = { [weak self] result in
@@ -1297,7 +1302,7 @@ final class DictationController {
                     }
                 case .unavailable, .timedOut, .badOutput:
                     let failure = TextTransformClient.safeFailure(for: result)!
-                    let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+                    let presentation = TextTransformClient.safeFailurePresentation(for: result, timeoutDetail: timeoutDetail)!
                     Log.write("cleanup fallback classification=\(failure.logToken) → raw")
                     self.hud.toast(
                         "⚠️ \(presentation.userMessage) — pasted raw. Retry under Models on the Hotkeys tab.")
@@ -1316,7 +1321,7 @@ final class DictationController {
                         if let deferred = deferredRetryResult {
                             deferredRetryResult = nil
                             self.landCleanupRetry(deferred, raw: raw, level: effectiveLevel,
-                                                  receipt: receipt)
+                                                  receipt: receipt, timeoutDetail: timeoutDetail)
                         }
                     }
                 }
@@ -1327,7 +1332,7 @@ final class DictationController {
                 guard let self = self, generation == self.takeGeneration else { return }
                 if let receipt = fallbackReceipt {
                     self.landCleanupRetry(result, raw: raw, level: effectiveLevel,
-                                          receipt: receipt)
+                                          receipt: receipt, timeoutDetail: timeoutDetail)
                 } else {
                     // Locked captured-target landing is completion-based. Preserve a fast explicit retry
                     // until its first-attempt destination receipt exists instead of guessing a destination.
@@ -1344,7 +1349,8 @@ final class DictationController {
                 local: Settings.cleanupTimeout, provider: bundle.provider)
             return Self.makeCleanupRequest(
                 route: route, input: raw, selected: bundle,
-                systemPrompt: providerPrompt, timeout: retryTimeout)
+                systemPrompt: providerPrompt, timeout: retryTimeout,
+                timeoutDetail: timeoutDetail)
         }
         TextTransformClient.transformResolved(
             resolution, route: route, requestForBundle: requestForBundle,
@@ -1355,7 +1361,8 @@ final class DictationController {
     /// Replace the first attempt's raw fallback at its captured destination. A retry failure only refreshes
     /// the exact safe classification and re-arms Retry; raw is never pasted a second time.
     private func landCleanupRetry(_ result: CleanupClient.Result, raw: String, level: CleanupLevel,
-                                  receipt: CleanupFallbackReceipt?) {
+                                  receipt: CleanupFallbackReceipt?,
+                                  timeoutDetail: LocalStreamTimeoutDetail) {
         switch result {
         case .ok(let cleaned):
             let landed: Bool
@@ -1405,7 +1412,7 @@ final class DictationController {
             }
         case .unavailable, .timedOut, .badOutput:
             let failure = TextTransformClient.safeFailure(for: result)!
-            let presentation = TextTransformClient.safeFailurePresentation(for: result)!
+            let presentation = TextTransformClient.safeFailurePresentation(for: result, timeoutDetail: timeoutDetail)!
             Log.write("cleanup explicit retry classification=\(failure.logToken) — raw unchanged")
             hud.toast(
                 "⚠️ \(presentation.userMessage) — raw text left unchanged. Retry under Models on the Hotkeys tab.")

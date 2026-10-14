@@ -580,6 +580,11 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .localAppPickerSelftest: .init(tier: .deterministic) { _ in
         LocalAppPickerSelfTest.run() ? 0 : 1
     },
+    // chain/timeout-wording-20261013: a local-model timeout must say which model timed out and which
+    // limit fired. Pure: no AppKit, no store, no provider. Flag: --timeout-wording-selftest.
+    .timeoutWordingSelftest: .init(tier: .deterministic) { _ in
+        TimeoutWordingSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

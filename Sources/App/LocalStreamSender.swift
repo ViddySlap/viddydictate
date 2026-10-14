@@ -38,6 +38,44 @@ struct LocalStreamStallPolicy: Equatable {
 
     /// The transport error a fired limit reports: exactly the `URLError.timedOut` the callers classify.
     static func timedOutError() -> URLError { URLError(.timedOut) }
+
+    /// The same classification, carrying WHICH limit fired and the whole seconds of that limit, so the
+    /// presentation seam can say which model timed out and why. Still NSURLErrorDomain/NSURLErrorTimedOut.
+    static func timedOutError(verdict: LocalStreamStallPolicy.Verdict,
+                              policy: LocalStreamStallPolicy) -> URLError {
+        let seconds: TimeInterval = verdict == .ceiling ? policy.hardCeiling : policy.stallWindow
+        let verdictName = verdict == .ceiling ? "ceiling" : "stall"
+        return URLError(.timedOut, userInfo: [
+            LocalStreamTimeoutDetail.verdictKey: verdictName,
+            LocalStreamTimeoutDetail.secondsKey: seconds,
+        ])
+    }
+}
+
+/// Content-safe detail about a timed-out local stream, carried from the streaming sender to
+/// presentation. A reference type so every copy of the owning request shares one instance.
+final class LocalStreamTimeoutDetail {
+    enum Limit: Equatable {
+        case stall(seconds: Int)
+        case ceiling(seconds: Int)
+        case unknown
+    }
+    var modelID: String = ""
+    var limit: Limit = .unknown
+
+    static let verdictKey = "VDTimeoutVerdict"
+    static let secondsKey = "VDTimeoutSeconds"
+
+    static func limit(fromError error: Error?) -> Limit {
+        guard let ns = error as? NSError,
+              ns.domain == NSURLErrorDomain, ns.code == NSURLErrorTimedOut else { return .unknown }
+        let seconds = Int(((ns.userInfo[secondsKey] as? NSNumber)?.doubleValue ?? 0).rounded())
+        switch ns.userInfo[verdictKey] as? String {
+        case "ceiling": return .ceiling(seconds: seconds)
+        case "stall": return .stall(seconds: seconds)
+        default: return .unknown
+        }
+    }
 }
 
 /// Pure progress clock for one streaming request: request start, the last byte-arrival time, and the
@@ -227,21 +265,22 @@ private final class LocalStreamingRequest: NSObject, URLSessionDataDelegate {
         lock.unlock()
         guard !finished else { return }
         let now = Date()
-        if now.timeIntervalSince(startedAt) >= policy.hardCeiling
-            || now.timeIntervalSince(lastProgressAt) >= policy.stallWindow {
-            failTimeout()
+        if now.timeIntervalSince(startedAt) >= policy.hardCeiling {
+            failTimeout(verdict: .ceiling)
+        } else if now.timeIntervalSince(lastProgressAt) >= policy.stallWindow {
+            failTimeout(verdict: .stalled)
         }
     }
 
-    private func failTimeout() {
-        guard finishTimeout(response: responseSnapshot()) else { return }
+    private func failTimeout(verdict: LocalStreamStallPolicy.Verdict) {
+        guard finishTimeout(response: responseSnapshot(), verdict: verdict) else { return }
         lock.lock()
         let task = self.task
         lock.unlock()
         task?.cancel()
     }
 
-    private func finishTimeout(response: URLResponse?) -> Bool {
+    private func finishTimeout(response: URLResponse?, verdict: LocalStreamStallPolicy.Verdict) -> Bool {
         lock.lock()
         if finished { lock.unlock(); return false }
         finished = true
@@ -251,7 +290,7 @@ private final class LocalStreamingRequest: NSObject, URLSessionDataDelegate {
         lock.unlock()
         timer?.cancel()
         session?.finishTasksAndInvalidate()
-        completion(nil, response, LocalStreamStallPolicy.timedOutError())
+        completion(nil, response, LocalStreamStallPolicy.timedOutError(verdict: verdict, policy: policy))
         return true
     }
 

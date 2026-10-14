@@ -43,6 +43,7 @@ enum EmailClient {
                       systemPrompt: String = Settings.emailSystemPrompt,
                       transport: LocalChatTransport = .live,
                       readiness: ((String) -> ModelManager.ReadinessResult)? = nil,
+                      timeoutDetail: LocalStreamTimeoutDetail? = nil,
                       completion: @escaping (CleanupClient.Result) -> Void) {
         // LM Studio readiness: the caller's own check, else the transport's (`ModelManager.shared
         // .ensureReady(model)` in production, exactly the call this default always made).
@@ -65,7 +66,7 @@ enum EmailClient {
                                ?? .unavailable("model not loaded"))
                 case .response(let data, let response, let error, _):
                     finish(selection, data: data, response: response, error: error, startedAt: t0,
-                           completion: completion)
+                           timeoutDetail: timeoutDetail, completion: completion)
                 }
                 return
             }
@@ -77,7 +78,8 @@ enum EmailClient {
                 completion(failure); return
             }
             request(selection, timeout: timeout, model: model, endpoint: endpoint,
-                    systemPrompt: systemPrompt, transport: transport, completion: completion)
+                    systemPrompt: systemPrompt, transport: transport,
+                    timeoutDetail: timeoutDetail, completion: completion)
         }
     }
 
@@ -87,7 +89,7 @@ enum EmailClient {
         { req, done in
             email(req.sourceText, timeout: req.timeout, model: req.bundle.modelID,
                   backend: req.bundle.resolvedLocalBackend, systemPrompt: req.systemPrompt,
-                  transport: transport, completion: done)
+                  transport: transport, timeoutDetail: req.timeoutDetail, completion: done)
         }
     }
 
@@ -115,6 +117,7 @@ enum EmailClient {
                                 endpoint: URL,
                                 systemPrompt: String,
                                 transport: LocalChatTransport,
+                                timeoutDetail: LocalStreamTimeoutDetail? = nil,
                                 completion: @escaping (CleanupClient.Result) -> Void) {
         let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(.badOutput("empty input")); return }
@@ -126,16 +129,18 @@ enum EmailClient {
             transport: transport, progressTimeout: true
         ) { data, response, error in
             finish(selection, data: data, response: response, error: error, startedAt: t0,
-                   completion: completion)
+                   timeoutDetail: timeoutDetail, completion: completion)
         }
     }
 
     /// Classify one answer, from either app, into the delivered email.
     private static func finish(_ selection: String, data: Data?, response: URLResponse?, error: Error?,
-                               startedAt t0: Date, completion: @escaping (CleanupClient.Result) -> Void) {
+                               startedAt t0: Date, timeoutDetail: LocalStreamTimeoutDetail? = nil,
+                               completion: @escaping (CleanupClient.Result) -> Void) {
         let dt = Date().timeIntervalSince(t0)
         let classification = CleanupClient.classifyChatResponse(
-            data: data, response: response, error: error, logPrefix: "email", elapsed: dt)
+            data: data, response: response, error: error, logPrefix: "email", elapsed: dt,
+            timeoutDetail: timeoutDetail)
         let content: String
         switch classification {
         case .content(let value):

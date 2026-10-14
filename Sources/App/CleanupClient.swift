@@ -147,11 +147,13 @@ enum CleanupClient {
 
     private static func classifyChatTransport(
         data: Data?, response: URLResponse?, error: Error?,
-        logPrefix: String?, elapsed: TimeInterval
+        logPrefix: String?, elapsed: TimeInterval,
+        timeoutDetail: LocalStreamTimeoutDetail? = nil
     ) -> ChatTransportClassification {
         if let error = error {
             let ns = error as NSError
             if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorTimedOut {
+                timeoutDetail?.limit = LocalStreamTimeoutDetail.limit(fromError: error)
                 if let logPrefix {
                     Log.write("\(logPrefix) TIMEOUT after \(String(format: "%.2f", elapsed))s")
                 }
@@ -175,11 +177,13 @@ enum CleanupClient {
     }
 
     static func classifyChatResponse(data: Data?, response: URLResponse?, error: Error?,
-                                     logPrefix: String, elapsed: TimeInterval) -> ChatResponseClassification {
+                                     logPrefix: String, elapsed: TimeInterval,
+                                     timeoutDetail: LocalStreamTimeoutDetail? = nil) -> ChatResponseClassification {
         let responseData: Data
         switch classifyChatTransport(
             data: data, response: response, error: error,
-            logPrefix: logPrefix, elapsed: elapsed
+            logPrefix: logPrefix, elapsed: elapsed,
+            timeoutDetail: timeoutDetail
         ) {
         case .data(let data):
             responseData = data
@@ -198,12 +202,14 @@ enum CleanupClient {
 
     static func classifyToolCapableChatResponse(
         data: Data?, response: URLResponse?, error: Error?,
-        logPrefix: String? = nil, elapsed: TimeInterval = 0
+        logPrefix: String? = nil, elapsed: TimeInterval = 0,
+        timeoutDetail: LocalStreamTimeoutDetail? = nil
     ) -> ToolCapableChatResponseClassification {
         let responseData: Data
         switch classifyChatTransport(
             data: data, response: response, error: error,
-            logPrefix: logPrefix, elapsed: elapsed
+            logPrefix: logPrefix, elapsed: elapsed,
+            timeoutDetail: timeoutDetail
         ) {
         case .data(let data):
             responseData = data
@@ -236,6 +242,7 @@ enum CleanupClient {
                         surface: OllamaSurfaceProfile = .cleanup,
                         transport: LocalChatTransport = .live,
                         readiness: ((String) -> ModelManager.ReadinessResult)? = nil,
+                        timeoutDetail: LocalStreamTimeoutDetail? = nil,
                         completion: @escaping (Result) -> Void) {
         // LM Studio readiness: the caller's own check, else the transport's (`ModelManager.shared
         // .ensureReady(model)` in production, exactly the call this default always made).
@@ -258,7 +265,7 @@ enum CleanupClient {
                                ?? .unavailable("model not loaded"))
                 case .response(let data, let response, let error, _):
                     finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
-                                  completion: completion)
+                                  timeoutDetail: timeoutDetail, completion: completion)
                 }
                 return
             }
@@ -270,7 +277,8 @@ enum CleanupClient {
                 completion(failure); return
             }
             sendRequest(raw, timeout: timeout, model: model, endpoint: endpoint,
-                        systemPrompt: systemPrompt, transport: transport, completion: completion)
+                        systemPrompt: systemPrompt, transport: transport,
+                        timeoutDetail: timeoutDetail, completion: completion)
         }
     }
 
@@ -281,7 +289,8 @@ enum CleanupClient {
         { req, done in
             cleanup(req.sourceText, timeout: req.timeout, model: req.bundle.modelID,
                     backend: req.bundle.resolvedLocalBackend, systemPrompt: req.systemPrompt,
-                    surface: surface, transport: transport, completion: done)
+                    surface: surface, transport: transport,
+                    timeoutDetail: req.timeoutDetail, completion: done)
         }
     }
 
@@ -314,6 +323,7 @@ enum CleanupClient {
                                     endpoint: URL,
                                     systemPrompt: String,
                                     transport: LocalChatTransport,
+                                    timeoutDetail: LocalStreamTimeoutDetail? = nil,
                                     completion: @escaping (Result) -> Void) {
         let body = requestBody(raw, model: model, systemPrompt: systemPrompt)
         let t0 = Date()
@@ -322,16 +332,18 @@ enum CleanupClient {
             transport: transport, progressTimeout: true
         ) { data, response, error in
             finishRequest(raw, data: data, response: response, error: error, startedAt: t0,
-                          completion: completion)
+                          timeoutDetail: timeoutDetail, completion: completion)
         }
     }
 
     /// Classify one answer, from either app, into the cleanup `Result`.
     private static func finishRequest(_ raw: String, data: Data?, response: URLResponse?, error: Error?,
-                                      startedAt t0: Date, completion: @escaping (Result) -> Void) {
+                                      startedAt t0: Date, timeoutDetail: LocalStreamTimeoutDetail? = nil,
+                                      completion: @escaping (Result) -> Void) {
         let dt = Date().timeIntervalSince(t0)
         let classification = classifyChatResponse(
-            data: data, response: response, error: error, logPrefix: "cleanup", elapsed: dt)
+            data: data, response: response, error: error, logPrefix: "cleanup", elapsed: dt,
+            timeoutDetail: timeoutDetail)
         let content: String
         switch classification {
         case .content(let value):

@@ -223,6 +223,9 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // data, beside the flat `build` rule it must not disturb. Pure, no AppKit; wired into verify.sh.
     // Appended, so every earlier flag keeps its first-wins dispatch position.
     case localAppPickerSelftest = "--local-app-picker-selftest"
+    // chain/timeout-wording-20261013: a local-model timeout must say which model timed out and which
+    // limit fired. Appended, so every earlier flag keeps its first-wins dispatch position.
+    case timeoutWordingSelftest = "--timeout-wording-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

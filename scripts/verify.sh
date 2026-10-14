@@ -535,6 +535,9 @@ tier_deterministic() {
         run_gate deterministic "Local model picker: app first, then that app's own models (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --local-app-picker-selftest || true
+        run_gate deterministic "timeout wording says which model and which limit fired (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --timeout-wording-selftest || true
         run_system_memory_selftest_gate || true
         run_gate deterministic "local model capacity policy fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \

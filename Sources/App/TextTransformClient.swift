@@ -24,10 +24,12 @@ struct TextTransformRequest: Equatable {
     let userMessage: String
     let timeout: TimeInterval
     let images: [TextTransformImage]
+    let timeoutDetail: LocalStreamTimeoutDetail
 
     init(route: LLMRouteID, bundle: LLMProviderBundle, sourceText: String,
          systemPrompt: String, userMessage: String, timeout: TimeInterval,
-         images: [TextTransformImage] = []) {
+         images: [TextTransformImage] = [],
+         timeoutDetail: LocalStreamTimeoutDetail = LocalStreamTimeoutDetail()) {
         self.route = route
         self.bundle = bundle
         self.sourceText = sourceText
@@ -35,13 +37,26 @@ struct TextTransformRequest: Equatable {
         self.userMessage = userMessage
         self.timeout = timeout
         self.images = images
+        self.timeoutDetail = timeoutDetail
+    }
+
+    /// The request identity is the route/prompt/envelope/timeout/images contract, never the
+    /// timeout-detail box (a reference type each dispatch mutates in place).
+    static func == (lhs: TextTransformRequest, rhs: TextTransformRequest) -> Bool {
+        lhs.route == rhs.route
+            && lhs.bundle == rhs.bundle
+            && lhs.sourceText == rhs.sourceText
+            && lhs.systemPrompt == rhs.systemPrompt
+            && lhs.userMessage == rhs.userMessage
+            && lhs.timeout == rhs.timeout
+            && lhs.images == rhs.images
     }
 
     func explicitlyRetrying(with bundle: LLMProviderBundle,
                             timeout: TimeInterval) -> TextTransformRequest {
         TextTransformRequest(route: route, bundle: bundle, sourceText: sourceText,
                              systemPrompt: systemPrompt, userMessage: userMessage, timeout: timeout,
-                             images: images)
+                             images: images, timeoutDetail: timeoutDetail)
     }
 }
 
@@ -74,10 +89,27 @@ struct TextTransformRetryDescriptor: Equatable {
 
     let failedRequest: TextTransformRequest
     let failure: Failure
+    let timeoutLimit: LocalStreamTimeoutDetail.Limit
+
+    init(failedRequest: TextTransformRequest, failure: Failure,
+         timeoutLimit: LocalStreamTimeoutDetail.Limit = .unknown) {
+        self.failedRequest = failedRequest
+        self.failure = failure
+        self.timeoutLimit = timeoutLimit
+    }
 
     var route: LLMRouteID { failedRequest.route }
     var failedProvider: LLMProvider { failedRequest.bundle.provider }
     var failedBundle: LLMProviderBundle { failedRequest.bundle }
+
+    /// Content-safe retry-alert text. A timeout names the bundle model and the fired limit; every
+    /// other failure stays the fixed category sentence.
+    var safeFailureText: String {
+        failure == .timedOut
+            ? TextTransformClient.timeoutSentence(modelID: failedRequest.bundle.modelID,
+                                                  limit: timeoutLimit)
+            : failure.userMessage
+    }
 
     func request(explicitlyUsing bundle: LLMProviderBundle,
                  timeout: TimeInterval) -> TextTransformRequest {
@@ -99,8 +131,26 @@ final class TextTransformRetryCenter {
         let route: LLMRouteID
         let failedProvider: LLMProvider
         let failure: TextTransformRetryDescriptor.Failure
+        let timeoutLimit: LocalStreamTimeoutDetail.Limit
+        let modelID: String
 
-        var safeFailureText: String { failure.userMessage }
+        init(id: UUID, route: LLMRouteID, failedProvider: LLMProvider,
+             failure: TextTransformRetryDescriptor.Failure,
+             timeoutLimit: LocalStreamTimeoutDetail.Limit = .unknown,
+             modelID: String = "") {
+            self.id = id
+            self.route = route
+            self.failedProvider = failedProvider
+            self.failure = failure
+            self.timeoutLimit = timeoutLimit
+            self.modelID = modelID
+        }
+
+        var safeFailureText: String {
+            failure == .timedOut
+                ? TextTransformClient.timeoutSentence(modelID: modelID, limit: timeoutLimit)
+                : failure.userMessage
+        }
     }
 
     typealias Executor = (LLMProviderBundle, UUID) -> Void
@@ -188,7 +238,9 @@ final class TextTransformRetryCenter {
             pending = Pending(
                 summary: Summary(id: UUID(), route: descriptor.route,
                                  failedProvider: descriptor.failedProvider,
-                                 failure: descriptor.failure),
+                                 failure: descriptor.failure,
+                                 timeoutLimit: descriptor.timeoutLimit,
+                                 modelID: descriptor.failedRequest.bundle.modelID),
                 execute: execute)
             return true
         }
@@ -431,6 +483,8 @@ enum TextTransformClient {
                                  claude: @escaping AsyncAdapter,
                                  codex: @escaping AsyncAdapter,
                                  completion: @escaping Completion) {
+        request.timeoutDetail.modelID = request.bundle.modelID
+        request.timeoutDetail.limit = .unknown
         let adapter = selectedAdapter(for: request.bundle.provider,
                                       local: local, claude: claude, codex: codex)
         adapter(request, completion)
@@ -472,7 +526,8 @@ enum TextTransformClient {
     static func retryDescriptor(for request: TextTransformRequest,
                                 after result: CleanupClient.Result) -> TextTransformRetryDescriptor? {
         guard let failure = safeFailure(for: result) else { return nil }
-        return TextTransformRetryDescriptor(failedRequest: request, failure: failure)
+        return TextTransformRetryDescriptor(failedRequest: request, failure: failure,
+                                            timeoutLimit: request.timeoutDetail.limit)
     }
 
     static func safeFailure(for result: CleanupClient.Result) -> TextTransformRetryDescriptor.Failure? {
@@ -481,6 +536,18 @@ enum TextTransformClient {
         case .unavailable: return .unavailable
         case .timedOut: return .timedOut
         case .badOutput: return .badOutput
+        }
+    }
+
+    static func timeoutSentence(modelID: String, limit: LocalStreamTimeoutDetail.Limit) -> String {
+        guard !modelID.isEmpty else { return TextTransformRetryDescriptor.Failure.timedOut.userMessage }
+        switch limit {
+        case .ceiling(let seconds):
+            return "\(modelID) timed out after \(seconds) seconds. It may be too slow for this task. Try a different model."
+        case .stall(let seconds):
+            return "\(modelID) stopped responding for \(seconds) seconds. Try a different model."
+        case .unknown:
+            return "\(modelID) timed out. It may be too slow for this task. Try a different model."
         }
     }
 
@@ -510,13 +577,21 @@ enum TextTransformClient {
     /// pass `forceFull: true` to `HUDPanel.toast`, and should. Consistency is owed within a family the
     /// user compares, not across every notice the app can raise.
     static func safeFailurePresentation(
-        for result: CleanupClient.Result
+        for result: CleanupClient.Result,
+        timeoutDetail: LocalStreamTimeoutDetail?
     ) -> FailurePresentation? {
         if let message = CleanupClient.capacityRefusalMessage(for: result) {
             return FailurePresentation(userMessage: message)
         }
         guard let failure = safeFailure(for: result) else { return nil }
-        return FailurePresentation(userMessage: failure.userMessage)
+        switch failure {
+        case .timedOut:
+            return FailurePresentation(userMessage: timeoutSentence(
+                modelID: timeoutDetail?.modelID ?? "",
+                limit: timeoutDetail?.limit ?? .unknown))
+        case .unavailable, .badOutput:
+            return FailurePresentation(userMessage: failure.userMessage)
+        }
     }
 
     private static func armAsyncRetry(for request: TextTransformRequest,

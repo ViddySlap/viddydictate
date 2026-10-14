@@ -320,16 +320,19 @@ enum ModelCapacitySelfTest {
                     == "Memory facts could not be read, so the model was not loaded."
                 && unavailableMessage(factsUnavailable) != unavailableMessage(overBudget))
 
-        let overPresentation = TextTransformClient.safeFailurePresentation(for: overBudget)
-        let factsPresentation = TextTransformClient.safeFailurePresentation(for: factsUnavailable)
+        let overPresentation = TextTransformClient.safeFailurePresentation(
+            for: overBudget, timeoutDetail: nil)
+        let factsPresentation = TextTransformClient.safeFailurePresentation(
+            for: factsUnavailable, timeoutDetail: nil)
         let quotaPresentation = TextTransformClient.safeFailurePresentation(
-            for: .unavailable("gemini HTTP 429"))
+            for: .unavailable("gemini HTTP 429"), timeoutDetail: nil)
         let auth401Presentation = TextTransformClient.safeFailurePresentation(
-            for: .unavailable("gemini HTTP 401"))
+            for: .unavailable("gemini HTTP 401"), timeoutDetail: nil)
         let auth403Presentation = TextTransformClient.safeFailurePresentation(
-            for: .unavailable("gemini HTTP 403"))
+            for: .unavailable("gemini HTTP 403"), timeoutDetail: nil)
         let ordinaryPresentation = TextTransformClient.safeFailurePresentation(
-            for: .unavailable("fixture provider diagnostic that must stay hidden"))
+            for: .unavailable("fixture provider diagnostic that must stay hidden"),
+            timeoutDetail: nil)
         reporter.record(
             "capacity strings survive presentation intact",
             overPresentation?.userMessage == CleanupClient.overBudgetMessage
@@ -363,7 +366,7 @@ enum ModelCapacitySelfTest {
             .unavailable("gemini HTTP 429 \(providerCanary)"),
             .unavailable("transport echoed \(providerCanary)"),
             .badOutput("provider stderr \(providerCanary)"),
-        ].compactMap { TextTransformClient.safeFailurePresentation(for: $0)?.userMessage }
+        ].compactMap { TextTransformClient.safeFailurePresentation(for: $0, timeoutDetail: nil)?.userMessage }
         reporter.record(
             "non-allowlisted Gemini and provider detail stays generic and never reaches the UI",
             nonAllowlistedPresentations.count == 4
