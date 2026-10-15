@@ -134,11 +134,13 @@ enum CustomModeClient {
     /// Pure request builder shared by runtime and deterministic H1 route-coverage tests.
     static func makeRequest(mode: CustomMode, input: String, selected: LLMProviderBundle,
                             systemPrompt: String, timeout: TimeInterval,
-                            images: [TextTransformImage] = []) -> TextTransformRequest {
-        TextTransformRequest(
+                            images: [TextTransformImage] = [],
+                            timeoutDetail: LocalStreamTimeoutDetail? = nil) -> TextTransformRequest {
+        return TextTransformRequest(
             route: mode.routeID, bundle: selected, sourceText: input,
             systemPrompt: systemPrompt, userMessage: CleanupClient.wrap(input), timeout: timeout,
-            images: images)
+            images: images,
+            timeoutDetail: timeoutDetail ?? LocalStreamTimeoutDetail())
     }
 
     /// Run a custom mode's transform on `input`, calling back with the shared `CleanupClient.Result`.
@@ -150,11 +152,12 @@ enum CustomModeClient {
     /// answer. A test passes `.inert` so the run also leaves the explicit-retry lifecycle alone.
     static func run(_ mode: CustomMode, input: String,
                     images: [TextTransformImage] = [],
+                    timeoutDetail: LocalStreamTimeoutDetail? = nil,
                     arming: TextTransformArming = .armed,
                     budget: CustomModeTimeoutBudget = .dictation,
                     completion: @escaping (CleanupClient.Result) -> Void) {
-        runReportingProvider(mode, input: input, images: images, arming: arming,
-                             budget: budget) { _, result in completion(result) }
+        runReportingProvider(mode, input: input, images: images, timeoutDetail: timeoutDetail,
+                             arming: arming, budget: budget) { _, result in completion(result) }
     }
 
     /// The same single dispatch, additionally reporting the provider that ACTUALLY executed.
@@ -170,6 +173,7 @@ enum CustomModeClient {
     static func runReportingProvider(
         _ mode: CustomMode, input: String,
         images: [TextTransformImage] = [],
+        timeoutDetail: LocalStreamTimeoutDetail? = nil,
         arming: TextTransformArming = .armed,
         budget: CustomModeTimeoutBudget = .dictation,
         completion: @escaping (CustomModeRunProvider?, CleanupClient.Result) -> Void
@@ -180,7 +184,8 @@ enum CustomModeClient {
         // availability at execution, never rewritten into the row.
         let resolution = Settings.modelsPower.resolveRoute(mode.routeID, fallback: mode.model)
         runResolvedReportingProvider(
-            mode, input: input, images: images, arming: arming, budget: budget,
+            mode, input: input, images: images, timeoutDetail: timeoutDetail,
+            arming: arming, budget: budget,
             resolution: resolution, completion: completion)
     }
 
@@ -191,6 +196,7 @@ enum CustomModeClient {
     static func runReportingProviderWithDegradation(
         _ mode: CustomMode, input: String,
         images: [TextTransformImage] = [],
+        timeoutDetail: LocalStreamTimeoutDetail? = nil,
         budget: CustomModeTimeoutBudget = .dictation,
         completion: @escaping (CustomModeRunProvider?, CleanupClient.Result) -> Void
     ) {
@@ -201,7 +207,8 @@ enum CustomModeClient {
             },
             attempt: { resolution, arming, done in
                 runResolvedReportingProvider(
-                    mode, input: input, images: images, arming: arming, budget: budget,
+                    mode, input: input, images: images, timeoutDetail: timeoutDetail,
+                    arming: arming, budget: budget,
                     resolution: resolution, completion: done)
             },
             completion: completion)
@@ -210,6 +217,7 @@ enum CustomModeClient {
     private static func runResolvedReportingProvider(
         _ mode: CustomMode, input: String,
         images: [TextTransformImage],
+        timeoutDetail: LocalStreamTimeoutDetail?,
         arming: TextTransformArming,
         budget: CustomModeTimeoutBudget,
         resolution: LLMRouteResolution,
@@ -222,7 +230,8 @@ enum CustomModeClient {
             makeRequest(
                 mode: mode, input: input, selected: bundle,
                 systemPrompt: systemPrompt(for: mode),
-                timeout: budget.timeout(for: bundle.provider), images: images)
+                timeout: budget.timeout(for: bundle.provider), images: images,
+                timeoutDetail: timeoutDetail)
         }
         TextTransformClient.transformResolved(
             resolution, route: mode.routeID, requestForBundle: requestForBundle,

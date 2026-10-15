@@ -590,6 +590,12 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .timeoutWordingSelftest: .init(tier: .deterministic) { _ in
         TimeoutWordingSelfTest.run() ? 0 : 1
     },
+    // chain/capacity-wording-20261014: a RAM-capacity refusal names the bundle model, and search /
+    // custom-mode timeouts name the model. Pure: no AppKit, no store, no provider. Flag:
+    // --capacity-wording-selftest.
+    .capacityWordingSelftest: .init(tier: .deterministic) { _ in
+        CapacityWordingSelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

@@ -576,11 +576,21 @@ enum TextTransformClient {
     /// advisories — a failed save, a blocked quit, a battery warning, a multi-line update notice — still
     /// pass `forceFull: true` to `HUDPanel.toast`, and should. Consistency is owed within a family the
     /// user compares, not across every notice the app can raise.
+    /// The model-naming sentence for a RAM-capacity refusal, when the bundle model id is known.
+    /// Content-safe: only the app-owned bundle model id is interpolated.
+    static func overBudgetSentence(modelID: String) -> String {
+        "\(modelID) does not fit in the memory free right now. Try a smaller model."
+    }
+
     static func safeFailurePresentation(
         for result: CleanupClient.Result,
         timeoutDetail: LocalStreamTimeoutDetail?
     ) -> FailurePresentation? {
         if let message = CleanupClient.capacityRefusalMessage(for: result) {
+            if message == CleanupClient.overBudgetMessage,
+               let modelID = timeoutDetail?.modelID, !modelID.isEmpty {
+                return FailurePresentation(userMessage: overBudgetSentence(modelID: modelID))
+            }
             return FailurePresentation(userMessage: message)
         }
         guard let failure = safeFailure(for: result) else { return nil }

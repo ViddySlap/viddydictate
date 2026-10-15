@@ -538,6 +538,9 @@ tier_deterministic() {
         run_gate deterministic "timeout wording says which model and which limit fired (negative controls)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --timeout-wording-selftest || true
+        run_gate deterministic "capacity wording names the model, and search/custom timeouts name it too (negative controls)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --capacity-wording-selftest || true
         run_system_memory_selftest_gate || true
         run_gate deterministic "local model capacity policy fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \

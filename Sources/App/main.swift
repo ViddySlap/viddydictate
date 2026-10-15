@@ -229,6 +229,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // Selectable Whisper versions, part 2 of 3: the Speech Settings tab. Appended, so every earlier
     // flag keeps its first-wins dispatch position.
     case whisperSpeechSelftest = "--whisper-speech-selftest"
+    // chain/capacity-wording-20261014: the RAM-capacity refusal names the model, and the search /
+    // custom-mode timeouts name the model. Appended, so every earlier flag keeps its first-wins
+    // dispatch position.
+    case capacityWordingSelftest = "--capacity-wording-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -667,7 +667,9 @@ final class OneShotRegistry {
                 if let stub = self?.customClientForTest {
                     stub(m, input, done)
                 } else {
-                    CustomModeClient.run(m, input: input, completion: done)
+                    CustomModeClient.run(m, input: input,
+                                         timeoutDetail: self?.inFlightTimeoutDetail,
+                                         completion: done)
                 }
             },
             runLog: { input, wc, _ in
