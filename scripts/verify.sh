@@ -812,6 +812,9 @@ tier_deterministic() {
         run_gate deterministic "Whisper Speech tab picker model selftest (pure checks; render via VD_RENDER_OUT)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --whisper-speech-selftest || true
+        run_gate deterministic "Whisper installer advanced voice-model picker selftest (pure; render via VD_RENDER_OUT)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --whisper-advanced-selftest || true
         run_gate deterministic "Setup install remedy names the real first-run setup button (old wording control)" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --setup-remedy-copy-selftest || true
@@ -1224,6 +1227,7 @@ tier_gui() {
         run_gui_gate "Setup tab preflight offscreen render" "${gui_env[@]}" "$TEST_APP" --setup-render "$SCRATCH/setup-render" || true
         run_gui_gate "provider onboarding offscreen render" "${gui_env[@]}" "$TEST_APP" --provider-onboarding-render "$SCRATCH/provider-onboarding-render" || true
         run_gui_gate "first-run component picker offscreen render" "${gui_env[@]}" "$TEST_APP" --component-picker-render "$SCRATCH/component-picker-render" || true
+        run_gui_gate "Whisper installer advanced voice-model picker offscreen render" "${gui_env[@]}" "$TEST_APP" --whisper-advanced-render "$SCRATCH/whisper-advanced-render" || true
         run_gui_gate "point-of-use install offer offscreen render" "${gui_env[@]}" "$TEST_APP" --point-of-use-render "$SCRATCH/point-of-use-render" || true
         run_gui_gate "first-run progress and permissions offscreen render" "${gui_env[@]}" "$TEST_APP" --install-progress-render "$SCRATCH/install-progress-render" || true
         run_gui_gate "Feature Tour pages offscreen render" "${gui_env[@]}" "$TEST_APP" --feature-tour-render "$SCRATCH/feature-tour-render" || true

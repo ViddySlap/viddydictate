@@ -596,6 +596,19 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .capacityWordingSelftest: .init(tier: .deterministic) { _ in
         CapacityWordingSelfTest.run() ? 0 : 1
     },
+    // Selectable Whisper versions, part 3 of 3: the installer's Voice models choice. Pure model
+    // checks always; the AppKit render runs only when env VD_RENDER_OUT is set (the lane replay runs
+    // it natively).
+    .whisperAdvancedSelftest: .init(tier: .deterministic) { _ in
+        WhisperAdvancedSelfTest.run() ? 0 : 1
+    },
+    .whisperAdvancedRender: .init(tier: .gui) { arguments in
+        guard let i = arguments.firstIndex(of: "--whisper-advanced-render"), i + 1 < arguments.count else {
+            print("[whisper-advanced-render] FAIL: an output directory is required")
+            return 2
+        }
+        return WhisperAdvancedRender.run(outDir: arguments[i + 1]) ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

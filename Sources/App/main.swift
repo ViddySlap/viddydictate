@@ -233,6 +233,10 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // custom-mode timeouts name the model. Appended, so every earlier flag keeps its first-wins
     // dispatch position.
     case capacityWordingSelftest = "--capacity-wording-selftest"
+    // Selectable Whisper versions, part 3 of 3: the installer's Voice models choice. Appended, so
+    // every earlier flag keeps its first-wins dispatch position.
+    case whisperAdvancedSelftest = "--whisper-advanced-selftest"
+    case whisperAdvancedRender = "--whisper-advanced-render"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -428,12 +428,16 @@ enum ComponentPicker {
         var localApp: LocalAppChoice
         var ollamaTicks: Set<RowID>
         var ollamaChoices: [RowID: InstallChoice]
+        /// Part 3: the installer's Voice models group. Defaults to Turbo ticked and active, so every
+        /// existing `Selection` literal means exactly what it always meant.
+        var whisper: WhisperVoiceModels.State
 
         init(lmStudio: Bool = false, gemma: Bool = false, qwen: Bool = false,
              lmStudioChoice: InstallChoice = .forMe,
              gemmaChoice: InstallChoice = .forMe,
              qwenChoice: InstallChoice = .forMe,
-             localApp: LocalAppChoice = .lmStudio) {
+             localApp: LocalAppChoice = .lmStudio,
+             whisper: WhisperVoiceModels.State = .defaultState) {
             self.lmStudio = lmStudio
             self.gemma = gemma
             self.qwen = qwen
@@ -443,6 +447,7 @@ enum ComponentPicker {
             self.localApp = localApp
             self.ollamaTicks = []
             self.ollamaChoices = [:]
+            self.whisper = whisper
         }
 
         func isTicked(_ id: RowID) -> Bool {
@@ -715,6 +720,10 @@ enum ComponentPicker {
         /// LM Studio is built exactly as it always was.
         var ollama: Bool = false
         var ollamaModels: [String] = []
+        /// Part 3: the extra ticked Whisper models beyond the mandatory core's Turbo download.
+        /// `whisperModels` is the one source: the active choice write rides on the active variant's
+        /// own descriptor (`writeWhisperChoiceOnSuccess`), so no separate active-repo field exists.
+        var whisperModels: [InstallerComponentDescriptor] = []
 
         /// The local rows, as the installer's OWN descriptors in dependency order: the app (`.app` then
         /// `.ready`), then each model (`.ready` then `.model`). LM Studio's are the 1.1.0 descriptors; Ollama's
@@ -735,7 +744,7 @@ enum ComponentPicker {
         }
 
         /// Everything the shared install queue is handed, core first (`BootstrapInstallCoordinator.start`).
-        var queue: [InstallerComponentDescriptor] { components + localComponents }
+        var queue: [InstallerComponentDescriptor] { components + whisperModels + localComponents }
     }
 
     /// The mandatory core is always in the plan (B2), so a caller cannot produce a plan that skips it.
@@ -745,7 +754,8 @@ enum ComponentPicker {
     /// lists, while the engine installs them as the one descriptor that owns both. Presentation splits
     /// the row; it does not split the work, and this is the only place the two shapes meet.
     static func installPlan(selection: Selection, facts: MachineFacts, environment: Environment,
-                            sizes: SizeCatalog = .measured) -> InstallPlan {
+                            sizes: SizeCatalog = .measured,
+                            installed: @escaping (String) -> Bool = { WhisperModelStore.isInstalled(repo: $0) }) -> InstallPlan {
         let rows = rows(selection: selection, facts: facts, environment: environment, sizes: sizes)
         var models: [String] = []
         var lmStudio = false
@@ -765,9 +775,44 @@ enum ComponentPicker {
                 }
             }
         }
+        // Part 3: the Voice models group contributes its own download descriptors. The active
+        // choice write rides on the active variant's own descriptor, so only Turbo ticked yields no
+        // extra descriptors and the plan is byte-for-byte today's plan.
+        let whisperDescriptors = voiceModelDescriptors(selection: selection, installed: installed)
         return InstallPlan(components: BootstrapInstallPlan.mandatoryCore,
                            lmStudio: lmStudio, models: models,
-                           ollama: ollama, ollamaModels: ollamaModels)
+                           ollama: ollama, ollamaModels: ollamaModels,
+                           whisperModels: whisperDescriptors)
+    }
+
+    // MARK: - Part 3: the Voice models group
+
+    static func voiceModelRows(selection: Selection,
+                               installed: (String) -> Bool) -> [WhisperVoiceModels.Row] {
+        WhisperVoiceModels.rows(state: selection.whisper, installed: installed)
+    }
+
+    static func voiceModelExtraBytes(selection: Selection,
+                                     installed: (String) -> Bool) -> UInt64 {
+        WhisperVoiceModels.extraDownloadBytes(state: selection.whisper, installed: installed)
+    }
+
+    static func voiceModelDescriptors(selection: Selection,
+                                      installed: (String) -> Bool) -> [InstallerComponentDescriptor] {
+        WhisperVoiceModels.descriptors(state: selection.whisper, installed: installed)
+    }
+
+    /// The total line plus the Voice models group's extra download bytes, in the same one-line idiom
+    /// as the existing single-arg `totalLine` (which stays untouched for the simple path).
+    static func totalLine(_ rows: [Row], voiceExtraBytes: UInt64) -> String {
+        let base = total(rows)
+        let (sum, overflow) = base.bytes.addingReportingOverflow(voiceExtraBytes)
+        let bytes = overflow ? UInt64.max : sum
+        var line = "Total download: " + downloadSize(bytes)
+        if !base.unmeasured.isEmpty {
+            line += ", plus " + base.unmeasured.map(title).joined(separator: " and ")
+        }
+        return line
     }
 
     // MARK: - Copy (O7: the spec's intent, in the spec's voice)
@@ -977,4 +1022,13 @@ enum ComponentPicker {
 
     static let localAppHeaderIdentifier = "component-picker-local-app-header"
     static let continueWarningIdentifier = "component-picker-continue-warning"
+
+    // Part 3: the Voice models group identifiers (used by the view and the offscreen render arm).
+    static let voiceHeaderIdentifier = "component-picker-voice-header"
+    static func voiceCardIdentifier(_ variantID: String) -> String { "component-picker-voice-card-\(variantID)" }
+    static func voiceTickIdentifier(_ variantID: String) -> String { "component-picker-voice-\(variantID)-tick" }
+    static func voiceActiveIdentifier(_ variantID: String) -> String { "component-picker-voice-\(variantID)-active" }
+    static func voiceSizeIdentifier(_ variantID: String) -> String { "component-picker-voice-\(variantID)-size" }
+    static let voiceHeaderTitle = "VOICE MODELS"
+    static let voiceNote = "Tick the Whisper versions to install now. The Active one is what ViddyDictate uses; Large V3 Turbo is the default."
 }

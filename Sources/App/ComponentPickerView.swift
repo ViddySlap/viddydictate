@@ -108,6 +108,10 @@ final class ComponentPickerView: NSView {
                            rows: optional, at: y, width: contentW)
         }
 
+        // Part 3: the Voice models group. There is no literal "Advanced" disclosure in this view, so
+        // the group is placed after the local-app/optional rows, under the optional area.
+        y = addVoiceModels(at: y + 8, width: contentW)
+
         y = addFooter(rows, at: y + 14, width: contentW)
         frame = NSRect(x: frame.origin.x, y: frame.origin.y, width: W, height: y + 18)
     }
@@ -124,6 +128,79 @@ final class ComponentPickerView: NSView {
         y = subtitle.frame.maxY + 8
         for row in rows { y = addRow(row, at: y, width: width) + 8 }
         return y
+    }
+
+    /// Part 3: the Voice models group. Every catalog variant gets a card with a checkbox (ticked =
+    /// install now), a right-aligned size (or "no download" when already installed), and ONE Active
+    /// radio among the ticked ones. Turbo is ticked and active by default, so the simple path is
+    /// visually unchanged except for the new group below the optional rows.
+    private func addVoiceModels(at originY: CGFloat, width: CGFloat) -> CGFloat {
+        var y = originY
+        let header = SettingsSectionKit.sectionHeader(ComponentPicker.voiceHeaderTitle, x: L, y: y, width: width)
+        // The render gate holds this header to 4.5:1 in both appearances; the section-kit default
+        // (secondaryLabelColor) only reaches ~3.85:1 on a light page, so the Voice models header is
+        // drawn in full label colour.
+        header.textColor = .labelColor
+        header.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.voiceHeaderIdentifier)
+        addSubview(header)
+        y = header.frame.maxY + 3
+
+        let note = SettingsSectionKit.wrapped(ComponentPicker.voiceNote, x: L, y: y, width: width,
+                                              size: 10.5, color: .tertiaryLabelColor)
+        addSubview(note)
+        y = note.frame.maxY + 8
+
+        let rows = ComponentPicker.voiceModelRows(
+            selection: selection, installed: { WhisperModelStore.isInstalled(repo: $0) })
+        for row in rows {
+            y = addVoiceCard(row, at: y, width: width) + 8
+        }
+        return y
+    }
+
+    private func addVoiceCard(_ row: WhisperVoiceModels.Row, at originY: CGFloat,
+                              width: CGFloat) -> CGFloat {
+        let variantID = WhisperModelCatalog.variant(forRepo: row.repo)?.id ?? row.repo
+        let card = SettingsSectionKit.card(
+            frame: NSRect(x: L, y: originY, width: width, height: 0),
+            identifier: ComponentPicker.voiceCardIdentifier(variantID))
+        addSubview(card)
+
+        let textX = gutter + 14
+        let textW = width - textX - sizeColumn - 24
+        var y: CGFloat = 12
+
+        let box = NSButton(checkboxWithTitle: row.name, target: self,
+                           action: #selector(voiceTickChanged(_:)))
+        box.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        box.state = row.ticked ? .on : .off
+        box.tag = tag(forRepo: row.repo)
+        box.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.voiceTickIdentifier(variantID))
+        box.frame = NSRect(x: textX - 20, y: y, width: textW + 20, height: 18)
+        card.addSubview(box)
+
+        let sizeText = row.installed ? "no download" : ComponentPicker.downloadSize(row.sizeBytes)
+        let size = SettingsSectionKit.label(sizeText, x: width - sizeColumn - 14, y: y + 1,
+                                            width: sizeColumn, size: 11, weight: .medium,
+                                            color: .secondaryLabelColor)
+        size.alignment = .right
+        size.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.voiceSizeIdentifier(variantID))
+        card.addSubview(size)
+        y += 21
+
+        let active = NSButton(radioButtonWithTitle: "Active", target: self,
+                              action: #selector(voiceActiveChanged(_:)))
+        active.font = .systemFont(ofSize: 11)
+        active.state = row.active ? .on : .off
+        active.isEnabled = row.ticked
+        active.tag = tag(forRepo: row.repo)
+        active.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.voiceActiveIdentifier(variantID))
+        active.frame = NSRect(x: textX - 20, y: y, width: 120, height: 18)
+        card.addSubview(active)
+        y += 21
+
+        card.frame.size.height = y + 10
+        return card.frame.maxY
     }
 
     /// D8's choice, between the core and the rows it decides: LM Studio (simple, recommended), Ollama
@@ -338,9 +415,10 @@ final class ComponentPickerView: NSView {
         // B6 puts this line ABOVE Continue, and laying it out beside the buttons is how it ends up
         // underneath one: the button row grows by a whole button the moment the path turns metered, and
         // the longest total ("plus LM Studio") arrives at exactly the same time.
-        let total = SettingsSectionKit.label(ComponentPicker.totalLine(rows), x: L, y: y,
-                                             width: width, size: 13, weight: .medium,
-                                             color: .labelColor)
+        let total = SettingsSectionKit.label(
+            ComponentPicker.totalLine(rows, voiceExtraBytes: ComponentPicker.voiceModelExtraBytes(
+                selection: selection, installed: { WhisperModelStore.isInstalled(repo: $0) })),
+            x: L, y: y, width: width, size: 13, weight: .medium, color: .labelColor)
         total.identifier = NSUserInterfaceItemIdentifier(ComponentPicker.totalIdentifier)
         addSubview(total)
         y = total.frame.maxY + 12
@@ -388,7 +466,10 @@ final class ComponentPickerView: NSView {
         case .meteredOrConstrained:
             // The total is supplied by the picker so the network seam never owns a byte count.
             return path.warningLine(
-                totalDownload: ComponentPicker.downloadSize(ComponentPicker.total(rows).bytes))
+                totalDownload: ComponentPicker.downloadSize(
+                    ComponentPicker.total(rows).bytes
+                        + ComponentPicker.voiceModelExtraBytes(
+                            selection: selection, installed: { WhisperModelStore.isInstalled(repo: $0) })))
         }
     }
 
@@ -451,6 +532,32 @@ final class ComponentPickerView: NSView {
         }
         selection = ComponentPicker.selecting(choice, from: selection, facts: facts, environment: environment,
                                               sizes: sizes)
+        rebuild()
+        onSelectionChanged?(selection)
+    }
+
+    // MARK: - part 3: Voice models
+
+    private func tag(forRepo repo: String) -> Int {
+        (WhisperModelCatalog.variants.firstIndex { $0.repo == repo } ?? -1) + 1
+    }
+
+    private func whisperRepo(forTag tag: Int) -> String? {
+        let index = tag - 1
+        guard index >= 0, index < WhisperModelCatalog.variants.count else { return nil }
+        return WhisperModelCatalog.variants[index].repo
+    }
+
+    @objc private func voiceTickChanged(_ sender: NSButton) {
+        guard let repo = whisperRepo(forTag: sender.tag) else { return }
+        if selection.whisper.setTicked(repo, sender.state == .on) { /* accepted */ }
+        rebuild()
+        onSelectionChanged?(selection)
+    }
+
+    @objc private func voiceActiveChanged(_ sender: NSButton) {
+        guard let repo = whisperRepo(forTag: sender.tag) else { return }
+        _ = selection.whisper.setActive(repo)
         rebuild()
         onSelectionChanged?(selection)
     }

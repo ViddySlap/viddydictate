@@ -111,12 +111,18 @@ struct InstallerComponentDescriptor: Equatable {
     /// O1 is explicit that an estimate must not ship as a user-facing byte count, so a nil here makes
     /// every surface omit the number rather than invent one.
     let downloadBytes: Int64?
+    /// Part 3 of the selectable-Whisper chain: when non-nil, the engine writes this repo as the global
+    /// active choice (via `WhisperModelSwitch.select`) immediately after this row's model download has
+    /// finished, before any daemon staging/start this row also performs. nil for every descriptor built
+    /// before part 3, so those rows are untouched.
+    let writeWhisperChoiceOnSuccess: String?
 
     init(id: String, title: String, detail: String = "",
          virtualEnvironmentRelativePath: String? = nil,
          packages: [InstallerPackage] = [], modelArtifacts: [InstallerModelArtifact] = [],
          localSteps: [InstallerLocalStep] = [],
-         downloadBytes: Int64? = nil) {
+         downloadBytes: Int64? = nil,
+         writeWhisperChoiceOnSuccess: String? = nil) {
         self.id = id
         self.title = title
         self.detail = detail
@@ -125,6 +131,7 @@ struct InstallerComponentDescriptor: Equatable {
         self.modelArtifacts = modelArtifacts
         self.localSteps = localSteps
         self.downloadBytes = downloadBytes
+        self.writeWhisperChoiceOnSuccess = writeWhisperChoiceOnSuccess
     }
 }
 
@@ -553,6 +560,11 @@ final class InstallerEngine {
     /// post-setup install path never re-arms an agent a launch-time write may have left unstarted. A
     /// later link wires this in for the `.unchanged` case.
     typealias DaemonAgentEnsureLoaded = () -> Void
+    /// Part 3 of the selectable-Whisper chain: the effect that writes the global active choice
+    /// (`WhisperModelSwitch.select`) after a whisper-model row's download has finished OK. Stored so
+    /// the deterministic rail can inject a recorder and assert the order. Defaults to the production
+    /// `WhisperModelSwitch.select(repo:)`.
+    typealias WhisperChoiceSelecting = (String) -> WhisperModelSwitch.Result
 
     private struct CommandOutcome {
         let result: InstallerCommandResult
@@ -571,6 +583,7 @@ final class InstallerEngine {
     private let fileManager: FileManager
     private let daemonInstaller: DaemonInstallPerforming?
     private let daemonAgentEnsureLoaded: DaemonAgentEnsureLoaded?
+    private let whisperChoiceSelect: WhisperChoiceSelecting
     private let environment: [String: String]
 
     init(paths: InstallerPaths = .live,
@@ -579,7 +592,8 @@ final class InstallerEngine {
          sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
          fileManager: FileManager = .default,
          daemonInstaller: DaemonInstallPerforming? = nil,
-         daemonAgentEnsureLoaded: DaemonAgentEnsureLoaded? = nil) {
+         daemonAgentEnsureLoaded: DaemonAgentEnsureLoaded? = nil,
+         whisperChoiceSelect: @escaping WhisperChoiceSelecting = { WhisperModelSwitch.select(repo: $0) }) {
         self.paths = paths
         self.runner = runner
         self.local = local ?? LiveInstallerLocalPerformer(
@@ -590,6 +604,7 @@ final class InstallerEngine {
         self.fileManager = fileManager
         self.daemonInstaller = daemonInstaller
         self.daemonAgentEnsureLoaded = daemonAgentEnsureLoaded
+        self.whisperChoiceSelect = whisperChoiceSelect
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HOME"] = paths.modelCache.path
         environment["HUGGINGFACE_HUB_CACHE"] = paths.modelCache.appendingPathComponent("hub").path
@@ -655,10 +670,26 @@ final class InstallerEngine {
                 for artifact in descriptor.modelArtifacts {
                     try fileManager.createDirectory(at: paths.modelCache,
                                                      withIntermediateDirectories: true)
-                    let outcome = try runWithRetry(
-                        executable: venvPython,
-                        arguments: Self.modelDownloadArguments(for: artifact,
-                                                               cacheDirectory: paths.modelCache))
+                    let outcome: CommandOutcome
+                    do {
+                        outcome = try runWithRetry(
+                            executable: venvPython,
+                            arguments: Self.modelDownloadArguments(for: artifact,
+                                                                   cacheDirectory: paths.modelCache))
+                    } catch let error as AttemptedFailure {
+                        // Part 3 of the selectable-Whisper chain: a whisper-model row's failed download
+                        // must never leak provider or Hugging Face output into the failure message. Keep
+                        // the SAME category (and attempt count) but name the variant in app-authored
+                        // words, built from the descriptor title, never from the command output.
+                        if descriptor.id.hasPrefix("whisper-model:") {
+                            throw AttemptedFailure(
+                                failure: InstallerFailure(
+                                    category: error.failure.category,
+                                    message: "\(descriptor.title) could not be downloaded"),
+                                attempts: error.attempts)
+                        }
+                        throw error
+                    }
                     attempts += outcome.attempts
                     guard outcome.result.succeeded else {
                         throw failure(for: outcome.result)
@@ -674,6 +705,21 @@ final class InstallerEngine {
                     try verifyExpectedFiles(artifact.expectedFiles,
                                             snapshotRoot: Self.snapshotPath(from: outcome.result.stdout,
                                                                             inside: paths.modelCache))
+                }
+            }
+
+            // Part 3 of the selectable-Whisper chain: the active non-default variant's descriptor
+            // carries writeWhisperChoiceOnSuccess. The choice write runs ONLY after that variant's
+            // download has finished OK (the block above), and before the daemon staging below for any
+            // descriptor that also stages the daemon. It is hoisted OUT of the venv block so the
+            // already-installed active repo's empty descriptor (no venv, no packages, no artifacts)
+            // still performs its one job: the choice write. The effect is injectable so the
+            // deterministic order proof can record it.
+            if let repo = descriptor.writeWhisperChoiceOnSuccess {
+                let result = whisperChoiceSelect(repo)
+                guard result == .switched else {
+                    throw InstallerFailure(category: .process,
+                                           message: "the active voice model could not be selected")
                 }
             }
 
@@ -937,7 +983,11 @@ final class InstallerEngine {
         }
         // A row that does nothing would report itself installed. That is the one outcome a first-run
         // queue must never produce, because every surface downstream reads "installed" as usable.
-        guard descriptor.virtualEnvironmentRelativePath != nil || !descriptor.localSteps.isEmpty else {
+        // A row whose only work is the active choice write (the already-installed active repo's
+        // empty descriptor) is real work, not a vacuous "installed" row.
+        guard descriptor.virtualEnvironmentRelativePath != nil
+                || !descriptor.localSteps.isEmpty
+                || descriptor.writeWhisperChoiceOnSuccess != nil else {
             throw InstallerFailure(category: .invalidPlan,
                                    message: "installer component has no work to do")
         }
