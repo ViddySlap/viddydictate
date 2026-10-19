@@ -20,21 +20,22 @@ degrades to read-only rather than to read-write, so a broken config cannot silen
 Both the candidate path and the roots are symlink-resolved and standardized before comparison, so
 `..` traversal and symlink aliases cannot walk into a denied root.
 
-## The denied root
+## The denied roots
 
-`AppPaths.deniedRoots` currently contains a single hardcoded entry:
+`AppPaths.deniedRoots` currently contains two hardcoded entries:
 
 ```
 ~/Documents/private
+~/private
 ```
 
-This is a personal convention of the original author, who keeps a sensitive corpus at that path and
+`~/private` was added when the author's folder moved, and `~/Documents/private` is kept. This is a personal convention of the original author, who keeps a sensitive corpus at that path and
 wanted a refusal that no configuration mistake could switch off. It ships as a constant rather than a
 setting for exactly that reason: a hardcoded deny cannot be disabled by editing a preferences file.
 
 Two consequences worth knowing:
 
-- If you keep a folder at `~/Documents/private`, ViddyDictate will refuse to open markdown from it and
+- If you keep a folder at `~/Documents/private` or `~/private`, ViddyDictate will refuse to open markdown from it and
   will show "Private vault files are refused." That is the intended behavior, not a bug.
 - If your own sensitive material lives somewhere else, this deny does **not** cover it. It is not a
   general-purpose privacy feature, and it is not a substitute for filesystem permissions.

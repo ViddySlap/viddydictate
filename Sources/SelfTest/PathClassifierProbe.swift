@@ -56,6 +56,50 @@ enum PathClassifierProbe {
         reporter.record("component boundary avoids a deny-prefix false positive",
                         classifier.classify(adjacentFile) == .readWriteLoose)
 
+        // Production deny-list rows: the string checks never touch the filesystem, and the
+        // re-rooted checks map the production roots onto this probe's scratch `root`, so nothing
+        // under the real home is ever read, listed, or opened.
+        let productionDeniedRoots = AppPaths.deniedRoots
+        let homePath = NSHomeDirectory()
+        reporter.record("private-root: new: production deny list has exactly two roots",
+                        productionDeniedRoots.count == 2)
+        reporter.record("private-root: guard: production deny list keeps ~/Documents/private first",
+                        productionDeniedRoots.first?.path == homePath + "/Documents/private")
+        reporter.record("private-root: new: production deny list includes ~/private",
+                        productionDeniedRoots.dropFirst().first?.path == homePath + "/private")
+
+        let allProductionRootsReRootable = productionDeniedRoots.allSatisfy { $0.path.hasPrefix(homePath) }
+        let reRootedDeniedRoots = productionDeniedRoots.map { entry -> URL in
+            guard entry.path.hasPrefix(homePath) else { return entry }
+            let suffix = String(entry.path.dropFirst(homePath.count))
+            return URL(fileURLWithPath: root.path + suffix, isDirectory: true)
+        }
+
+        let privateFixture = root.appendingPathComponent("private", isDirectory: true)
+        let documentsPrivateFixture = root.appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("private", isDirectory: true)
+        let privateNotesFixture = root.appendingPathComponent("private-notes", isDirectory: true)
+        for directory in [privateFixture, documentsPrivateFixture, privateNotesFixture] {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let privateFixtureFile = privateFixture.appendingPathComponent("x.md")
+        let documentsPrivateFixtureFile = documentsPrivateFixture.appendingPathComponent("x.md")
+        let privateNotesFixtureFile = privateNotesFixture.appendingPathComponent("x.md")
+        for file in [privateFixtureFile, documentsPrivateFixtureFile, privateNotesFixtureFile] {
+            try Data("x\n".utf8).write(to: file)
+        }
+
+        let reRootedClassifier = PathClassifier(
+            deniedRoots: allProductionRootsReRootable ? reRootedDeniedRoots : [],
+            obsidianConfigurationURL: configurationURL)
+        reporter.record("private-root: new: production deny list, re-rooted into the fixture, REFUSES <fixture>/private/x.md",
+                        allProductionRootsReRootable
+                            && reRootedClassifier.classify(privateFixtureFile) == .refuseDeniedRoot)
+        reporter.record("private-root: guard: re-rooted ~/Documents/private still REFUSES",
+                        reRootedClassifier.classify(documentsPrivateFixtureFile) == .refuseDeniedRoot)
+        reporter.record("private-root: guard: re-rooted deny list keeps the component boundary",
+                        reRootedClassifier.classify(privateNotesFixtureFile) == .readWriteLoose)
+
         let missingConfiguration = root.appendingPathComponent("missing-obsidian.json")
         let unreadableClassifier = PathClassifier(
             deniedRoots: [deniedRoot], obsidianConfigurationURL: missingConfiguration)

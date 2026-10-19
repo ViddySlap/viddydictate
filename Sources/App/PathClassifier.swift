@@ -1,11 +1,13 @@
 import Foundation
 
 extension AppPaths {
-    /// Privacy boundary: this deny is deliberately independent of Obsidian's mutable registry.
-    /// Constructing the URL does not inspect the denied root.
+    /// Privacy boundary: these denies are deliberately independent of Obsidian's mutable registry.
+    /// Constructing the URLs does not inspect the denied roots.
     static var deniedRoots: [URL] {
         [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("private", isDirectory: true),
+         URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent("private", isDirectory: true)]
     }
 
