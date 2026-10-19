@@ -609,6 +609,17 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         return WhisperAdvancedRender.run(outDir: arguments[i + 1]) ? 0 : 1
     },
+    .codexCatalogLatchStress: .init(tier: .excluded) { arguments in
+        guard let i = arguments.firstIndex(
+            of: SelfTestManifestFlag.codexCatalogLatchStress.rawValue),
+            i + 1 < arguments.count,
+            let runs = Int(arguments[i + 1]),
+            (1...500).contains(runs) else {
+            print("[codex-catalog-latch-stress] FAIL: requires an integer 1...500")
+            return 2
+        }
+        return CodexModelCatalogSelfTest.runLatchStress(runs: runs) ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in

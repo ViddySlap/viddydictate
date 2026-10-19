@@ -86,6 +86,54 @@ enum CodexModelCatalogSelfTest {
         return reporter.passed
     }
 
+    static func runLatchStress(runs: Int) -> Bool {
+        guard (1...500).contains(runs) else {
+            print("[latch-stress] FAIL: runs must be an integer 1...500")
+            return false
+        }
+        var pass = 0
+        var failAssert = 0
+        var failThrew = 0
+        var threwSteps: [String: Int] = [:]
+        var waits: [Int] = []
+        for _ in 0..<runs {
+            switch runEscalationLatchOnce() {
+            case .pass(let wait):
+                pass += 1
+                waits.append(wait)
+            case .assertFailed(let wait):
+                failAssert += 1
+                waits.append(wait)
+            case .threw(let step, let wait):
+                failThrew += 1
+                threwSteps[step, default: 0] += 1
+                waits.append(wait)
+            }
+        }
+        let stepList = threwSteps.keys.sorted()
+            .map { "\($0):\(threwSteps[$0]!)" }
+            .joined(separator: ",")
+        let nonNegative = waits.filter { $0 >= 0 }
+        let maxMs = nonNegative.max() ?? -1
+        var p95 = -1
+        if !nonNegative.isEmpty {
+            let sorted = nonNegative.sorted()
+            let index = max(
+                0,
+                Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)
+            p95 = sorted[index]
+        }
+        let over1000 = nonNegative.filter { $0 > 1_000 }.count
+        print(
+            "[latch-stress] runs=\(runs) "
+                + "pass=\(pass) fail_assert=\(failAssert) "
+                + "fail_threw=\(failThrew) threw_steps=\(stepList) "
+                + "fixture_wait_ms_max=\(maxMs) "
+                + "fixture_wait_ms_p95=\(p95) "
+                + "over_1000ms=\(over1000)")
+        return true
+    }
+
     private static func checkHandshakeAndDTO(_ check: (String, Bool) -> Void) {
         print("--- stable handshake, pagination, and exact DTO identities ---")
         let session = FakeSession([
@@ -1292,14 +1340,39 @@ enum CodexModelCatalogSelfTest {
         }
     }
 
+    private enum EscalationLatchRun {
+        case pass(fixtureWaitMs: Int)
+        case assertFailed(fixtureWaitMs: Int)
+        case threw(step: String, fixtureWaitMs: Int)
+    }
+
     private static func checkEscalationLatch(
         _ check: (String, Bool) -> Void
     ) {
+        switch runEscalationLatchOnce() {
+        case .pass:
+            check(
+                "short-then-long retry latches exactly one TERM and one KILL",
+                true)
+        case .assertFailed:
+            check(
+                "short-then-long retry latches exactly one TERM and one KILL",
+                false)
+        case .threw:
+            check(
+                "short-then-long retry latches exactly one TERM and one KILL",
+                false)
+        }
+    }
+
+    private static func runEscalationLatchOnce() -> EscalationLatchRun {
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent(
                 "viddydictate-catalog-escalation-latch-\(UUID().uuidString)",
                 isDirectory: true)
         var leaderPID: pid_t?
+        var step = "secure-dir"
+        var fixtureWaitMs = -1
         defer {
             forceFixtureCleanup(pids: [leaderPID].compactMap { $0 })
             try? FileManager.default.removeItem(at: root)
@@ -1314,7 +1387,9 @@ enum CodexModelCatalogSelfTest {
             printf '%s\n' "$$" > \(leaderFile.path)
             while :; do :; done
             """
+            step = "install"
             try SelfTestFixtureExecutable.install(script: script, at: executable)
+            step = "identity"
             let identity = try CodexIsolationFoundation.strongFileIdentity(
                 at: executable, includeCodeSigning: false)
             var processOperations: [CodexCatalogProcessOperation] = []
@@ -1348,12 +1423,17 @@ enum CodexModelCatalogSelfTest {
                     defer { injectedClock += 0.01 }
                     return injectedClock
                 })
+            step = "start"
             let session = try CodexCatalogPOSIXSession.start(launch)
-            guard waitForFixtureFile(leaderFile) else {
+            step = "fixture-wait"
+            guard waitForFixtureFile(
+                leaderFile, elapsedMs: &fixtureWaitMs) else {
                 throw CacheWriteFault()
             }
+            step = "fixture-pid"
             let reportedLeaderPID = try fixturePID(leaderFile)
             useInjectedClock = true
+            step = "terminate"
             let first = session.terminateAndReap(
                 absoluteDeadline: 0.2)
             let operationsAfterFirst = processOperations
@@ -1392,13 +1472,16 @@ enum CodexModelCatalogSelfTest {
                         + "terms=\(processOperations.filter { $0 == .termSignal }.count) "
                         + "kills=\(processOperations.filter { $0 == .killSignal }.count)")
             }
-            check(
-                "short-then-long retry latches exactly one TERM and one KILL",
-                passed)
+            return passed
+                ? .pass(fixtureWaitMs: fixtureWaitMs)
+                : .assertFailed(fixtureWaitMs: fixtureWaitMs)
         } catch {
-            check(
-                "short-then-long retry latches exactly one TERM and one KILL",
-                false)
+            print(
+                "  [diag] escalation_latch_threw step=\(step) "
+                    + "error=\(String(describing: type(of: error))) "
+                    + "fixture_wait_ms=\(fixtureWaitMs) "
+                    + "fixture_wait_limit_ms=2000")
+            return .threw(step: step, fixtureWaitMs: fixtureWaitMs)
         }
     }
 
@@ -1713,12 +1796,18 @@ enum CodexModelCatalogSelfTest {
 
     private static func waitForFixtureFile(
         _ url: URL,
-        timeout: TimeInterval = 2
+        timeout: TimeInterval = 2,
+        elapsedMs: UnsafeMutablePointer<Int>? = nil
     ) -> Bool {
+        let start = ProcessInfo.processInfo.systemUptime
         let deadline = Date().addingTimeInterval(timeout)
         while !FileManager.default.fileExists(atPath: url.path),
               Date() < deadline {
             usleep(5_000)
+        }
+        if let elapsedMs {
+            elapsedMs.pointee = Int(
+                (ProcessInfo.processInfo.systemUptime - start) * 1_000)
         }
         return FileManager.default.fileExists(atPath: url.path)
     }

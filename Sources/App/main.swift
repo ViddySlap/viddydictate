@@ -237,6 +237,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     // every earlier flag keeps its first-wins dispatch position.
     case whisperAdvancedSelftest = "--whisper-advanced-selftest"
     case whisperAdvancedRender = "--whisper-advanced-render"
+    case codexCatalogLatchStress = "--codex-catalog-latch-stress"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro
