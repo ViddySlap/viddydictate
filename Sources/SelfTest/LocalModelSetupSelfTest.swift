@@ -21,6 +21,10 @@ enum LocalModelSetupSelfTest {
         print("=== ViddyDictate local model setup - selftest ===")
         let reporter = SelfTestReporter()
 
+        if SystemMemory.budgetBytes(forSliderPosition: 54) == nil {
+            print("  [info] vm.global_* unavailable; budget rendering rows use an injected fixture ceiling")
+        }
+
         checkSliderRendering(reporter)
         checkBudgetLine(reporter)
         checkTimerCopy(reporter)
@@ -42,6 +46,20 @@ enum LocalModelSetupSelfTest {
 
     private static let noFacts = LocalModelSetup.MemoryFacts(
         userWireLimitBytes: nil, noUserWireBytes: nil)
+
+    /// The two live-reading render rows this arm covers both fall back to the frozen fixture ceiling when
+    /// the kernel wire limit is unreadable:
+    /// - `checkBudgetLine`'s rising loop (`every step of the slider buys strictly more memory than the one
+    ///   below it`), which must not skip every read and pass vacuously under the denial.
+    /// - `checkResidencyReadout`'s summary-denominator check (`the summary's denominator is the SAME budget
+    ///   the capacity policy compares against`), whose right-hand side reads the live budget.
+    private static func renderBudgetBytes(forPosition position: Double) -> UInt64? {
+        if let live = SystemMemory.budgetBytes(forSliderPosition: position) { return live }
+        guard let limit = fixtureFacts.userWireLimitBytes else { return nil }
+        let bytes = Double(limit) * SystemMemory.realFraction(forSliderPosition: position)
+        guard bytes.isFinite, bytes >= 0 else { return nil }
+        return UInt64(bytes)
+    }
 
     // MARK: - the slider's two renderings
 
@@ -102,7 +120,7 @@ enum LocalModelSetupSelfTest {
         var previous = UInt64(0)
         var rising = true
         for position in stride(from: 0.0, through: 100.0, by: 1.0) {
-            guard let bytes = SystemMemory.budgetBytes(forSliderPosition: position) else { continue }
+            guard let bytes = renderBudgetBytes(forPosition: position) else { continue }
             if position > 0, bytes <= previous { rising = false }
             previous = bytes
         }
@@ -253,7 +271,7 @@ enum LocalModelSetupSelfTest {
         check("the summary's denominator is the SAME budget the capacity policy compares against",
               LocalModelSetup.residencySummary(position: 54, facts: fixtureFacts, wiredBytes: 1)
                 == "0.0 GB of "
-                    + SystemMemory.formatGB(SystemMemory.budgetBytes(forSliderPosition: 54) ?? 0)
+                    + SystemMemory.formatGB(renderBudgetBytes(forPosition: 54) ?? 0)
                     + " budget in use")
         check("a fractional handle rounds the summary the way it rounds the gigabyte line",
               LocalModelSetup.residencySummary(position: 53.6, facts: fixtureFacts, wiredBytes: 1)
