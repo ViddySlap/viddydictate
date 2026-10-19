@@ -210,7 +210,10 @@ enum Preflight {
             return warn(.sttDaemon,
                         "Installed, but nothing answered on 127.0.0.1:8765 (\(bounded(detail))).",
                         remedy: "run launchctl kickstart gui/\(observation.launchUserID)/"
-                            + "\(DaemonClient.agentLabel) in Terminal, then run this check again",
+                            + "\(DaemonClient.agentLabel) in Terminal; if it answers \"Could not find service\", "
+                            + "first run launchctl bootstrap gui/\(observation.launchUserID) "
+                            + "~/Library/LaunchAgents/\(DaemonClient.agentLabel).plist, "
+                            + "then the kickstart again, then run this check again",
                         reducedFunction: daemonReduced)
         case .loading(let detail):
             return warn(.sttDaemon,

@@ -232,6 +232,25 @@ enum PreflightSelfTest {
         check("an installed daemon that is not answering is told to kickstart it, with its real domain",
               unreachable.remedy?.contains(
                 "launchctl kickstart gui/\(fixtureUID)/\(DaemonClient.agentLabel)") == true)
+        check("preflight-remedy: new: the unreachable remedy names the bootstrap step with its real domain and plist",
+              unreachable.remedy?.contains(
+                "launchctl bootstrap gui/\(fixtureUID) ~/Library/LaunchAgents/\(DaemonClient.agentLabel).plist") == true)
+        check("preflight-remedy: new: the unreachable remedy says when to bootstrap",
+              unreachable.remedy?.contains("Could not find service") == true)
+        check("preflight-remedy: new: the unreachable remedy is not the kickstart-only text",
+              unreachable.remedy != "run launchctl kickstart gui/\(fixtureUID)/\(DaemonClient.agentLabel) in Terminal, then run this check again")
+        let expectedRemedy = "run launchctl kickstart gui/\(fixtureUID)/\(DaemonClient.agentLabel)"
+            + " in Terminal; if it answers \"Could not find service\", "
+            + "first run launchctl bootstrap gui/\(fixtureUID) "
+            + "~/Library/LaunchAgents/\(DaemonClient.agentLabel).plist, "
+            + "then the kickstart again, then run this check again"
+        check("preflight-remedy: new: the unreachable remedy is the exact ordered text",
+              unreachable.remedy == expectedRemedy)
+        let lowerRemedy = unreachable.remedy?.lowercased()
+        check("preflight-remedy: guard: the unreachable remedy does not tell the user to relaunch or reinstall",
+              lowerRemedy?.contains("relaunch") != true
+                && lowerRemedy?.contains("reinstall") != true
+                && lowerRemedy?.contains(".sh") != true)
         check("the socket error is quoted so the user can act on it",
               unreachable.summary.contains("Could not connect."))
 
