@@ -85,16 +85,24 @@ enum SettingsDefaultsSelfTest {
 
     private static func checkBundleIdentifierMigration(_ reporter: SelfTestReporter) {
         print("--- bundle identifier defaults migration ---")
-        let token = UUID().uuidString
-        let legacyDomain = "test.viddydictate.legacy.\(token)"
-        let currentDomain = "test.viddydictate.current.\(token)"
+        // Fixed names (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
+        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
+        let legacyDomain = "test.viddydictate.selftest.settings-legacy"
+        let currentDomain = "test.viddydictate.selftest.settings-current"
+        let unrelatedDomain = "test.viddydictate.selftest.settings-unrelated"
         guard let defaults = UserDefaults(suiteName: currentDomain) else {
             reporter.record("synthetic defaults suite opens", false)
             return
         }
+        // Clear every domain this site uses before first use so a crashed earlier run cannot leave
+        // stale state (e.g. the one-time migration marker) that would turn a later run red.
+        defaults.removePersistentDomain(forName: legacyDomain)
+        defaults.removePersistentDomain(forName: currentDomain)
+        defaults.removePersistentDomain(forName: unrelatedDomain)
         defer {
             defaults.removePersistentDomain(forName: legacyDomain)
             defaults.removePersistentDomain(forName: currentDomain)
+            defaults.removePersistentDomain(forName: unrelatedDomain)
         }
 
         defaults.setPersistentDomain([
@@ -139,8 +147,6 @@ enum SettingsDefaultsSelfTest {
             guarded["hotkeyMap"] as? String == "legacy-hotkeys"
                 && guarded["powerMode"] as? String == "live")
 
-        let unrelatedDomain = "test.viddydictate.unrelated.\(token)"
-        defer { defaults.removePersistentDomain(forName: unrelatedDomain) }
         Settings.migrateLegacyDefaultsDomainIfNeeded(
             defaults: defaults,
             currentDomain: unrelatedDomain,

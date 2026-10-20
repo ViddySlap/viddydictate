@@ -505,17 +505,17 @@ enum CapacityWordingSelfTest {
             timeoutDetail: seam1.timeoutDetail, dependencies: dependencies1)
         seam1.landNonDestructive(result1, "fixture question", nil)
 
-        // Run 2: a FRESH registry and a fresh empty box. A `.timedOut` landing must stay generic.
-        let harness2 = SearchHarness()
-        let seam2 = harness2.seam(.searchLocal)
+        // Run 2: take the seam from run 1's harness (same OneShotRegistry) so a registry-level leak is
+        // caught. A `.timedOut` landing must stay generic and must not show run 1's model.
+        let seam2 = harness1.seam(.searchLocal)
         seam2.landNonDestructive(.timedOut, "fixture question", nil)
 
         let expected = "⚠️ Search: Selected provider timed out — no answer inserted."
         reporter.record(
             "search-timeout: guard: a new run never shows an earlier run's model",
-            harness2.hud.toasts.last == expected
-                && harness2.hud.toasts.last != searchTimeoutToast(modelID: firstModel),
-            "run1=\(harness1.hud.toasts.last ?? "nil") run2=\(harness2.hud.toasts.last ?? "nil")")
+            harness1.hud.toasts.last == expected
+                && harness1.hud.toasts.last != searchTimeoutToast(modelID: firstModel),
+            "run2 toast=\(harness1.hud.toasts.last ?? "nil")")
     }
 
     // MARK: - guards

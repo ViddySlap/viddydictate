@@ -258,7 +258,9 @@ enum WhisperModelSelfTest {
 
     private static func checkGuards(_ reporter: SelfTestReporter) {
         print("--- guards (executable: unset/invalid stored value reads the default) ---")
-        let suiteName = "whisper-model-selftest-\(UUID().uuidString)"
+        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
+        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
+        let suiteName = "test.viddydictate.selftest.whisper-model"
         let key = "whisperModelRepo"
         let turbo = WhisperModelCatalog.`default`.repo
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -269,6 +271,7 @@ enum WhisperModelSelfTest {
                 false, "could not create scratch defaults suite")
             return
         }
+        defaults.removePersistentDomain(forName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         // Guard 1: nothing stored at all reads back as the default turbo repo.

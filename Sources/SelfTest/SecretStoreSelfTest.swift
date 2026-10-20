@@ -278,7 +278,9 @@ enum SecretStoreSelfTest {
     }
 
     private static func withSyntheticDefaults(_ body: (UserDefaults) -> Void) {
-        let suite = "test.viddydictate.secret-migration.\(UUID().uuidString)"
+        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
+        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
+        let suite = "test.viddydictate.selftest.secret-migration"
         guard let defaults = UserDefaults(suiteName: suite) else { return }
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }

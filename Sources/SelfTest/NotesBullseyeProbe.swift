@@ -240,8 +240,11 @@ extension NotesProbe {
 
         // C1 stateful seam: compare the raw / `?` tuple and one-shot dictation tuple through the same helper,
         // then exercise selection, non-destructive, and gone-bullseye behavior with synthetic callbacks only.
-        let suiteName = "viddydictate-c1-\(UUID().uuidString)"
+        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
+        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
+        let suiteName = "test.viddydictate.selftest.notes-c1"
         if let defaults = UserDefaults(suiteName: suiteName) {
+            defaults.removePersistentDomain(forName: suiteName)
             defer { defaults.removePersistentDomain(forName: suiteName) }
             let noteId = "note-c1-bullseye"
             let store = StickyNotesStore(root: freshRoot())
@@ -599,8 +602,11 @@ extension NotesProbe {
         // 13d-ii. arming in place. Distinct from `toggle()` (flips) and `setAtCaret` (relocates): the reveal must
         // leave a disarmed bullseye armed at the SAME anchor, and an already-armed one untouched (so the caller
         // refreshes the info pill exactly once).
-        let defaultsSuite = "viddydictate-reveal-\(UUID().uuidString)"
+        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
+        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
+        let defaultsSuite = "test.viddydictate.selftest.notes-reveal"
         if let defaults = UserDefaults(suiteName: defaultsSuite) {
+            defaults.removePersistentDomain(forName: defaultsSuite)
             defer { defaults.removePersistentDomain(forName: defaultsSuite) }
             // The state confirms its persisted value against the store's OPEN notes on first use, so the note has
             // to really exist in a scratch store or the restore would drop the bullseye before arm() sees it.
