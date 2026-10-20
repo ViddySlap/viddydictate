@@ -295,13 +295,15 @@ enum SearchClient {
     /// intentionally absent: only the selected synthesis route/provider crosses this transform seam.
     static func makeSynthesisRequest(route: LLMRouteID, question: String, resultsBlock: String,
                                      selected: LLMProviderBundle, systemPrompt: String,
-                                     timeout: TimeInterval) -> TextTransformRequest {
+                                     timeout: TimeInterval,
+                                     timeoutDetail: LocalStreamTimeoutDetail? = nil) -> TextTransformRequest {
         precondition(route == .searchLocalSynth || route == .searchGeminiSynth)
         return TextTransformRequest(
             route: route, bundle: selected, sourceText: question,
             systemPrompt: systemPrompt,
             userMessage: "Question: \(question)\n\nSearch results:\n\(resultsBlock)",
-            timeout: timeout)
+            timeout: timeout,
+            timeoutDetail: timeoutDetail ?? LocalStreamTimeoutDetail())
     }
 
     /// Provider-routed synthesis: turn (question + formatted results) into the short spoken answer.
@@ -309,11 +311,18 @@ enum SearchClient {
     private static func synthesize(route: LLMRouteID, question: String,
                                    resultsBlock: String,
                                    resolution: LLMRouteResolution,
-                                   retryCompletion: ((CleanupClient.Result) -> Void)? = nil) -> CleanupClient.Result {
+                                   retryCompletion: ((CleanupClient.Result) -> Void)? = nil,
+                                   timeoutDetail: LocalStreamTimeoutDetail? = nil,
+                                   synthesisTransport: LocalChatTransport = .live) -> CleanupClient.Result {
         // Layer 2: the context-aware glossary rides the synthesis pass (the post-dictation LLM pass that
         // composes the answer from the spoken question), so search no longer silently skips Layer 2 the
         // way it used to (review item 6 / correction-dictionary finding). No-op when the context column
         // is empty, so this is byte-identical until the user adds context entries.
+        // Local adapter wrapper keeps the original call-shape literal the source-shape guard reads,
+        // while routing the selected transport into the real local adapter.
+        func localSynthesis(_ req: TextTransformRequest) -> CleanupClient.Result {
+            SearchClient.localSynthesis(req, transport: synthesisTransport)
+        }
         let requestForBundle: TextTransformClient.RetryRequestBuilder = { bundle in
             let basePrompt = Settings.modelsPower.effectivePrompt(
                 for: route, provider: bundle.provider)
@@ -322,7 +331,8 @@ enum SearchClient {
             return makeSynthesisRequest(
                 route: route, question: question, resultsBlock: resultsBlock,
                 selected: bundle,
-                systemPrompt: CorrectionDictionary.shared.augment(basePrompt), timeout: timeout)
+                systemPrompt: CorrectionDictionary.shared.augment(basePrompt), timeout: timeout,
+                timeoutDetail: timeoutDetail)
         }
         let normalize: TextTransformClient.ResultMap = { transformed in
             switch transformed {
@@ -392,6 +402,21 @@ enum SearchClient {
         let capacityPrecheck: (LLMRouteResolution) -> CleanupClient.Result?
         let grounded: (String, String) -> (answer: String, failure: CleanupClient.Result?)
         let prepareSynthesis: (LLMRouteResolution) -> CleanupClient.Result?
+        let synthesisTransport: LocalChatTransport
+
+        init(resolveKey: @escaping () -> String?,
+             synthesisResolution: @escaping () -> LLMRouteResolution,
+             capacityPrecheck: @escaping (LLMRouteResolution) -> CleanupClient.Result?,
+             grounded: @escaping (String, String) -> (answer: String, failure: CleanupClient.Result?),
+             prepareSynthesis: @escaping (LLMRouteResolution) -> CleanupClient.Result?,
+             synthesisTransport: LocalChatTransport = .live) {
+            self.resolveKey = resolveKey
+            self.synthesisResolution = synthesisResolution
+            self.capacityPrecheck = capacityPrecheck
+            self.grounded = grounded
+            self.prepareSynthesis = prepareSynthesis
+            self.synthesisTransport = synthesisTransport
+        }
 
         static let live = GeminiAnswerDependencies(
             resolveKey: { SearchClient.resolveGeminiKey() },
@@ -401,6 +426,37 @@ enum SearchClient {
             capacityPrecheck: { SearchClient.precheckSynthesis($0) },
             grounded: { SearchClient.geminiGrounded(question: $0, key: $1) },
             prepareSynthesis: { SearchClient.prepareSynthesis($0) })
+    }
+
+    /// Injected seams pin the Option+L ordering without reading a real backend or making a network
+    /// request. Production uses `live`; deterministic coverage supplies scripted transports and
+    /// resolutions.
+    struct LocalAnswerDependencies {
+        let backendInstalled: () -> Bool
+        let retrievalModelRef: () -> LocalModelRef
+        let retrievalReadiness: (LocalModelRef) -> CleanupClient.Result?
+        let synthesisResolution: (LLMRouteID) -> LLMRouteResolution
+        let prepareSynthesis: (LLMRouteResolution) -> CleanupClient.Result?
+        let retrievalTransport: LocalChatTransport
+        let webSearch: (String) -> [WebSearchBackend.Result]
+        let synthesisTransport: LocalChatTransport
+
+        static let live = LocalAnswerDependencies(
+            backendInstalled: { WebSearchBackend.isInstalled },
+            retrievalModelRef: { SearchClient.retrievalModelRef() },
+            retrievalReadiness: { ref in
+                let readiness: ModelManager.ReadinessResult = ref.backend == .ollama
+                    ? ModelManager.shared.ensureReady(
+                        ref, contextTokens: OllamaSurfaceProfile.searchRetrieval.contextTokens)
+                    : ModelManager.shared.ensureReady(ref.modelID)
+                return CleanupClient.failureResult(
+                    for: readiness, loadFailureMessage: "retrieval model not loaded")
+            },
+            synthesisResolution: { SearchClient.synthesisResolution(route: $0) },
+            prepareSynthesis: { SearchClient.prepareSynthesis($0) },
+            retrievalTransport: .live,
+            webSearch: { WebSearchBackend.search($0) },
+            synthesisTransport: .live)
     }
 
     // MARK: - Gemini grounding (Option+G retrieval)
@@ -458,9 +514,22 @@ enum SearchClient {
 
     /// Option+L (Shape C): agentic retrieval -> gemma synthesis. Synchronous — call OFF the main thread.
     static func localAnswerSync(question: String,
-                                retryCompletion: ((CleanupClient.Result) -> Void)? = nil) -> CleanupClient.Result {
-        guard WebSearchBackend.isInstalled else {
+                                retryCompletion: ((CleanupClient.Result) -> Void)? = nil,
+                                timeoutDetail: LocalStreamTimeoutDetail? = nil,
+                                dependencies: LocalAnswerDependencies = .live) -> CleanupClient.Result {
+        guard dependencies.backendInstalled() else {
             return .unavailable(missingLocalBackendMessage)
+        }
+        // Dependency-adapted aliases keep the original call-shape literals (read by the
+        // ollama-client-wiring source-shape guard) while routing through the injected dependencies.
+        func retrievalModelRef() -> LocalModelRef {
+            dependencies.retrievalModelRef()
+        }
+        func agenticLoop(question: String, retrieval: LocalModelRef)
+            -> (results: [WebSearchBackend.Result], failure: CleanupClient.Result?) {
+            SearchClient.agenticLoop(question: question, retrieval: retrieval,
+                                     transport: dependencies.retrievalTransport,
+                                     webSearch: dependencies.webSearch)
         }
         // Make the fixed Local retrieval model resident, plus the synthesis model only when this route's
         // selected provider is Local. Either Local model may have been TTL-evicted by LM Studio; loading
@@ -469,37 +538,42 @@ enum SearchClient {
         // proceeding into the pipeline against an unloaded model just hangs/times out with a murkier
         // error (model-lifecycle finding: ensureReady's contract must not silently fork between clients).
         let retrieval = retrievalModelRef()
-        let retrievalReadiness: ModelManager.ReadinessResult = retrieval.backend == .ollama
-            ? ModelManager.shared.ensureReady(
-                retrieval, contextTokens: OllamaSurfaceProfile.searchRetrieval.contextTokens)
-            : ModelManager.shared.ensureReady(retrieval.modelID)
-        if let failure = CleanupClient.failureResult(
-            for: retrievalReadiness, loadFailureMessage: "retrieval model not loaded"
-        ) {                                                                      // retrieval / agentic (qwen)
+        if let failure = dependencies.retrievalReadiness(retrieval) {
             return failure
         }
         // Resolve before retrieval: an off route cannot synthesize an answer, so the agentic loop is not
         // worth running, and the mode reports itself off with the specific reason instead.
-        let resolution = synthesisResolution(route: .searchLocalSynth)
+        let resolution = dependencies.synthesisResolution(.searchLocalSynth)
         if let off = TextTransformClient.offResult(resolution, route: .searchLocalSynth) { return off }
-        if let failure = prepareSynthesis(resolution) { return failure }
+        if let failure = dependencies.prepareSynthesis(resolution) { return failure }
         let (results, failure) = agenticLoop(question: question, retrieval: retrieval)
-        if let failure = failure { return failure }
+        if let failure = failure {
+            if case .timedOut = failure {
+                timeoutDetail?.modelID = retrieval.modelID
+                timeoutDetail?.limit = .unknown
+            }
+            return failure
+        }
         if results.isEmpty {
             // Retrieval ran but found nothing (DDG throttled / no hits). Let gemma answer honestly
             // ("I couldn't find that") rather than fabricating — the synth prompt handles "(no results)".
             return synthesize(route: .searchLocalSynth, question: question, resultsBlock: "(no results)",
-                              resolution: resolution, retryCompletion: retryCompletion)
+                              resolution: resolution, retryCompletion: retryCompletion,
+                              timeoutDetail: timeoutDetail,
+                              synthesisTransport: dependencies.synthesisTransport)
         }
         return synthesize(route: .searchLocalSynth, question: question,
                           resultsBlock: WebSearchBackend.format(results),
-                          resolution: resolution, retryCompletion: retryCompletion)
+                          resolution: resolution, retryCompletion: retryCompletion,
+                          timeoutDetail: timeoutDetail,
+                          synthesisTransport: dependencies.synthesisTransport)
     }
 
     /// Option+G: Gemini grounding -> gemma synthesis (so the spoken format matches Option+L).
     /// Synchronous — call OFF the main thread.
     static func geminiAnswerSync(question: String,
                                  retryCompletion: ((CleanupClient.Result) -> Void)? = nil,
+                                 timeoutDetail: LocalStreamTimeoutDetail? = nil,
                                  dependencies: GeminiAnswerDependencies = .live) -> CleanupClient.Result {
         guard let key = dependencies.resolveKey() else { return geminiOffResult() }
         // Resolve before the grounded call for the same reason Option+L resolves before retrieval.
@@ -515,19 +589,25 @@ enum SearchClient {
         // Feed Gemini's grounded answer to the resolved synthesis route as "search results" so the
         // voice + ASCII/no-markdown rules match Option+L exactly.
         return synthesize(route: .searchGeminiSynth, question: question, resultsBlock: raw,
-                          resolution: resolution, retryCompletion: retryCompletion)
+                          resolution: resolution, retryCompletion: retryCompletion,
+                          timeoutDetail: timeoutDetail,
+                          synthesisTransport: dependencies.synthesisTransport)
     }
 
     /// Async wrappers: run the (blocking) pipeline on a background queue, call back on an arbitrary
     /// queue — the controller hops to main, mirroring EmailClient.email.
-    static func localAnswer(question: String, completion: @escaping (CleanupClient.Result) -> Void) {
+    static func localAnswer(question: String, completion: @escaping (CleanupClient.Result) -> Void,
+                            timeoutDetail: LocalStreamTimeoutDetail? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
-            completion(localAnswerSync(question: question, retryCompletion: completion))
+            completion(localAnswerSync(question: question, retryCompletion: completion,
+                                       timeoutDetail: timeoutDetail))
         }
     }
-    static func geminiAnswer(question: String, completion: @escaping (CleanupClient.Result) -> Void) {
+    static func geminiAnswer(question: String, completion: @escaping (CleanupClient.Result) -> Void,
+                             timeoutDetail: LocalStreamTimeoutDetail? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
-            completion(geminiAnswerSync(question: question, retryCompletion: completion))
+            completion(geminiAnswerSync(question: question, retryCompletion: completion,
+                                        timeoutDetail: timeoutDetail))
         }
     }
 }

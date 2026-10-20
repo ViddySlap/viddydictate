@@ -35,7 +35,7 @@ final class OneShotRegistry {
     /// The level picker (Option+P's interactive pre-step) and the input captured across it. `pending`
     /// holds the descriptor row + captured text + input source between showing the picker and
     /// committing/cancelling it - the async gap the other modes do not have. Only picker modes populate it.
-    private let levelPicker = LevelPickerPanel()
+    private lazy var levelPicker = LevelPickerPanel()
     private var pending: (entry: Entry, input: String, inputSource: NotesBullseyeLogic.InputSource)?
 
     /// BT4 (notes-bullseye): the note showing the Option+P replace highlight while the level picker is up, or
@@ -58,8 +58,9 @@ final class OneShotRegistry {
     /// The in-flight request's timeout-detail box, created when the client is dispatched and read by
     /// `finish`'s failure landings. For the in-place built-ins the SAME box is passed into the request
     /// builder (`makeCleanupSelectionRequest` / `makeEmailRequest`), so the classifier decodes the fired
-    /// limit back into it; search and custom modes build their request inside their own client and the
-    /// box stays empty, which is the explicit generic-sentence case (listed in notes/red-record.md).
+    /// limit back into it; search uses its own per-run box (`searchEntry`'s `runTimeoutDetail`) instead,
+    /// and custom modes build their request inside their own client with this box left empty (the
+    /// explicit generic-sentence case, listed in notes/red-record.md).
     private(set) var inFlightTimeoutDetail: LocalStreamTimeoutDetail?
 
     /// Test seam: override the custom-mode transform call so the headless selftest drives the shared
@@ -568,53 +569,79 @@ final class OneShotRegistry {
                 landNonDestructive: nil)
 
         case .searchLocal, .searchGemini:
-            let isLocal = (mode == .searchLocal)
-            let m: OneShotMode = isLocal ? .searchLocal : .searchGemini
-            let runSearch: (String, @escaping (CleanupClient.Result) -> Void) -> Void = isLocal
-                ? { q, done in SearchClient.localAnswer(question: q, completion: done) }
-                : { q, done in SearchClient.geminiAnswer(question: q, completion: done) }
-            return Entry(
-                mode: m,
-                // The arbiter reject + invoke log use the resolved descriptor id/label, so the busy-reject
-                // and entry lines are engine-specific ("search (search)" / "search (Gemini search)").
-                invokePrefix: "search (\(m.label))",
-                usesLevelPicker: OneShotRegistry.usesLevelPicker(mode),
-                blankToast: "",
-                noSpeechToast: "Hold the key and speak your question first",
-                noQuestionToast: "Didn't catch a question — try again",
-                workingNoun: "searching",
-                landUINoun: "",
-                // Search resolves its own two-stage prompts internally (agentic rewrite + gemma synth),
-                // both Settings-overridable; there is no single flow-level system prompt to thread here, so
-                // "augment prompt -> client" collapses to the client call (NOT false-unified with the
-                // in-place modes' single-prompt shape).
-                client: { input, _, done in runSearch(input, done) },
-                runLog: { input, wc, _ in "search-from-dictation (\(m.label), \(wc ?? 0) words, \(input.count) chars)" },
-                landNonDestructive: { [weak self] result, question, historyID in
-                    guard let self = self else { return }
-                    switch result {
-                    case .ok(let answer):
-                        Log.write("search answer (\(m.label), \(question.count)q -> \(answer.count)a chars)")
-                        if let openNote = self.context.onOpenSearchResultNote {
-                            openNote(question, answer)
-                            self.context.hud.hide()
-                        } else {
-                            Log.write("search answer fallback: notes bridge unavailable")
-                            self.context.hud.answer(answer)
-                        }
-                        TranscriptionHistory.shared.record(delivered: answer, raw: question, cleaned: answer,
-                                                           mode: m.historyMode, level: nil,
-                                                           app: self.context.targetLabel,
-                                                           id: historyID ?? UUID())
-                    case .unavailable, .timedOut, .badOutput:
-                        let presentation = Self.failurePresentation(
-                            for: result, timeoutDetail: self.inFlightTimeoutDetail)!
-                        Log.write(Self.searchFailureLogLine(for: result, mode: mode))
-                        self.context.hud.toast(
-                            "⚠️ Search: \(presentation.userMessage) — no answer inserted.")
-                    }
-                })
+            return searchEntry(isLocal: mode == .searchLocal, mode: mode).entry
         }
+    }
+
+    /// Build the search descriptor + hooks row with ONE per-run timeout-detail box. The box is created
+    /// fresh here (never `inFlightTimeoutDetail`), passed into the search client call, and read by the
+    /// same entry's landing so an explicit retry lands against the same run's box.
+    private func searchEntry(isLocal: Bool, mode: Mode) -> (timeoutDetail: LocalStreamTimeoutDetail, entry: Entry) {
+        let m: OneShotMode = isLocal ? .searchLocal : .searchGemini
+        let runTimeoutDetail = LocalStreamTimeoutDetail()
+        let runSearch: (String, @escaping (CleanupClient.Result) -> Void) -> Void = isLocal
+            ? { q, done in SearchClient.localAnswer(question: q, completion: done, timeoutDetail: runTimeoutDetail) }
+            : { q, done in SearchClient.geminiAnswer(question: q, completion: done, timeoutDetail: runTimeoutDetail) }
+        let entry = Entry(
+            mode: m,
+            // The arbiter reject + invoke log use the resolved descriptor id/label, so the busy-reject
+            // and entry lines are engine-specific ("search (search)" / "search (Gemini search)").
+            invokePrefix: "search (\(m.label))",
+            usesLevelPicker: OneShotRegistry.usesLevelPicker(mode),
+            blankToast: "",
+            noSpeechToast: "Hold the key and speak your question first",
+            noQuestionToast: "Didn't catch a question — try again",
+            workingNoun: "searching",
+            landUINoun: "",
+            // Search resolves its own two-stage prompts internally (agentic rewrite + gemma synth),
+            // both Settings-overridable; there is no single flow-level system prompt to thread here, so
+            // "augment prompt -> client" collapses to the client call (NOT false-unified with the
+            // in-place modes' single-prompt shape).
+            client: { input, _, done in runSearch(input, done) },
+            runLog: { input, wc, _ in "search-from-dictation (\(m.label), \(wc ?? 0) words, \(input.count) chars)" },
+            landNonDestructive: { [weak self] result, question, historyID in
+                guard let self = self else { return }
+                switch result {
+                case .ok(let answer):
+                    Log.write("search answer (\(m.label), \(question.count)q -> \(answer.count)a chars)")
+                    if let openNote = self.context.onOpenSearchResultNote {
+                        openNote(question, answer)
+                        self.context.hud.hide()
+                    } else {
+                        Log.write("search answer fallback: notes bridge unavailable")
+                        self.context.hud.answer(answer)
+                    }
+                    TranscriptionHistory.shared.record(delivered: answer, raw: question, cleaned: answer,
+                                                       mode: m.historyMode, level: nil,
+                                                       app: self.context.targetLabel,
+                                                       id: historyID ?? UUID())
+                case .unavailable, .timedOut, .badOutput:
+                    let landingBox = runTimeoutDetail
+                    let presentedBox: LocalStreamTimeoutDetail? = {
+                        if case .timedOut = result { return landingBox }
+                        return nil
+                    }()
+                    let presentation = Self.failurePresentation(
+                        for: result, timeoutDetail: presentedBox)!
+                    Log.write(Self.searchFailureLogLine(for: result, mode: mode))
+                    self.context.hud.toast(
+                        "⚠️ Search: \(presentation.userMessage) — no answer inserted.")
+                }
+            })
+        return (runTimeoutDetail, entry)
+    }
+
+    /// Production-inert test seam: never called by production, only by `--capacity-wording-selftest`.
+    struct SearchRunSeam {
+        let timeoutDetail: LocalStreamTimeoutDetail
+        let landNonDestructive: (CleanupClient.Result, String, UUID?) -> Void
+    }
+
+    func searchRunSeamForTest(mode: Mode) -> SearchRunSeam {
+        let isLocal = (mode == .searchLocal)
+        let built = searchEntry(isLocal: isLocal, mode: mode)
+        return SearchRunSeam(timeoutDetail: built.timeoutDetail,
+                             landNonDestructive: built.entry.landNonDestructive!)
     }
 
     /// Build the descriptor + hooks row for a user-defined custom mode. The declarative half is the
