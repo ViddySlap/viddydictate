@@ -1661,9 +1661,14 @@ enum TailCheckSelfTest {
                     onUndoNoteDelivery: { _ in false },
                     onReplaceNoteDelivery: { _, _ in false },
                     onCurrentNoteId: { nil })
+                // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an
+                // empty plist per run; safe because the house rule runs one heavy suite at a time.
+                let timingDefaults = UserDefaults(suiteName: "test.viddydictate.selftest.tailcheck-bullseye-timing")!
+                timingDefaults.removePersistentDomain(forName: "test.viddydictate.selftest.tailcheck-bullseye-timing")
+                defer { timingDefaults.removePersistentDomain(forName: "test.viddydictate.selftest.tailcheck-bullseye-timing") }
                 let bullseyeState = NotesBullseyeState(
                     store: StickyNotesStore(),
-                    defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-timing-\(UUID().uuidString)")!)
+                    defaults: timingDefaults)
                 bullseyeState.setAtCaret(noteId: "tailcheck-selftest-timing-note")
                 let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
                 let controller = DictationController(

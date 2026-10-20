@@ -166,7 +166,8 @@ final class DictationController {
     /// The cleanup-suspect A/B picker (prompt-injection backstop). When `CleanupLogic.cleanupSuspect`
     /// flags an output, we show this instead of auto-pasting; `pendingPick` holds the two candidates
     /// awaiting the user's Left/Right/Return choice (driven via `hotkey.abPickerActive`).
-    private let abPicker = ABPickerPanel()
+    // Built lazily: ABPickerPanel.init touches AppKit; built on first use so a headless controller can be made.
+    private lazy var abPicker = ABPickerPanel()
     private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
