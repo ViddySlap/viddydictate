@@ -480,6 +480,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Armed before any of the setup below, because a hang DURING launch is exactly as invisible as
         // a hang at rest and nothing else would ever report it. ADR 0017.
         hangWatchdog.start()
+        // Ben's 30-day-only decision: stale pre-edit copies must expire even when no Markdown file is opened.
+        let backupStore = pathClassifierBackupStore
+        DispatchQueue.global(qos: .utility).async { backupStore.pruneExpired() }
         setupMenu()
         setupEditMenu()
         _ = controller   // Force the lazy required-callback graph before any controller-dependent setup.
