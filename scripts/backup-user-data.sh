@@ -81,6 +81,182 @@ skip_reason() {
   done
 }
 
+# The credential rules live as data in the heredoc below so credential_scan can read them back
+# from this file ($0) at run time. They must stay verbatim: the negative-control test mutates
+# individual lines and expects the scan to change behaviour.
+: <<'CRED_RULES'
+# CRED-NAMES-BEGIN
+contains@@secret
+contains@@credential
+contains@@token
+contains@@passw
+contains@@keychain
+contains@@auth.json
+contains@@id_rsa
+contains@@id_ed25519
+endswith@@.env
+endswith@@.pem
+endswith@@.key
+endswith@@.p12
+endswith@@.pfx
+endswith@@.netrc
+# CRED-NAMES-END
+# CRED-PATTERNS-BEGIN
+pem-private-key@@-@@-----BEGIN [A-Z ]*PRIVATE KEY-----
+github-token@@-@@gh[pousr]_[A-Za-z0-9]{36}
+github-token@@-@@github_pat_[A-Za-z0-9_]{22,}
+anthropic-key@@-@@sk-ant-[A-Za-z0-9_-]{20,}
+openai-style-key@@-@@sk-[A-Za-z0-9_-]{32,}
+aws-key-id@@-@@AKIA[0-9A-Z]{16}
+google-api-key@@-@@AIza[0-9A-Za-z_-]{35}
+slack-token@@-@@xox[abprs]-[A-Za-z0-9-]{10,}
+jwt@@-@@eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+credential-assignment@@i@@(api[_-]?key|secret|token|passw(or)?d|authorization)["']?[[:space:]]*[:=][[:space:]]*["']?[A-Za-z0-9_./+=-]{16,}
+# CRED-PATTERNS-END
+CRED_RULES
+
+is_history_rel() {
+  [ "$1" = "application-support/history.json" ] && return 0
+  case "$1" in "application-support/history/"*) return 0 ;; esac
+  return 1
+}
+
+credential_scan() {
+  local dest="$1"
+  local line label flags pattern rest file rel bn kind type text
+  local excl_n=0 rev_n=0 i n name src dir nm pm
+  local -a name_rules pattern_rules files rels excluded reviewed
+
+  nm='# CRED-NAMES'
+  pm='# CRED-PATTERNS'
+
+  while IFS= read -r line; do
+    [ -n "$line" ] && name_rules+=("$line")
+  done < <(sed -n "/^${nm}-BEGIN$/,/^${nm}-END$/p" "$0" | sed '1d;$d')
+
+  while IFS= read -r line; do
+    [ -n "$line" ] && pattern_rules+=("$line")
+  done < <(sed -n "/^${pm}-BEGIN$/,/^${pm}-END$/p" "$0" | sed '1d;$d')
+
+  if [ "$LIST_ONLY" -eq 1 ]; then
+    for name in $KEEP; do
+      [ -n "$name" ] || continue
+      src="$SUPPORT/$name"
+      [ -e "$src" ] || continue
+      while IFS= read -r file; do
+        files+=("$file")
+        rels+=("application-support/${file#"$SUPPORT"/}")
+      done < <(find "$src" -type f 2>/dev/null)
+    done
+    if [ -d "$SHARE/regression-corpus" ]; then
+      while IFS= read -r file; do
+        files+=("$file")
+        rels+=("regression-corpus/${file#"$SHARE/regression-corpus"/}")
+      done < <(find "$SHARE/regression-corpus" -type f 2>/dev/null)
+    fi
+  else
+    for dir in "$dest/application-support" "$dest/regression-corpus"; do
+      [ -e "$dir" ] || continue
+      while IFS= read -r file; do
+        files+=("$file")
+        rels+=("${file#"$dest"/}")
+      done < <(find "$dir" -type f 2>/dev/null)
+    done
+  fi
+
+  n="${#files[@]}"
+  for ((i=0;i<n;i++)); do
+    file="${files[$i]}"
+    rel="${rels[$i]}"
+    bn="$(basename "$file" | tr '[:upper:]' '[:lower:]')"
+    kind=""
+    label=""
+
+    for line in "${name_rules[@]}"; do
+      type="${line%%@@*}"
+      text="${line#*@@}"
+      case "$type" in
+        contains) case "$bn" in *"$text"*) kind="name"; label="name-rule"; break ;; esac ;;
+        endswith) case "$bn" in *"$text") kind="name"; label="name-rule"; break ;; esac ;;
+      esac
+    done
+
+    if [ -z "$kind" ]; then
+      for line in "${pattern_rules[@]}"; do
+        label="${line%%@@*}"
+        rest="${line#*@@}"
+        flags="${rest%%@@*}"
+        pattern="${rest#*@@}"
+        if [ "$flags" = "i" ]; then
+          if grep -I -q -E -i -e "$pattern" "$file"; then
+            kind="content"
+            break
+          fi
+        else
+          if grep -I -q -E -e "$pattern" "$file"; then
+            kind="content"
+            break
+          fi
+        fi
+      done
+    fi
+
+    if [ -n "$kind" ]; then
+      if [ "$kind" = "content" ] && is_history_rel "$rel"; then
+        reviewed+=("  $rel  $label")
+        rev_n=$((rev_n+1))
+        if [ "$LIST_ONLY" -eq 1 ]; then
+          echo "[backup] WOULD KEEP FOR REVIEW $rel ($label)"
+        fi
+      else
+        excluded+=("  $rel  $label")
+        excl_n=$((excl_n+1))
+        if [ "$LIST_ONLY" -eq 1 ]; then
+          echo "[backup] WOULD EXCLUDE $rel ($label)"
+        else
+          [ -n "$dest" ] || { echo "[backup] ERROR: empty backup root" >&2; exit 1; }
+          case "$file" in
+            "$dest/"*) rm -f -- "$file" ;;
+            *) echo "[backup] ERROR: refusing to remove $file (outside $dest)" >&2; exit 1 ;;
+          esac
+        fi
+      fi
+    fi
+  done
+
+  if [ "$LIST_ONLY" -eq 0 ]; then
+    {
+      echo
+      echo "EXCLUDED (credential-shaped name or content; contents never printed)"
+      if [ "$excl_n" -eq 0 ]; then
+        echo "  none"
+      else
+        for line in "${excluded[@]}"; do
+          printf '%s\n' "$line"
+        done
+      fi
+      echo
+      echo "REVIEW (credential-shaped text in transcripts; kept, check before sharing this folder)"
+      if [ "$rev_n" -eq 0 ]; then
+        echo "  none"
+      else
+        for line in "${reviewed[@]}"; do
+          printf '%s\n' "$line"
+        done
+      fi
+    } >> "$dest/MANIFEST.txt"
+
+    if [ "$excl_n" -gt 0 ]; then
+      echo "[backup] excluded $excl_n file(s) that look like credentials: see MANIFEST.txt"
+    fi
+    if [ "$rev_n" -gt 0 ]; then
+      echo "[backup] kept $rev_n transcript file(s) with credential-shaped text: see REVIEW in MANIFEST.txt"
+    fi
+  fi
+
+  return 0
+}
+
 # ---- Report ------------------------------------------------------------------------------------
 echo "[backup] source: $SUPPORT ($(human "$SUPPORT"))"
 echo "[backup]"
@@ -107,6 +283,7 @@ done
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   echo "[backup]"
+  credential_scan "$DEST"
   echo "[backup] --list: nothing was copied."
   exit 0
 fi
@@ -161,6 +338,8 @@ if [ -d "$SHARE/regression-corpus" ]; then
   ditto "$SHARE/regression-corpus" "$DEST/regression-corpus"
   printf '  %-24s %s\n' "regression-corpus" "$(human "$SHARE/regression-corpus")" >> "$MANIFEST"
 fi
+
+credential_scan "$DEST"
 
 {
   echo

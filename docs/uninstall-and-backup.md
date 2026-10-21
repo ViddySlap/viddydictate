@@ -52,6 +52,11 @@ future version starts writing will show up in the backup's `MANIFEST.txt` under 
 *not in the allow list* rather than being quietly swept into a folder you might share. If you see
 that line, look at the file.
 
+While it copies, the backup also drops any file that looks like a credential — a name such as
+`.env`, `.pem`, `id_rsa`, or `auth.json`, or a body holding a key-shaped string — and lists each
+one under **EXCLUDED** in `MANIFEST.txt` (the contents are never printed). Transcripts that contain
+such text but are yours to keep stay in the folder and are listed under **REVIEW** instead.
+
 `MANIFEST.txt` also carries the restore procedure. The short version: install, launch once so the
 folders exist, **quit**, copy back, `killall cfprefsd`, launch again. Quitting matters — a running
 app rewrites those files underneath you, and macOS caches preferences in `cfprefsd`, so restoring a
