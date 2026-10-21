@@ -461,6 +461,15 @@ tier_deterministic() {
     run_gate deterministic "test-domain defaults reset isolation and static guards" \
         python3 "$ROOT/scripts/test-verify-defaults-reset.py" || true
 
+    # backup-scan gate BEGIN
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        run_gate deterministic "Backup script credential scan (fake fixtures assembled at run time, mutants)" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            /bin/bash "$ROOT/scripts/test-backup-credential-scan.sh" || true
+    else
+        record_skip deterministic "Backup script credential scan: needs macOS (ditto, scutil, plutil)"
+    fi
+    # backup-scan gate END
     run_gate deterministic "TailCheck Swift-vs-Python differential fuzz (2000 synthetic Unicode cases, seed 1337)" \
         python3 "$ROOT/Tools/tailcheck/differential_fuzz.py" || true
 
