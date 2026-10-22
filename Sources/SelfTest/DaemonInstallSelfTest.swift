@@ -37,7 +37,8 @@ enum DaemonInstallSelfTest {
     // MARK: - bundled
 
     /// The built bundle must carry the staged daemon and plist, and the staged script must be
-    /// byte-identical to the repository copy.
+    /// byte-identical to the repository copy. It also checks the shipping app next to the test
+    /// bundle, which build.sh stages with a separate copy line, so a missing shipping copy still fails.
     private static func runBundled() -> Bool {
         print("=== ViddyDictate daemon-install — bundled arm ===")
         let reporter = SelfTestReporter()
@@ -68,7 +69,181 @@ enum DaemonInstallSelfTest {
                             Bundle.main.bundleURL.path)
         }
 
+        let shippingOverride = ProcessInfo.processInfo.environment["VIDDYDICTATE_SHIPPING_APP"]
+
+        var appPresent = false
+        var appDetail = ""
+        var scriptStages = false
+        var scriptStagesDetail = ""
+        var plistStages = false
+        var plistStagesDetail = ""
+        var scriptIdentical = false
+        var scriptIdenticalDetail = ""
+        var plistIdentical = false
+        var plistIdenticalDetail = ""
+        var resolvedScriptPath: String?
+        var resolvedPlistPath: String?
+
+        if let raw = shippingOverride, !raw.isEmpty {
+            let tempRoot: String?
+            if case .inside(let resolvedRoot) = containment(of: fm.temporaryDirectory.path, within: "") {
+                tempRoot = resolvedRoot
+            } else {
+                tempRoot = nil
+            }
+
+            if let root = tempRoot {
+                switch containment(of: raw, within: root) {
+                case .inside(let resolvedApp):
+                    let resourcesPath = resolvedApp + "/Contents/Resources"
+                    switch containment(of: resourcesPath, within: root) {
+                    case .inside(let resolvedResources):
+                        let daemonPath = resolvedResources + "/daemon"
+                        switch containment(of: daemonPath, within: root) {
+                        case .inside(let resolvedDaemon):
+                            let scriptPath = resolvedDaemon + "/viddydictate_whisperd.py"
+                            switch containment(of: scriptPath, within: root) {
+                            case .inside(let resolvedScript):
+                                resolvedScriptPath = resolvedScript
+                            case .outside:
+                                scriptStagesDetail = "file resolves outside the temporary directory refused"
+                                scriptIdenticalDetail = "file resolves outside the temporary directory refused"
+                            case .missing:
+                                scriptStagesDetail = scriptPath
+                                scriptIdenticalDetail = scriptPath
+                            }
+                            let plistPath = resolvedDaemon + "/com.viddydictate.whisperd.plist"
+                            switch containment(of: plistPath, within: root) {
+                            case .inside(let resolvedPlist):
+                                resolvedPlistPath = resolvedPlist
+                            case .outside:
+                                plistStagesDetail = "file resolves outside the temporary directory refused"
+                                plistIdenticalDetail = "file resolves outside the temporary directory refused"
+                            case .missing:
+                                plistStagesDetail = plistPath
+                                plistIdenticalDetail = plistPath
+                            }
+                            appPresent = true
+                            appDetail = resolvedApp
+                        case .outside:
+                            appPresent = true
+                            appDetail = resolvedApp
+                            scriptStagesDetail = "file resolves outside the temporary directory refused"
+                            scriptIdenticalDetail = "file resolves outside the temporary directory refused"
+                            plistStagesDetail = "file resolves outside the temporary directory refused"
+                            plistIdenticalDetail = "file resolves outside the temporary directory refused"
+                        case .missing:
+                            appPresent = true
+                            appDetail = resolvedApp
+                            scriptStagesDetail = daemonPath
+                            scriptIdenticalDetail = daemonPath
+                            plistStagesDetail = daemonPath
+                            plistIdenticalDetail = daemonPath
+                        }
+                    case .outside:
+                        appDetail = "override outside the temporary directory refused"
+                        scriptStagesDetail = "file resolves outside the temporary directory refused"
+                        scriptIdenticalDetail = "file resolves outside the temporary directory refused"
+                        plistStagesDetail = "file resolves outside the temporary directory refused"
+                        plistIdenticalDetail = "file resolves outside the temporary directory refused"
+                    case .missing:
+                        appDetail = resourcesPath
+                        scriptStagesDetail = resourcesPath
+                        scriptIdenticalDetail = resourcesPath
+                        plistStagesDetail = resourcesPath
+                        plistIdenticalDetail = resourcesPath
+                    }
+                case .outside:
+                    appDetail = "override outside the temporary directory refused"
+                    scriptStagesDetail = "file resolves outside the temporary directory refused"
+                    scriptIdenticalDetail = "file resolves outside the temporary directory refused"
+                    plistStagesDetail = "file resolves outside the temporary directory refused"
+                    plistIdenticalDetail = "file resolves outside the temporary directory refused"
+                case .missing:
+                    appDetail = raw
+                    scriptStagesDetail = raw
+                    scriptIdenticalDetail = raw
+                    plistStagesDetail = raw
+                    plistIdenticalDetail = raw
+                }
+            } else {
+                appDetail = "override outside the temporary directory refused"
+                scriptStagesDetail = "file resolves outside the temporary directory refused"
+                scriptIdenticalDetail = "file resolves outside the temporary directory refused"
+                plistStagesDetail = "file resolves outside the temporary directory refused"
+                plistIdenticalDetail = "file resolves outside the temporary directory refused"
+            }
+        } else {
+            let shippingApp = Bundle.main.bundleURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("ViddyDictate.app")
+            let shippingResources = shippingApp.appendingPathComponent("Contents/Resources")
+            var resourcesIsDirectory: ObjCBool = false
+            appPresent = fm.fileExists(atPath: shippingResources.path, isDirectory: &resourcesIsDirectory) &&
+                resourcesIsDirectory.boolValue
+            appDetail = shippingApp.path
+
+            let shippingScript = shippingResources.appendingPathComponent("daemon/viddydictate_whisperd.py")
+            let shippingPlist = shippingResources.appendingPathComponent("daemon/com.viddydictate.whisperd.plist")
+            scriptStages = fm.fileExists(atPath: shippingScript.path)
+            scriptStagesDetail = shippingScript.path
+            plistStages = fm.fileExists(atPath: shippingPlist.path)
+            plistStagesDetail = shippingPlist.path
+            resolvedScriptPath = shippingScript.path
+            resolvedPlistPath = shippingPlist.path
+        }
+
+        reporter.record("shipping bundle: the app is present next to the test bundle",
+                        appPresent, appDetail)
+
+        if let scriptPath = resolvedScriptPath {
+            scriptStages = fm.fileExists(atPath: scriptPath)
+            scriptStagesDetail = scriptPath
+        }
+        reporter.record("shipping bundle: stages the daemon script",
+                        scriptStages, scriptStagesDetail)
+
+        if let plistPath = resolvedPlistPath {
+            plistStages = fm.fileExists(atPath: plistPath)
+            plistStagesDetail = plistPath
+        }
+        reporter.record("shipping bundle: stages the LaunchAgent plist template",
+                        plistStages, plistStagesDetail)
+
+        if let scriptPath = resolvedScriptPath, let root = repositoryRoot() {
+            let repoScript = root.appendingPathComponent("viddydictate_whisperd.py")
+            let repoHash = try? InstallerEngine.sha256(ofFileAt: repoScript, fileManager: fm)
+            let stagedHash = try? InstallerEngine.sha256(ofFileAt: URL(fileURLWithPath: scriptPath), fileManager: fm)
+            scriptIdentical = repoHash != nil && repoHash == stagedHash
+            scriptIdenticalDetail = "repo=\(repoHash ?? "nil") staged=\(stagedHash ?? "nil")"
+        }
+        reporter.record("shipping bundle: the staged script is byte-identical to the repository copy",
+                        scriptIdentical, scriptIdenticalDetail)
+
+        if let plistPath = resolvedPlistPath, let root = repositoryRoot() {
+            let repoPlist = root.appendingPathComponent("com.viddydictate.whisperd.plist")
+            let repoHash = try? InstallerEngine.sha256(ofFileAt: repoPlist, fileManager: fm)
+            let stagedHash = try? InstallerEngine.sha256(ofFileAt: URL(fileURLWithPath: plistPath), fileManager: fm)
+            let stagedText = (try? String(contentsOf: URL(fileURLWithPath: plistPath), encoding: .utf8)) ?? ""
+            plistIdentical = repoHash != nil && repoHash == stagedHash && stagedText.contains("__HOME__")
+            plistIdenticalDetail = "repo=\(repoHash ?? "nil") staged=\(stagedHash ?? "nil")"
+        }
+        reporter.record("shipping bundle: the staged plist is byte-identical to the repository copy and keeps the __HOME__ placeholder",
+                        plistIdentical, plistIdenticalDetail)
+
         return finish(reporter, prefix: "daemon-install bundled")
+    }
+
+    private enum Containment { case inside(String), outside, missing }
+
+    private static func containment(of path: String, within root: String) -> Containment {
+        guard let resolvedPointer = path.withCString({ realpath($0, nil) }) else { return .missing }
+        defer { free(resolvedPointer) }
+        let resolved = String(cString: resolvedPointer)
+        if resolved == root || resolved.hasPrefix(root + "/") {
+            return .inside(resolved)
+        }
+        return .outside
     }
 
     // MARK: - installs
