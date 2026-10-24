@@ -179,6 +179,9 @@ final class HotkeyMonitor {
 
         // Rebinding capture takes absolute priority so binding a key never starts a dictation.
         if captureActive {
+            if SyntheticKeystroke.isOwn(event) {
+                return Unmanaged.passUnretained(event)
+            }
             return handleCapture(type: type, event: event)
         }
 
@@ -186,6 +189,9 @@ final class HotkeyMonitor {
             return handleFlagsChanged(event)
         }
         if type == .keyUp {
+            if SyntheticKeystroke.isOwn(event) {
+                return Unmanaged.passUnretained(event)
+            }
             // Only meaningful for a regular-key wakeup release.
             let w = map.wakeup
             if !w.isModifier, event.getIntegerValueField(.keyboardEventKeycode) == w.code, wakeupHeld {
@@ -246,6 +252,10 @@ final class HotkeyMonitor {
             pasteRestoreArmed = false
             DispatchQueue.main.async { self.onPasteWhileArmed?() }
             // fall through and pass the event so the paste itself still happens
+        }
+
+        if SyntheticKeystroke.isOwn(event) {
+            return Unmanaged.passUnretained(event)
         }
 
         // Transient pickers take priority over take-cancel and normal hotkeys. Matching navigation
@@ -440,4 +450,14 @@ final class HotkeyMonitor {
         event.keyboardGetUnicodeString(maxStringLength: 4, actualStringLength: &length, unicodeString: &chars)
         return length > 0 ? String(utf16CodeUnits: chars, count: length) : ""
     }
+
+#if SELFTEST
+    func selfTestHandle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        handle(type: type, event: event)
+    }
+
+    func selfTestInstallCustomChord(id: String, keyCode: Int64) {
+        customChords.append((id: id, spec: .regular(keyCode: keyCode, label: "self-test")))
+    }
+#endif
 }

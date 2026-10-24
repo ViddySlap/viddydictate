@@ -620,6 +620,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         return CodexModelCatalogSelfTest.runLatchStress(runs: runs) ? 0 : 1
     },
+    .syntheticKeySelftest: .init(tier: .deterministic) { _ in
+        SyntheticKeySelfTest.run() ? 0 : 1
+    },
 ]
 
 let selfTestManifest: [SelfTestManifestEntry] = SelfTestManifestFlag.allCases.map { flag in
