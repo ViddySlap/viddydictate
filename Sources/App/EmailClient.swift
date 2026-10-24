@@ -145,6 +145,10 @@ enum EmailClient {
         switch classification {
         case .content(let value):
             content = value
+            if LMStudioReasoningEffort.leakedReasoning(content) {
+                Log.write("email produced leaked reasoning (\(String(format: "%.2f", dt))s)")
+                completion(.badOutput("model returned its reasoning instead of an answer")); return
+            }
         case .failure(let result):
             completion(result); return
         }

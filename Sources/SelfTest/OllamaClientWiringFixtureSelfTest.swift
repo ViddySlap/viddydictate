@@ -751,6 +751,160 @@ enum OllamaClientWiringFixtureSelfTest {
                     && mac.ollamaChatBodies.first?["reasoning_effort"] == nil,
                 "reasoning_effort=\(mac.ollamaChatBodies.first?["reasoning_effort"] as? String ?? "absent")")
         }
+
+        // (g) a tagless reasoning preamble after reasoning_effort "none" is a leak: the pure detector.
+        let leaked = "Thinking Process:\n1. **Analyze the Request:** identify the goal.\n2. Draft the reply.\nHi Sam,\n\nThis is the leaked email."
+        let clean = "Hi Sam,\n\nThis is the clean email."
+
+        reporter.record("reasoning-off: a leaked thinking preamble is recognised in all five opening forms and in markdown",
+            ["Thinking Process:", "**Thinking Process:**", "_Thinking Process:_", "# Thinking Process:",
+             "Here's a thinking process to arrive at the desired email:",
+             "Here is a thinking process to arrive at the desired email:",
+             "Here's my thinking process for the email:",
+             "Here is my thinking process for the email:"].allSatisfy(LMStudioReasoningEffort.leakedReasoning),
+            "all eight opening forms and markdown wrappers must be leaks")
+
+        reporter.record("reasoning-off: an ordinary email or one that mentions thinking later is not a leak",
+            ["Hi Sam,\n\nHow are you?",
+             "Thinking process improvements will reduce delays for the team.",
+             "Hi Sam,\n\nThis email mentions a thinking process later on."].allSatisfy { !LMStudioReasoningEffort.leakedReasoning($0) },
+            "an email, a no-colon sentence, and a later mention are not leaks")
+
+        // (h) a leaked answer retries once without the field and is remembered per model id.
+        do {
+            let leakModel = "reasoning-off-leak:7b"
+            var sentBodies: [[String: Any]] = []
+            let transport = LocalChatTransport(
+                sendLMStudio: { request, completion in
+                    let body = request.httpBody.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                    sentBodies.append(body)
+                    let url = request.url ?? Settings.cleanupEndpoint
+                    let content = (body["reasoning_effort"] != nil) ? leaked : clean
+                    let reply: [String: Any] = ["choices": [[
+                        "index": 0, "message": ["role": "assistant", "content": content],
+                        "finish_reason": "stop",
+                    ]]]
+                    completion(try? JSONSerialization.data(withJSONObject: reply),
+                               HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil), nil)
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+
+            let first = complete(CleanupClient.localAdapter(surface: .cleanup, transport: transport),
+                                 request(LLMProviderBundle.local(leakModel), route: .cleanupL1,
+                                         system: "fixture system prompt", user: "unused"))
+            reporter.record("reasoning-off: a leaked answer retries once without the field and returns the clean answer",
+                sentBodies.count == 2 && sentBodies[0]["reasoning_effort"] as? String == "none"
+                    && sentBodies[1]["reasoning_effort"] == nil && okText(first) == clean,
+                "calls=\(sentBodies.count) fields=\(sentBodies.map { $0["reasoning_effort"] as? String ?? "absent" })")
+
+            let second = complete(CleanupClient.localAdapter(surface: .cleanup, transport: transport),
+                                  request(LLMProviderBundle.local(leakModel), route: .cleanupL1,
+                                          system: "fixture system prompt", user: "unused"))
+            reporter.record("reasoning-off: after a leak the same model id is never sent the field again",
+                sentBodies.count == 3 && sentBodies[2]["reasoning_effort"] == nil && okText(second) == clean,
+                "calls=\(sentBodies.count) last=\(sentBodies.last?["reasoning_effort"] as? String ?? "absent")")
+        }
+
+        // (i) a model that leaks even without the field is bad output on cleanup and email, never pasted.
+        do {
+            func isLeakedBadOutput(_ result: CleanupClient.Result) -> Bool {
+                if case .badOutput(let m) = result { return m == "model returned its reasoning instead of an answer" }
+                return false
+            }
+            let leaky = LocalChatTransport(
+                sendLMStudio: { request, completion in
+                    let url = request.url ?? Settings.cleanupEndpoint
+                    let reply: [String: Any] = ["choices": [[
+                        "index": 0, "message": ["role": "assistant", "content": leaked],
+                        "finish_reason": "stop",
+                    ]]]
+                    completion(try? JSONSerialization.data(withJSONObject: reply),
+                               HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil), nil)
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+            let c = complete(CleanupClient.localAdapter(surface: .cleanup, transport: leaky),
+                             request(LLMProviderBundle.local("reasoning-off-still-leaks-cleanup:7b"), route: .cleanupL1,
+                                     system: "fixture system prompt", user: "unused"))
+            let e = complete(EmailClient.localAdapter(transport: leaky),
+                             request(LLMProviderBundle.local("reasoning-off-still-leaks-email:7b"), route: .email,
+                                     system: "fixture email prompt", user: "unused"))
+            reporter.record("reasoning-off: a model that leaks even without the field produces bad output on both the cleanup and the email path, so the leaked text is never delivered",
+                isLeakedBadOutput(c) && isLeakedBadOutput(e), "cleanup=\(c) email=\(e)")
+        }
+
+        // (j) Option+P selection transform and email each pay the field->plain retry independently.
+        do {
+            var promptPrepBodies: [[String: Any]] = []
+            var emailBodies: [[String: Any]] = []
+            let promptPrepTransport = LocalChatTransport(
+                sendLMStudio: { request, completion in
+                    let body = request.httpBody.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                    promptPrepBodies.append(body)
+                    let url = request.url ?? Settings.cleanupEndpoint
+                    let content = (body["reasoning_effort"] != nil) ? leaked : clean
+                    let reply: [String: Any] = ["choices": [[
+                        "index": 0, "message": ["role": "assistant", "content": content],
+                        "finish_reason": "stop",
+                    ]]]
+                    completion(try? JSONSerialization.data(withJSONObject: reply),
+                               HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil), nil)
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+            let emailTransport = LocalChatTransport(
+                sendLMStudio: { request, completion in
+                    let body = request.httpBody.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                    emailBodies.append(body)
+                    let url = request.url ?? Settings.cleanupEndpoint
+                    let content = (body["reasoning_effort"] != nil) ? leaked : clean
+                    let reply: [String: Any] = ["choices": [[
+                        "index": 0, "message": ["role": "assistant", "content": content],
+                        "finish_reason": "stop",
+                    ]]]
+                    completion(try? JSONSerialization.data(withJSONObject: reply),
+                               HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil), nil)
+                },
+                prepareLMStudio: { _, _ in (.ready, false) },
+                unloadLMStudio: { _ in },
+                prepareOllama: { _, context, _ in (.ready, context, false) },
+                chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                unloadOllama: { _ in },
+                keepAliveSeconds: { keepAlive },
+                beginRequest: { _ in },
+                endRequest: { _ in })
+            let pp = complete(CleanupClient.localAdapter(surface: .promptPrep, transport: promptPrepTransport),
+                              request(LLMProviderBundle.local("reasoning-off-retry-prep:7b"), route: .promptPrep,
+                                      system: "fixture prep prompt", user: "unused"))
+            let em = complete(EmailClient.localAdapter(transport: emailTransport),
+                              request(LLMProviderBundle.local("reasoning-off-retry-email:7b"), route: .email,
+                                      system: "fixture email prompt", user: "unused"))
+            reporter.record("reasoning-off: the Option+P selection transform and the email path get the same leak retry",
+                promptPrepBodies.count == 2 && promptPrepBodies[0]["reasoning_effort"] as? String == "none"
+                    && promptPrepBodies[1]["reasoning_effort"] == nil && okText(pp) == clean
+                    && emailBodies.count == 2 && emailBodies[0]["reasoning_effort"] as? String == "none"
+                    && emailBodies[1]["reasoning_effort"] == nil && okText(em) == clean,
+                "prep=\(promptPrepBodies.count) email=\(emailBodies.count)")
+        }
     }
 
     // MARK: - stall-timeout (opted-in streaming, guard: the tail judge is not opted in)

@@ -184,6 +184,23 @@ enum LMStudioReasoningEffort {
         return true
     }
 
+    /// True when `content`'s first line is a tagless reasoning preamble: the line, trimmed of
+    /// whitespace and any `*`, `#` or `_` at BOTH ends, begins (case-insensitive) with one of the
+    /// five openings AND ends with `:`.
+    static func leakedReasoning(_ content: String) -> Bool {
+        let firstLine = String(content.prefix { $0 != "\n" })
+        let trimmed = firstLine.trimmingCharacters(
+            in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "*#_")))
+        let lower = trimmed.lowercased()
+        guard lower.hasSuffix(":") else { return false }
+        let openings = ["thinking process",
+                        "here's a thinking process",
+                        "here is a thinking process",
+                        "here's my thinking process",
+                        "here is my thinking process"]
+        return openings.contains { lower.hasPrefix($0) }
+    }
+
     /// Build one JSON `POST` for `body` (nil when it cannot be encoded). `progressTimeout` opts the
     /// request into the streaming sender (a header only, default off), so every direct `sendLMStudio`
     /// caller and the tail-check judge keep today's non-streaming bytes.
@@ -199,6 +216,17 @@ enum LMStudioReasoningEffort {
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         req.httpBody = data
         return req
+    }
+
+    /// The assistant text content of a success-shaped chat completion, or nil.
+    private static func leakedContent(_ data: Data?) -> String? {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String else { return nil }
+        return content
     }
 
     /// The one LM Studio send path for the reasoning-capable surfaces: send with the field, and on a
@@ -221,18 +249,33 @@ enum LMStudioReasoningEffort {
             return
         }
         transport.sendLMStudio(outboundRequest) { data, response, error in
-            guard !alreadyRejected, rejected(data, response, error) else {
+            if alreadyRejected {
                 completion(data, response, error)
                 return
             }
-            rememberRejected(modelID)
-            // The retry stays opted-in: it is the same cleanup/email request, not the tail judge.
-            guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout,
-                                      progressTimeout: progressTimeout) else {
-                completion(nil, nil, encodeError())
+            if rejected(data, response, error) {
+                rememberRejected(modelID)
+                // The retry stays opted-in: it is the same cleanup/email request, not the tail judge.
+                guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout,
+                                          progressTimeout: progressTimeout) else {
+                    completion(nil, nil, encodeError())
+                    return
+                }
+                transport.sendLMStudio(retry, completion)
                 return
             }
-            transport.sendLMStudio(retry, completion)
+            if let content = leakedContent(data), leakedReasoning(content) {
+                rememberRejected(modelID)
+                Log.write("reasoning-off: \(modelID) wrote its thinking into the answer; retrying without reasoning_effort")
+                guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout,
+                                          progressTimeout: progressTimeout) else {
+                    completion(nil, nil, encodeError())
+                    return
+                }
+                transport.sendLMStudio(retry, completion)
+                return
+            }
+            completion(data, response, error)
         }
     }
 
