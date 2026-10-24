@@ -905,6 +905,94 @@ enum OllamaClientWiringFixtureSelfTest {
                     && emailBodies[1]["reasoning_effort"] == nil && okText(em) == clean,
                 "prep=\(promptPrepBodies.count) email=\(emailBodies.count)")
         }
+
+        // (k) a leaked body on an error or non-2xx reply is not retried, not remembered, unchanged.
+        do {
+            let fixtureLeak = "Thinking Process:\n1. Invented fixture reasoning, never a real reply.\n2. Draft the answer.\nInvented fixture answer text."
+            let successShaped: [String: Any] = ["choices": [[
+                "index": 0, "message": ["role": "assistant", "content": fixtureLeak],
+                "finish_reason": "stop",
+            ]]]
+            let leakData = try! JSONSerialization.data(withJSONObject: successShaped)
+
+            func oneCase(model: String, status: Int?, withError: Bool) -> Bool {
+                var calls = 0
+                var firstField: String?
+                var receivedData: Data?
+                var receivedStatus: Int?
+                var receivedError: Error?
+                let transport = LocalChatTransport(
+                    sendLMStudio: { request, completion in
+                        calls += 1
+                        let body = request.httpBody.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                        firstField = body["reasoning_effort"] as? String
+                        let url = request.url ?? Settings.cleanupEndpoint
+                        let response: URLResponse? = status.flatMap {
+                            HTTPURLResponse(url: url, statusCode: $0, httpVersion: "HTTP/1.1", headerFields: nil)
+                        }
+                        let error: Error? = withError
+                            ? NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "fixture transport error"])
+                            : nil
+                        completion(leakData, response, error)
+                    },
+                    prepareLMStudio: { _, _ in (.ready, false) },
+                    unloadLMStudio: { _ in },
+                    prepareOllama: { _, context, _ in (.ready, context, false) },
+                    chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                    unloadOllama: { _ in },
+                    keepAliveSeconds: { keepAlive },
+                    beginRequest: { _ in },
+                    endRequest: { _ in })
+                let done = DispatchSemaphore(value: 0)
+                LMStudioReasoningEffort.send(
+                    baseBody: ["messages": [["role": "user", "content": "fixture"]]],
+                    modelID: model, endpoint: Settings.cleanupEndpoint, timeout: 30,
+                    transport: transport,
+                    completion: { data, response, error in
+                        receivedData = data
+                        receivedStatus = (response as? HTTPURLResponse)?.statusCode
+                        receivedError = error
+                        done.signal()
+                    })
+                _ = done.wait(timeout: .now() + 10)
+                let firstOK = calls == 1 && firstField == "none"
+                    && receivedData == leakData
+                    && receivedStatus == status
+                    && (receivedError != nil) == withError
+
+                var secondCalls = 0
+                var secondField: String?
+                let transport2 = LocalChatTransport(
+                    sendLMStudio: { request, completion in
+                        secondCalls += 1
+                        let body = request.httpBody.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+                        secondField = body["reasoning_effort"] as? String
+                        completion(leakData, nil, nil)
+                    },
+                    prepareLMStudio: { _, _ in (.ready, false) },
+                    unloadLMStudio: { _ in },
+                    prepareOllama: { _, context, _ in (.ready, context, false) },
+                    chatOllama: { _, _, _, _, _ in (nil, nil, nil) },
+                    unloadOllama: { _ in },
+                    keepAliveSeconds: { keepAlive },
+                    beginRequest: { _ in },
+                    endRequest: { _ in })
+                let done2 = DispatchSemaphore(value: 0)
+                LMStudioReasoningEffort.send(
+                    baseBody: ["messages": [["role": "user", "content": "fixture"]]],
+                    modelID: model, endpoint: Settings.cleanupEndpoint, timeout: 30,
+                    transport: transport2,
+                    completion: { _, _, _ in done2.signal() })
+                _ = done2.wait(timeout: .now() + 10)
+                return firstOK && secondCalls == 1 && secondField == "none"
+            }
+
+            reporter.record("reasoning-off: a leaked body on an error or non-2xx reply is not retried, not remembered and reaches the caller unchanged",
+                oneCase(model: "reasoning-off-leak-500:7b", status: 500, withError: false)
+                    && oneCase(model: "reasoning-off-leak-200-error:7b", status: 200, withError: true)
+                    && oneCase(model: "reasoning-off-leak-nil-response:7b", status: nil, withError: false),
+                "three cases: 500-no-error, 200-with-error, nil-response")
+        }
     }
 
     // MARK: - stall-timeout (opted-in streaming, guard: the tail judge is not opted in)

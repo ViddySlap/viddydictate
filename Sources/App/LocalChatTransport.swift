@@ -264,7 +264,10 @@ enum LMStudioReasoningEffort {
                 transport.sendLMStudio(retry, completion)
                 return
             }
-            if let content = leakedContent(data), leakedReasoning(content) {
+            if error == nil,
+               let statusCode = (response as? HTTPURLResponse)?.statusCode,
+               (200..<300).contains(statusCode),
+               let content = leakedContent(data), leakedReasoning(content) {
                 rememberRejected(modelID)
                 Log.write("reasoning-off: \(modelID) wrote its thinking into the answer; retrying without reasoning_effort")
                 guard let retry = request(baseBody, endpoint: endpoint, timeout: timeout,
