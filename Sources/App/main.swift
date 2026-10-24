@@ -238,6 +238,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case whisperAdvancedSelftest = "--whisper-advanced-selftest"
     case whisperAdvancedRender = "--whisper-advanced-render"
     case codexCatalogLatchStress = "--codex-catalog-latch-stress"
+    case syntheticKeySelftest = "--synthetic-key-selftest"
 }
 
 // Sub-flags of --history-selftest, NOT manifest flags of their own: the retained-take deadlock repro

@@ -498,6 +498,9 @@ tier_deterministic() {
         run_gate deterministic "custom-mode scratch selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --custommode-selftest || true
+        run_gate deterministic "synthetic keystrokes never fire the app's own hotkeys" \
+            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
+            "$TEST_APP" --synthetic-key-selftest || true
         run_gate deterministic "non-finite STT body parsing and retained-recovery cap selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --stt-nonfinite-selftest || true

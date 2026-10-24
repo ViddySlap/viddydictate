@@ -211,16 +211,13 @@ enum TargetResolver {
         SyntheticPasteboard.write(text, to: pb)
         let temporaryChangeCount = pb.changeCount
 
-        let src = CGEventSource(stateID: .combinedSessionState)
         let vKey: CGKeyCode = 9 // 'v'
-        let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false)
+        let down = SyntheticKeystroke.make(virtualKey: vKey, keyDown: true, flags: .maskCommand)
+        let up = SyntheticKeystroke.make(virtualKey: vKey, keyDown: false, flags: .maskCommand)
         guard let down = down, let up = up else {
             Log.write("paste event dispatch unavailable — output retained on clipboard")
             return false
         }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
 
@@ -308,15 +305,12 @@ enum TargetResolver {
         SyntheticPasteboard.write(text, to: pb)
         let temporaryChangeCount = pb.changeCount
 
-        let src = CGEventSource(stateID: .combinedSessionState)
         let vKey: CGKeyCode = 9
-        guard let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false) else {
+        guard let down = SyntheticKeystroke.make(virtualKey: vKey, keyDown: true, flags: .maskCommand),
+              let up = SyntheticKeystroke.make(virtualKey: vKey, keyDown: false, flags: .maskCommand) else {
             Log.write("late paste event dispatch unavailable - output retained on clipboard")
             return false
         }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
         down.postToPid(pid)
         up.postToPid(pid)
 
@@ -429,12 +423,9 @@ enum TargetResolver {
         // so 1s covers the transient with ample slack for a congested main thread.
         ClipboardHistory.shared.suppressCapture(for: 1.0)
 
-        let src = CGEventSource(stateID: .combinedSessionState)
         let cKey: CGKeyCode = 8 // 'c'
-        let down = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: true)
-        down?.flags = .maskCommand
-        let up = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: false)
-        up?.flags = .maskCommand
+        let down = SyntheticKeystroke.make(virtualKey: cKey, keyDown: true, flags: .maskCommand)
+        let up = SyntheticKeystroke.make(virtualKey: cKey, keyDown: false, flags: .maskCommand)
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
 
@@ -470,18 +461,15 @@ enum TargetResolver {
     /// the freshest paste (caret unmoved, nothing typed since). The controller gates to that case and
     /// downgrades to the clipboard tier otherwise.
     static func undoLastPasteAndPasteRaw(_ raw: String, completion: ((Bool) -> Void)? = nil) {
-        let src = CGEventSource(stateID: .combinedSessionState)
         let zKey: CGKeyCode = 6 // 'z'
-        let down = CGEvent(keyboardEventSource: src, virtualKey: zKey, keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: zKey, keyDown: false)
+        let down = SyntheticKeystroke.make(virtualKey: zKey, keyDown: true, flags: .maskCommand)
+        let up = SyntheticKeystroke.make(virtualKey: zKey, keyDown: false, flags: .maskCommand)
         guard let down = down, let up = up else {
             Log.write("undo: native Cmd+Z event unavailable — output retained on clipboard")
             copyToClipboard(raw)
             completion?(false)
             return
         }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
         Log.write("undo: native Cmd+Z fired, pasting raw (\(raw.count) chars)")
