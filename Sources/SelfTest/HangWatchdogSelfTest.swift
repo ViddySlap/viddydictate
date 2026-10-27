@@ -284,6 +284,16 @@ enum HangWatchdogSelfTest {
                 "BROKEN RULE: an unarmed watchdog is indistinguishable from no watchdog, and every "
                     + "other gate here would still pass. See \(adrReference)")
 
+        let guardBody = slice(delegate, from: "private func shouldRunThisInstance() -> Bool {", to: "\n    }")
+        let guardRuleHolds = !guardBody.isEmpty
+            && guardBody.contains("Log.writeBeforeCrash(\"duplicate app instance detected")
+            && !guardBody.contains("Log.write(\"duplicate app instance detected")
+        reporter.record(
+            "the duplicate-instance guard flushes its log line before the app quits",
+            guardRuleHolds,
+            guardRuleHolds ? "" :
+                "BROKEN RULE: Log.write only enqueues; the guard returns false and applicationDidFinishLaunching terminates at once, so an enqueued line dies with the process and the restart race leaves no trace in the log. Use Log.writeBeforeCrash, which waits for the queue (bounded) and falls back to a direct append.")
+
         let willTerminate = slice(delegate, from: "func applicationWillTerminate(", to: "\n    }")
         let quitRuleHolds = willTerminate.contains("hangWatchdog.stop()")
         reporter.record(

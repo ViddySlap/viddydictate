@@ -41,13 +41,14 @@ enum Log {
         }
     }
 
-    /// Crash-path write, for a caller that is about to `abort()`. The ordinary `write` only ENQUEUES,
+    /// Crash-path write, for a caller that is about to `abort()` or quit (the hang watchdog, the duplicate-instance guard). The ordinary `write` only ENQUEUES,
     /// so the line would die with the process; this waits for the queue to drain past it.
     ///
     /// The wait is bounded because the caller is the hang watchdog: a wedged log queue must not be able
     /// to swallow the abort itself. On timeout the line is appended directly from the calling thread —
     /// a duplicated hang line is harmless, a missing one loses the only signal that separates a hang
     /// from a genuine crash in the report. See `HangWatchdog` and ADR 0017.
+    /// The duplicate-instance guard calls it on the main thread at launch; the same bound keeps a wedged log queue from hanging launch.
     static func writeBeforeCrash(_ msg: String, timeout: TimeInterval = 2) {
         write(msg)
         let drained = DispatchSemaphore(value: 0)

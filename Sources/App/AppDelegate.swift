@@ -744,7 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != current }
         if !others.isEmpty {
-            Log.write("duplicate app instance detected — exiting pid=\(current)")
+            Log.writeBeforeCrash("duplicate app instance detected — exiting pid=\(current)")
             return false
         }
         return true
