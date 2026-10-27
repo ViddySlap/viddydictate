@@ -81,6 +81,11 @@ enum NotesUndoLifetimeProbe {
             return false
         }
 
+        private func tabstripFail(_ what: String) -> Bool {
+            print("[notes-undo-lifetime] FAIL: tabstrip \(what)")
+            return false
+        }
+
         private func runTableSequence() -> Bool {
             let fixture = [
                 "| Part | What | Time |",
@@ -394,6 +399,79 @@ enum NotesUndoLifetimeProbe {
             guard bShortAfterResult == "ok" else { return tableFail("b short ", bShortAfterResult ?? "unknown") }
 
             print("[notes-undo-lifetime] table PASS: renders, enters, leaves, scrolls, bullseye, and undo isolation")
+
+            // VDTAB tabstrip check: four tabs in the full (non-mini) chrome at 400 px must scroll inside
+            // #tabs while #app stays at the viewport width (the pinned lane is clipped at the tab bar).
+            guard evaluate("window.ViddyNotes.receiveState({ notes: [ {id: 'tab-a', body: '', title: 'Alpha'}, {id: 'tab-b', body: '', title: 'Bravo'}, {id: 'tab-c', body: '', title: 'Charlie'}, {id: 'tab-d', body: '', title: 'Delta'} ], activeId: 'tab-a', history: [], cheatSheetButton: true, retention: 'oneDay' });").1 == nil else {
+                return tabstripFail("seed")
+            }
+            guard tableJS("(function() { return document.body.classList.contains('mini-mode') ? 'mini-mode set' : 'ok'; })()") == "ok" else {
+                return tabstripFail("mini-mode")
+            }
+            webView?.setFrameSize(NSSize(width: 400, height: 400))
+            pause(0.4)
+
+            let tabstripTabs = #"""
+            (function() {
+              const tabs = document.querySelectorAll('#tabs .tab');
+              if (tabs.length !== 4) return 'tab count ' + tabs.length;
+              const tabsEl = document.getElementById('tabs');
+              if (!(tabsEl.scrollWidth > tabsEl.clientWidth)) return 'strip not overflowing ' + tabsEl.scrollWidth + '/' + tabsEl.clientWidth;
+              return 'ok';
+            })()
+            """#
+            let tabstripTabsResult = tableJS(tabstripTabs)
+            guard tabstripTabsResult == "ok" else { return tabstripFail("tabs \(tabstripTabsResult ?? "unknown")") }
+
+            let tabstripClass = #"(function() { return document.body.classList.contains('tabs-overflow') ? 'ok' : 'missing tabs-overflow'; })()"#
+            let tabstripClassResult = tableJS(tabstripClass)
+            guard tabstripClassResult == "ok" else { return tabstripFail("class \(tabstripClassResult ?? "unknown")") }
+
+            let tabstripApp = #"""
+            (function() {
+              const app = document.getElementById('app');
+              if (app.scrollWidth <= app.clientWidth + 1) return 'ok';
+              return 'app ' + app.scrollWidth + '/' + app.clientWidth;
+            })()
+            """#
+            let tabstripAppResult = tableJS(tabstripApp)
+            guard tabstripAppResult == "ok" else { return tabstripFail(tabstripAppResult ?? "unknown") }
+
+            let tabstripControls = #"""
+            (function() {
+              const names = ['#new-tab', '#history-button', '#mini-enter'];
+              for (const name of names) {
+                const el = document.querySelector(name);
+                if (!el) return name + ' missing';
+                const right = el.getBoundingClientRect().right;
+                if (right > window.innerWidth + 1) return name + ' right ' + right + ' > ' + (window.innerWidth + 1);
+              }
+              return 'ok';
+            })()
+            """#
+            let tabstripControlsResult = tableJS(tabstripControls)
+            guard tabstripControlsResult == "ok" else { return tabstripFail("controls \(tabstripControlsResult ?? "unknown")") }
+
+            guard tableJS(#"""
+            (function() {
+              const tabsEl = document.getElementById('tabs');
+              tabsEl.scrollLeft = tabsEl.scrollWidth;
+              tabsEl.dispatchEvent(new Event('scroll'));
+              return 'ok';
+            })()
+            """#) == "ok" else { return tabstripFail("clipped scroll") }
+            pause(0.4)
+            let tabstripClipped = #"""
+            (function() {
+              if (!document.body.classList.contains('tabs-overflow')) return 'tabs-overflow lost';
+              if (document.body.classList.contains('tabs-clipped')) return 'tabs-clipped still set';
+              return 'ok';
+            })()
+            """#
+            let tabstripClippedResult = tableJS(tabstripClipped)
+            guard tabstripClippedResult == "ok" else { return tabstripFail("clipped \(tabstripClippedResult ?? "unknown")") }
+
+            print("[notes-undo-lifetime] tabstrip PASS: four tabs scroll inside a 400 px window")
             return true
         }
 
