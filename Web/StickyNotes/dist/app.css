@@ -445,6 +445,43 @@ body.tabs-clipped #tabs {
 .cm-md-h5 { font-size: 1em; font-weight: 700; }
 .cm-md-h6 { font-size: 0.95em; font-weight: 700; opacity: 0.85; }
 
+/* Markdown tables (slice VDTBL): a rendered table is a block widget whose wrap scrolls horizontally
+   when the table is wider than the note, while the table keeps its natural max-content width. */
+.vd-md-table-wrap {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+.vd-md-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  width: max-content;
+}
+.vd-md-table th,
+.vd-md-table td {
+  padding: 4px 10px;
+  border: 1px solid var(--vd-green-28);
+  overflow-wrap: anywhere;
+}
+.vd-md-table th {
+  color: var(--vd-green);
+  background: var(--vd-green-18);
+  font-weight: 650;
+  text-align: left;
+}
+.vd-md-table td {
+  color: var(--vd-note-text);
+}
+.vd-md-align-left { text-align: left; }
+.vd-md-align-center { text-align: center; }
+.vd-md-align-right { text-align: right; }
+
+.cm-content {
+  width: 0;
+  min-width: 100%;
+}
+
 .floating-button {
   position: absolute;
   top: 14px;

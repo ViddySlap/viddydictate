@@ -7,6 +7,7 @@ import { syntaxTree } from "@codemirror/language";
 import { editorEl } from "./dom.js";
 import { needsLeadingSeparator, stripLeadingInlineWhitespace } from "./dictation-separator.js";
 import { appendRange } from "./sticky-skill-append.js";
+import { tableModel } from "./markdown-table.js";
 
 let editor = null;
 let onDocChanged = () => {};
@@ -184,6 +185,190 @@ export function clearReplaceHighlightDeco() {
   editor.dispatch({ effects: setReplaceHighlightEffect.of(null) });
 }
 
+// --- Markdown table rendering (slice VDTBL) ---------------------------------------------------------
+// Tables are found by scanning the SOURCE (not the parser's Table nodes, so a header whose code-span
+// pipe confuses the parser still renders). Block widgets must come from a StateField — CodeMirror
+// forbids block decorations from ViewPlugins — and the field maps its set through edits unless the
+// document, selection, bullseye marker, or syntax tree changed.
+
+function insideCodeBlock(tree, pos) {
+  for (let node = tree.resolveInner(pos, 1); node; node = node.parent) {
+    if (node.name === "FencedCode" || node.name === "CodeBlock") return true;
+  }
+  return false;
+}
+
+function findTables(state) {
+  const doc = state.doc;
+  const tree = syntaxTree(state);
+  const tables = [];
+  const total = doc.lines;
+  let lineNo = 1;
+  while (lineNo <= total) {
+    const line = doc.line(lineNo);
+    if (insideCodeBlock(tree, line.from) || !line.text.includes("|")) {
+      lineNo += 1;
+      continue;
+    }
+    const lines = [];
+    for (let n = lineNo; n <= total; n += 1) {
+      const ln = doc.line(n);
+      if (insideCodeBlock(tree, ln.from)) break;
+      lines.push({ text: ln.text, from: ln.from });
+    }
+    const model = tableModel(lines);
+    if (model) {
+      const from = line.from;
+      const to = doc.line(lineNo + model.lineCount - 1).to;
+      tables.push({
+        columns: model.columns,
+        alignments: model.alignments,
+        header: model.header,
+        rows: model.rows,
+        from,
+        to,
+        lineCount: model.lineCount,
+        source: doc.sliceString(from, to),
+      });
+      lineNo += model.lineCount;
+    } else {
+      lineNo += 1;
+    }
+  }
+  return tables;
+}
+
+function tableLineNumbers(state) {
+  const set = new Set();
+  for (const t of findTables(state)) {
+    const first = state.doc.lineAt(t.from).number;
+    const last = first + t.lineCount - 1;
+    for (let n = first; n <= last; n += 1) set.add(n);
+  }
+  return set;
+}
+
+function selectionIntersectsTable(range, from, to) {
+  if (range.from === range.to) {
+    return range.from >= from && range.from <= to;
+  }
+  return range.from < to && range.to > from;
+}
+
+class TableWidget extends WidgetType {
+  constructor(table) {
+    super();
+    this.table = table;
+  }
+  eq(other) {
+    return other instanceof TableWidget
+      && other.table.from === this.table.from
+      && other.table.to === this.table.to
+      && other.table.source === this.table.source;
+  }
+  toDOM() {
+    const wrap = document.createElement("div");
+    wrap.className = "vd-md-table-wrap";
+    const table = document.createElement("table");
+    table.className = "vd-md-table";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    this.table.header.forEach((cell, i) => {
+      const th = document.createElement("th");
+      th.className = `vd-md-align-${this.table.alignments[i] || "default"}`;
+      th.textContent = cell.text;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const row of this.table.rows) {
+      const tr = document.createElement("tr");
+      row.forEach((cell, i) => {
+        const td = document.createElement("td");
+        td.className = `vd-md-align-${this.table.alignments[i] || "default"}`;
+        td.textContent = cell.text;
+        td.addEventListener("mousedown", (event) => {
+          if (!editor) return;
+          editor.dispatch({ selection: { anchor: cell.from } });
+          editor.focus();
+          event.preventDefault();
+        });
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+}
+
+function computeTableDecorations(state) {
+  const tables = findTables(state);
+  if (tables.length === 0) return Decoration.none;
+  const ranges = state.selection.ranges;
+  const bullseye = state.field(bullseyeMarkerField).anchor;
+  const decos = [];
+  for (const t of tables) {
+    const intersects = ranges.some((range) => selectionIntersectsTable(range, t.from, t.to));
+    const bullseyeInside = bullseye != null && bullseye >= t.from && bullseye <= t.to;
+    if (!intersects && !bullseyeInside) {
+      decos.push(Decoration.replace({ block: true, widget: new TableWidget(t) }).range(t.from, t.to));
+    }
+  }
+  return decos.length ? Decoration.set(decos) : Decoration.none;
+}
+
+const tableDecorationField = StateField.define({
+  create(state) { return computeTableDecorations(state); },
+  update(deco, tr) {
+    if (tr.docChanged || tr.selection
+        || tr.effects.some((effect) => effect.is(setBullseyeMarkerEffect))
+        || syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
+      return computeTableDecorations(tr.state);
+    }
+    return deco.map(tr.changes);
+  },
+});
+
+// Table arrow-key entry (slice VDTBL2): CodeMirror's vertical motion does not move the caret into a
+// multi-line block-replace widget, so ArrowDown/ArrowUp over a rendered table would leave the selection
+// unchanged. These bindings run BEFORE the default keymap (see editorExtensions) and, when the caret is on
+// the line just outside a rendered table, move it into the table's first/last line without a doc change.
+const tableArrowKeymap = keymap.of([
+  {
+    key: "ArrowDown",
+    run: (view) => {
+      const { state } = view; const sel = state.selection.main; if (!sel.empty) return false;
+      const line = state.doc.lineAt(sel.head).number; if (line >= state.doc.lines) return false;
+      const next = state.doc.line(line + 1); let header = false; state.field(tableDecorationField).between(next.from, next.to, (from, _to, value) => { if (from === next.from && value && value.widget instanceof TableWidget) { header = true; return false; } });
+      if (!header) return false; view.dispatch({ selection: { anchor: next.from }, scrollIntoView: true }); return true;
+    },
+  },
+  {
+    key: "ArrowUp",
+    run: (view) => {
+      const { state } = view;
+      const sel = state.selection.main;
+      if (!sel.empty) return false;
+      const caretLine = state.doc.lineAt(sel.head).number;
+      if (caretLine <= 1) return false;
+      const prevLine = state.doc.line(caretLine - 1);
+      let last = false;
+      state.field(tableDecorationField).between(prevLine.from, prevLine.to, (from, to, value) => {
+        if (to === prevLine.to && value && value.widget instanceof TableWidget) {
+          last = true;
+          return false;
+        }
+      });
+      if (!last) return false;
+      view.dispatch({ selection: { anchor: prevLine.from }, scrollIntoView: true });
+      return true;
+    },
+  },
+]);
+
 // --- Live markdown preview (Obsidian-style, line-level reveal) ------------------------------------
 // Renders markdown inline - headings sized, bold / italic / strikethrough / inline-code / links styled
 // with their markers hidden - EXCEPT on the line(s) the cursor or selection currently touches, which
@@ -212,12 +397,14 @@ function buildMarkdownDecorations(view) {
   const doc = state.doc;
   const activeLines = selectedLineNumbers(state);
   const isActive = (pos) => activeLines.has(doc.lineAt(pos).number);
+  const tableLines = tableLineNumbers(state);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
       to,
       enter: (node) => {
+        if (tableLines.has(doc.lineAt(node.from).number)) return undefined;
         const name = node.name;
         // Heading: size the whole line always; hide the "### " marker unless the line is being edited.
         const heading = /^ATXHeading([1-6])$/.exec(name);
@@ -299,11 +486,14 @@ function editorExtensions() {
     markdownLivePreview,
     bullseyeMarkerField,
     replaceHighlightField,
+    tableDecorationField,
+    EditorView.decorations.from(tableDecorationField),
     // BUG 3a (refine2): a CM6-managed caret so the replace-highlight collapse-then-restore (BT4) and the
     // dictation-target relocate never leave a stale NATIVE caret beside the redrawn one. `drawSelection()`
     // hides the browser's native selection and draws CM's own — the standard CM6 fix for native/custom caret
     // desync, which the double-caret was.
     drawSelection(),
+    tableArrowKeymap,
     keymap.of([...defaultKeymap, ...historyKeymap]),
     EditorView.lineWrapping,
     editableCompartment.of(EditorView.editable.of(editorEditable)),

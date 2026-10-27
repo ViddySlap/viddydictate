@@ -228,4 +228,27 @@ function makeHarness(mode = "per-note") {
     "setState still notifies persistence out of band with no cross-note ChangeSet");
 }
 
+// Table text keeps its own per-note history: editing a cell and swapping notes never leaks or corrupts
+// the table source; one undo after the swap-back restores it byte-identical (slice VDTBL).
+{
+  const TABLE_FIXTURE = [
+    "| Part | What | Time |",
+    "|:---|:---:|---:|",
+    "| 1 | Try the app | 20 min |",
+    "| 2 | Build | 30 |",
+  ].join("\n");
+  const edited = TABLE_FIXTURE.slice(0, TABLE_FIXTURE.indexOf("Try the app")) + "X"
+    + TABLE_FIXTURE.slice(TABLE_FIXTURE.indexOf("Try the app"));
+
+  const h = makeHarness();
+  h.openNote("A", TABLE_FIXTURE);
+  h.type(TABLE_FIXTURE.indexOf("Try the app"), "X");
+  assert.equal(h.doc, edited, "the cell edit landed inside the table text");
+  h.openNote("B", "other note");
+  assert.equal(h.doc, "other note", "swapping away parks the table note");
+  h.openNote("A", edited);
+  assert.equal(h.undo(), true, "swapping back keeps the table note's undo stack");
+  assert.equal(h.doc, TABLE_FIXTURE, "undo restores the table body byte-identical to the fixture");
+}
+
 console.log("[check-undo-isolation] OK - per-note history survives navigation and remains isolated");
