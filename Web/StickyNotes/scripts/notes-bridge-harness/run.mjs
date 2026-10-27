@@ -46,6 +46,7 @@ import {
 import { state } from "../../src/state.js";
 import { renderStickySkillMenu } from "../../src/sticky-skill-menu.js";
 import { __model } from "./editor-model.mjs";
+import { parseDelimiterRow, tableModel, tokenizeTableRow } from "../../src/markdown-table.js";
 
 let failures = 0;
 function check(name, ok, detail = "") {
@@ -580,6 +581,98 @@ function arraysEqual(lhs, rhs) {
   return Array.isArray(lhs) && Array.isArray(rhs)
     && lhs.length === rhs.length && lhs.every((value, index) => value === rhs[index]);
 }
+
+// ===== Case 12: markdown tables ======================================================================
+console.log("\nCase 12: markdown tables");
+
+const tableHeader = "| Part | What | Time |";
+const tableDelim = "|:---|:---:|---:|";
+const tableBody1 = "| 1 | Try the app | 20 min |";
+const tableBody2 = "| 2 | Build | 30 |";
+const tableLines = [
+  { text: tableHeader, from: 0 },
+  { text: tableDelim, from: tableHeader.length + 1 },
+  { text: tableBody1, from: tableHeader.length + 1 + tableDelim.length + 1 },
+  { text: tableBody2, from: tableHeader.length + 1 + tableDelim.length + 1 + tableBody1.length + 1 },
+];
+const tableModelResult = tableModel(tableLines);
+check("table: header, delimiter and body rows are recognised",
+  tableModelResult !== null
+    && tableModelResult.columns === 3
+    && tableModelResult.header.length === 3
+    && tableModelResult.rows.length === 2
+    && tableModelResult.header.map((c) => c.text).join("|") === "Part|What|Time"
+    && tableModelResult.rows[0].map((c) => c.text).join("|") === "1|Try the app|20 min"
+    && tableModelResult.rows[1].map((c) => c.text).join("|") === "2|Build|30",
+  tableModelResult ? JSON.stringify(tableModelResult) : "null");
+
+const tableAlignments = parseDelimiterRow("|:---|:---:|---:|---|");
+check("table: left, right, center and default alignments are decoded",
+  JSON.stringify(tableAlignments) === JSON.stringify(["left", "center", "right", "default"]),
+  JSON.stringify(tableAlignments));
+
+const shortRowLines = [
+  { text: tableHeader, from: 0 },
+  { text: tableDelim, from: 100 },
+  { text: "| 3 | only |", from: 200 },
+];
+const shortRowModel = tableModel(shortRowLines);
+check("table: a short row is padded in the model and the source is unchanged",
+  shortRowModel !== null
+    && shortRowModel.rows.length === 1
+    && shortRowModel.rows[0].length === 3
+    && shortRowModel.rows[0][1].text === "only"
+    && shortRowModel.rows[0][2].from === shortRowModel.rows[0][2].to
+    && shortRowModel.rows[0][2].text === "",
+  shortRowModel ? JSON.stringify(shortRowModel.rows[0]) : "null");
+
+const longRowLines = [
+  { text: tableHeader, from: 0 },
+  { text: tableDelim, from: 100 },
+  { text: "| 3 | a | b | c |", from: 200 },
+];
+const longRowModel = tableModel(longRowLines);
+check("table: a long row's extra cells are dropped in the model and the source is unchanged",
+  longRowModel !== null
+    && longRowModel.rows.length === 1
+    && longRowModel.rows[0].length === 3
+    && longRowModel.rows[0].map((c) => c.text).join("|") === "3|a|b",
+  longRowModel ? JSON.stringify(longRowModel.rows[0]) : "null");
+
+const codeSpanCells = tokenizeTableRow("| 3 | `a|b` in code | 5 min |", 0);
+check("table: a pipe inside backticks stays inside one cell",
+  codeSpanCells.length === 3 && codeSpanCells[1].text === "`a|b` in code",
+  JSON.stringify(codeSpanCells.map((c) => c.text)));
+
+const escapedPipeCells = tokenizeTableRow("| 4 | escaped \\| pipe | 10 min |", 0);
+check("table: an escaped pipe stays inside one cell and displays as a bare pipe",
+  escapedPipeCells.length === 3 && escapedPipeCells[1].text === "escaped | pipe",
+  JSON.stringify(escapedPipeCells.map((c) => c.text)));
+
+const headerOnlyModel = tableModel([{ text: tableHeader, from: 0 }]);
+const headerWithDelimModel = tableModel([{ text: tableHeader, from: 0 }, { text: tableDelim, from: 100 }]);
+check("table: a header without a delimiter row is not a table, while the same header with one is",
+  headerOnlyModel === null && headerWithDelimModel !== null,
+  JSON.stringify({ headerOnly: headerOnlyModel, headerWithDelim: headerWithDelimModel }));
+
+const sourceRow = "| A | B |";
+const sourceCells = tokenizeTableRow(sourceRow, 0);
+check("table: every cell range points at exactly its source characters",
+  sourceCells.length === 2
+    && sourceRow.slice(sourceCells[0].from, sourceCells[0].to) === "A"
+    && sourceRow.slice(sourceCells[1].from, sourceCells[1].to) === "B"
+    && sourceCells[0].text === "A"
+    && sourceCells[1].text === "B",
+  JSON.stringify(sourceCells));
+
+const fullTableDoc = [tableHeader, tableDelim, tableBody1, tableBody2].join("\n");
+const dictationCell = tableModelResult ? tableModelResult.rows[0][1] : null;
+const dictationInserted = dictationCell ? fullTableDoc.slice(0, dictationCell.from) + "X" + fullTableDoc.slice(dictationCell.from) : "";
+check("table: a dictation insert inside a cell lands at that cell's source offset",
+  dictationCell !== null
+    && dictationCell.text === "Try the app"
+    && dictationInserted === `${tableHeader}\n${tableDelim}\n| 1 | XTry the app | 20 min |\n${tableBody2}`,
+  JSON.stringify({ cell: dictationCell, inserted: dictationInserted }));
 
 console.log("");
 if (failures > 0) {
