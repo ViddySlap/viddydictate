@@ -44,6 +44,7 @@ button {
 #tabbar {
   position: relative;
   isolation: isolate;
+  overflow-x: clip;
   display: flex;
   gap: 6px;
   align-items: flex-end;
