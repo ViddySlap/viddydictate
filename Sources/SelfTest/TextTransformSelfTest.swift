@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CoreGraphics
 
 /// Pure/scratch-only A2 coverage for the provider-neutral dispatch seam and Claude process transport.
 /// No installed provider, credentials, preferences, live app, or user data is consulted.
@@ -24,6 +25,7 @@ enum TextTransformSelfTest {
         checkInertArming(reporter.record, okText: okText, isUnavailable: isUnavailable)
         checkPendingRetryOwnership(reporter.record)
         checkCapturedTargetRetryLanding(reporter.record)
+        checkPasteModifierAndDiagnostics(reporter.record)
         checkCustomAndSearchRequestRoutes(reporter.record)
         checkClaudePrivateTransport(reporter.record, okText: okText)
         checkTransientExitHelperCleanup(reporter.record)
@@ -478,6 +480,25 @@ enum TextTransformSelfTest {
               DictationController.shouldRecordForeignRetryLanding(.landed)
                 && !DictationController.shouldRecordForeignRetryLanding(deadOutcome)
                 && !DictationController.shouldRecordForeignRetryLanding(clipboardOutcome))
+    }
+
+    private static func checkPasteModifierAndDiagnostics(_ check: (String, Bool) -> Void) {
+        print("--- RustDesk paste modifier + landing diagnostics ---")
+        check("RustDesk pastes with Control; every other app and nil paste with Command",
+              TargetResolver.pasteModifierFlags(forBundleID: "com.carriez.rustdesk") == .maskControl
+                && TargetResolver.pasteModifierFlags(forBundleID: "COM.CARRIEZ.RUSTDESK") == .maskControl
+                && TargetResolver.pasteModifierFlags(forBundleID: nil) == .maskCommand
+                && TargetResolver.pasteModifierFlags(forBundleID: "com.anthropic.claudefordesktop") == .maskCommand
+                && TargetResolver.pasteModifierFlags(forBundleID: "com.apple.Safari") == .maskCommand
+                && TargetResolver.pasteModifierFlags(forBundleID: "") == .maskCommand)
+        check("the focus-facts log line is fixed and content-free",
+              TargetResolver.focusFactsLog(bundleID: "com.example.app", pid: 412, role: "AXTextArea", subrole: "", hash: 0x1a2b)
+                == "app=com.example.app pid=412 role=AXTextArea sub=- hash=1a2b"
+                && TargetResolver.focusFactsLog(bundleID: nil, pid: 1, role: "", subrole: "", hash: 0)
+                == "app=? pid=1 role=? sub=- hash=0")
+        check("the landing mismatch log line is fixed and names every fact the cause needs",
+              TargetResolver.landingMismatchLog(prefix: "captured-target landing", failureToken: "destination_changed", elapsedSeconds: 53.16, target: "app=a pid=1 role=AXTextArea sub=- hash=1", now: "app=a pid=1 role=AXTextArea sub=- hash=2", appRunning: true, targetIsFrontmost: true, front: "a", focusedReadable: true, sameElement: false, selection: "skipped")
+                == "captured-target landing mismatch failure=destination_changed elapsed_s=53.2 target[app=a pid=1 role=AXTextArea sub=- hash=1] now[app=a pid=1 role=AXTextArea sub=- hash=2] running=yes frontmost=yes front=a focused=yes same=no selection=skipped")
     }
 
     private static func checkCustomAndSearchRequestRoutes(_ check: (String, Bool) -> Void) {
