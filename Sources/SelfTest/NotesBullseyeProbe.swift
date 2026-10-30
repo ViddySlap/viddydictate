@@ -911,8 +911,8 @@ extension NotesProbe {
     }
 
     static func probeTakeControls(check: Check) {
-        // --- 13e. take controls: Esc-cancel + Option+Z notes cross-focus undo (notes-bullseye BT5) ---------
-        // Esc ABORTS the in-progress take (record/processing) — nothing lands, the target selection is left
+        // --- 13e. take controls: Option+Esc-cancel + Option+Z notes cross-focus undo (notes-bullseye BT5) ---------
+        // Option+Esc ABORTS the in-progress take (record/processing) — nothing lands, the target selection is left
         // untouched, the BT4 replace highlight is cleared. Option+Z reverts the LAST ViddyDictate-delivered edit
         // IN A NOTE even when focus moved away (reach-back by note id — a controlled surface), restoring any
         // overwritten text; the existing foreign-app tier is left as-is. The chord + real reach-back are GUI/tap
@@ -920,12 +920,14 @@ extension NotesProbe {
         // locked, plus a bundled-island + source shipping check that the JS half actually ships.
         typealias U = NotesUndoLogic
 
-        // 13e-i. Esc aborts ONLY while a take is active (recording / locked / final processing); otherwise Esc is
-        // a normal key that passes through to the focused app.
-        check("take controls: Esc aborts while a take is active",
-              U.escapeAborts(isTakeActive: true))
-        check("take controls: Esc passes through when no take is active",
-              !U.escapeAborts(isTakeActive: false))
+        // 13e-i. Option+Esc aborts ONLY while a take is active (recording / locked / final processing) AND Option
+        // is held AND the key is Esc; otherwise Esc is a normal key that passes through to the focused app.
+        check("take controls: plain Esc no longer aborts a take",
+              !U.escapeAborts(keyCode: 53, optionHeld: false, isTakeActive: true))
+        check("take controls: Option+Esc aborts while a take is active",
+              U.escapeAborts(keyCode: 53, optionHeld: true, isTakeActive: true))
+        check("take controls: Option+Esc passes through when no take is active",
+              !U.escapeAborts(keyCode: 53, optionHeld: true, isTakeActive: false))
 
         // 13e-ii. Option+Z routing: a note delivery (non-empty pending note id) routes to the notes reach-back;
         // a foreign / clipboard landing (nil or empty id) falls to the existing foreign-app tier.

@@ -94,7 +94,7 @@ enum FeatureTour {
             id: "dictation",
             title: "Dictation controls",
             body: [
-                "While you hold {wakeup}: tap {lock} to latch hands-free, Esc to cancel the take, "
+                "While you hold {wakeup}: tap {lock} to latch hands-free, hold Option and tap Esc to cancel the take, "
                     + "and {undo} to undo the last result.",
                 "Past dictations are on the History tab. Recent takes' audio stays on this Mac (Audio tab).",
             ],

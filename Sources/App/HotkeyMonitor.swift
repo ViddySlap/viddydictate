@@ -90,10 +90,11 @@ final class HotkeyMonitor {
     var onPasteWhileArmed: (() -> Void)?
 
     /// Take controls (notes-bullseye BT5). While `takeActive` (a dictation take is recording / locked / in its
-    /// final processing) the tap swallows Escape and routes it to `onCancelTake`, so Esc aborts the in-progress
-    /// take instead of reaching the focused app. When no take is active, Escape passes through as a normal key.
-    /// Mirrored from the controller's `setActive`. The transient pickers above take Escape priority (their blocks
-    /// run first), so an Esc during the A/B / level pick cancels the pick, not the whole take.
+    /// final processing) the tap swallows Option+Esc and routes it to `onCancelTake`, so Option+Esc aborts the
+    /// in-progress take instead of reaching the focused app. When no take is active, or Option is not held,
+    /// Escape passes through as a normal key. Mirrored from the controller's `setActive`. The transient pickers
+    /// above take Escape priority (their blocks run first), so an Esc during the A/B / level pick cancels the
+    /// pick, not the whole take.
     /// DictationController.State mirrors the lifecycle split, but this flag — not that enum — gates Esc here.
     var takeActive = false
     var onCancelTake: (() -> Void)?
@@ -262,10 +263,10 @@ final class HotkeyMonitor {
         // keys are swallowed so they never reach the focused field.
         if dispatchModalPickerKey(keyCode) { return nil }
 
-        // BT5: Esc aborts an in-progress take. Only while a take is active (recording / locked / final
-        // processing); otherwise Esc is a normal key and passes through. Placed AFTER the picker blocks so an Esc
-        // during the A/B / level pick cancels the pick (handled above), not the whole take.
-        if takeActive, keyCode == escapeKeyCode {
+        // BT5: Option+Esc aborts an in-progress take. Only while a take is active (recording / locked / final
+        // processing) AND Option is held; otherwise Esc is a normal key and passes through. Placed AFTER the
+        // picker blocks so an Esc during the A/B / level pick cancels the pick (handled above), not the whole take.
+        if NotesUndoLogic.escapeAborts(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate), isTakeActive: takeActive) {
             DispatchQueue.main.async { self.onCancelTake?() }
             return nil   // swallow so Esc never reaches the focused app while a take is being canceled
         }

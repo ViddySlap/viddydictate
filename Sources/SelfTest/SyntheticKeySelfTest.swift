@@ -126,6 +126,29 @@ enum SyntheticKeySelfTest {
         reporter.record("synthetic keys: an own Cmd+V while paste-restore is armed still triggers the paste-restore observer once and passes through",
             retPaste != nil && observed == 1)
 
+        // Row 10: a plain Esc (keyCode 53, no modifiers) with a take active does NOT cancel and passes through.
+        var plainCancel = 0
+        let monitorPlainEsc = HotkeyMonitor()
+        monitorPlainEsc.takeActive = true
+        monitorPlainEsc.onCancelTake = { plainCancel += 1 }
+        let plainEsc = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true)!
+        let retPlainEsc = monitorPlainEsc.selfTestHandle(type: .keyDown, event: plainEsc)
+        drain()
+        reporter.record("synthetic keys: plain Esc with a take active does not cancel and passes through",
+            retPlainEsc != nil && plainCancel == 0)
+
+        // Row 11: Option+Esc (keyCode 53, .maskAlternate) with a take active DOES cancel and is swallowed.
+        var optionCancel = 0
+        let monitorOptionEsc = HotkeyMonitor()
+        monitorOptionEsc.takeActive = true
+        monitorOptionEsc.onCancelTake = { optionCancel += 1 }
+        let optionEsc = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true)!
+        optionEsc.flags = .maskAlternate
+        let retOptionEsc = monitorOptionEsc.selfTestHandle(type: .keyDown, event: optionEsc)
+        drain()
+        reporter.record("synthetic keys: Option+Esc with a take active cancels and is swallowed",
+            retOptionEsc == nil && optionCancel == 1)
+
         print(reporter.summaryLine(prefix: "[synthetic-key-selftest]"))
         return reporter.passed
     }
