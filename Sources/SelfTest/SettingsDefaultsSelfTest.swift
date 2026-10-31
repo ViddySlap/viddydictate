@@ -31,6 +31,7 @@ enum SettingsDefaultsSelfTest {
         )
         checkLocalModelSettings(reporter)
         checkBundleIdentifierMigration(reporter)
+        checkLiveViewCleanup(reporter)
         checkLaunchAgentIdentity(reporter)
 
         print("\n=== RESULT ===")
@@ -107,11 +108,11 @@ enum SettingsDefaultsSelfTest {
 
         defaults.setPersistentDomain([
             "hotkeyMap": "legacy-hotkeys",
-            "powerMode": "finalOnly",
+            "samplePreference": "finalOnly",
             "cloudPresetEnabled": true,
         ], forName: legacyDomain)
         defaults.setPersistentDomain([
-            "powerMode": "live",
+            "samplePreference": "live",
             "newDomainOnly": "keep-me",
         ], forName: currentDomain)
 
@@ -127,7 +128,7 @@ enum SettingsDefaultsSelfTest {
                 && migrated["cloudPresetEnabled"] as? Bool == true)
         reporter.record(
             "existing new-domain preferences win over legacy values",
-            migrated["powerMode"] as? String == "live"
+            migrated["samplePreference"] as? String == "live"
                 && migrated["newDomainOnly"] as? String == "keep-me")
         reporter.record(
             "defaults migration records its one-time guard",
@@ -145,7 +146,7 @@ enum SettingsDefaultsSelfTest {
         reporter.record(
             "the one-time guard prevents a later legacy overwrite",
             guarded["hotkeyMap"] as? String == "legacy-hotkeys"
-                && guarded["powerMode"] as? String == "live")
+                && guarded["samplePreference"] as? String == "live")
 
         Settings.migrateLegacyDefaultsDomainIfNeeded(
             defaults: defaults,
@@ -155,6 +156,39 @@ enum SettingsDefaultsSelfTest {
         reporter.record(
             "non-shipping bundle domains never import production preferences",
             defaults.persistentDomain(forName: unrelatedDomain) == nil)
+    }
+
+    private static func checkLiveViewCleanup(_ reporter: SelfTestReporter) {
+        print("--- live-view orphan cleanup ---")
+        // Final-only is the only behaviour now: the removed mode's keys are deleted once, and the four
+        // surviving HUD display keys must be left exactly as the user set them.
+        let domain = "test.viddydictate.selftest.settings-live-view-cleanup"
+        guard let defaults = UserDefaults(suiteName: domain) else {
+            reporter.record("live-view cleanup scratch suite opens", false)
+            return
+        }
+        defaults.removePersistentDomain(forName: domain)
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        defaults.set("finalOnly", forKey: "power" + "Mode")
+        defaults.set(true, forKey: "low" + "Power" + "Mode")
+        defaults.set(Data([0x7b, 0x7d]), forKey: "battery" + "Advisory" + "Dismissal")
+        defaults.set("bottomCenter", forKey: "hudPosition")
+        defaults.set(1.25, forKey: "hudScale")
+        defaults.set(1.5, forKey: "hudLowPowerScale")
+        defaults.set(1.75, forKey: "hudSpinnerScale")
+
+        Settings.removeOrphanedLiveViewKeys(defaults)
+
+        reporter.record("live-view cleanup removes powerMode/lowPowerMode/batteryAdvisoryDismissal",
+                        defaults.object(forKey: "power" + "Mode") == nil
+                            && defaults.object(forKey: "low" + "Power" + "Mode") == nil
+                            && defaults.object(forKey: "battery" + "Advisory" + "Dismissal") == nil)
+        reporter.record("live-view cleanup keeps the four HUD display keys",
+                        defaults.string(forKey: "hudPosition") == "bottomCenter"
+                            && defaults.double(forKey: "hudScale") == 1.25
+                            && defaults.double(forKey: "hudLowPowerScale") == 1.5
+                            && defaults.double(forKey: "hudSpinnerScale") == 1.75)
     }
 
     private static func checkLaunchAgentIdentity(_ reporter: SelfTestReporter) {

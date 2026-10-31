@@ -319,7 +319,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let statusLabel = NSMenuItem(title: "Dictation: starting…", action: nil, keyEquivalent: "")
     private let cleanupLabel = NSMenuItem(title: "Cleanup mode: OFF", action: nil, keyEquivalent: "")
-    private let finalOnlyItem = NSMenuItem(title: "Power Mode: Final-only", action: #selector(toggleFinalOnly), keyEquivalent: "")
     private let pathClassifier = PathClassifier()
     private let pathClassifierBackupStore = PathClassifierBackupStore()
     /// The controller and its notes collaborator are constructed as one required wiring graph. Every callback
@@ -411,12 +410,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// True once this launch's global key tap is installed (`startController`). False means the hotkeys are not
     /// live in this process: the grants are missing, or they landed after launch and macOS wants a relaunch.
     private var hotkeyTapLive = false
-    private var batteryAdvisoryTimer: Timer?
     /// Safety net only (ADR 0017): it prevents no deadlock and repairs no bug. Its whole job is
     /// that the NEXT unknown hang exits non-zero, so the existing KeepAlive relaunches and
     /// ReportCrash leaves a stack for every thread.
     private let hangWatchdog = HangWatchdog.productionWatchdog()
-    private var powerStateToken: NSObjectProtocol?
     private var writeFailureToken: NSObjectProtocol?
     private var cloudCheckRequestToken: NSObjectProtocol?
     private var cloudCheckIdleToken: NSObjectProtocol?
@@ -538,10 +535,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settingsWC.onCancelHotkeyCapture = { [weak self] in self?.controller.cancelHotkeyCapture() }
         settingsWC.onHotkeysChanged = { [weak self] in self?.controller.reloadHotkeys() }
-        settingsWC.onPowerModeChanged = { [weak self] in
-            self?.finalOnlyItem.state = Settings.powerMode == .finalOnly ? .on : .off
-            self?.evaluateBatteryAdvisory()
-        }
         configureCloudUpdateChecks()
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(didWake),
@@ -554,7 +547,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         FirstRunSetupPresenter.shared.hotkeyTapLive = { [weak self] in self?.hotkeyTapLive ?? false }
         requestPermissions()
-        startBatteryAdvisoryMonitoring()
         // An app update carries its daemon update: the script and LaunchAgent template ship inside the
         // bundle, and this idempotent pass rewrites them in the user's home only when the app's copy
         // changed. Off the main thread; a failure is logged and also surfaces in Preflight's
@@ -762,8 +754,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(statusLabel)
         menu.addItem(cleanupLabel)
         menu.addItem(.separator())
-        finalOnlyItem.state = Settings.powerMode == .finalOnly ? .on : .off
-        menu.addItem(finalOnlyItem)
         menu.addItem(NSMenuItem(title: "Check for cloud updates...",
                                 action: #selector(checkCloudUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Check for ViddyDictate Updates...",
@@ -832,42 +822,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusLabel.title = "Dictation: key tap failed — grant Input Monitoring + relaunch"
             Log.write("TAP CREATE FAILED")
         }
-    }
-
-    /// Menubar Power Mode toggle — manual/sticky and independent of provider/model selection.
-    @objc private func toggleFinalOnly() {
-        Settings.powerMode = Settings.powerMode == .live ? .finalOnly : .live
-        finalOnlyItem.state = Settings.powerMode == .finalOnly ? .on : .off
-        settingsWC.refreshPowerModeSwitch()
-        Log.write("menubar: power mode -> \(Settings.powerMode.label)")
-        evaluateBatteryAdvisory()
-    }
-
-    private func startBatteryAdvisoryMonitoring() {
-        powerStateToken = NotificationCenter.default.addObserver(
-            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
-                self?.evaluateBatteryAdvisory()
-            }
-        batteryAdvisoryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.evaluateBatteryAdvisory()
-        }
-        DispatchQueue.main.async { [weak self] in self?.evaluateBatteryAdvisory() }
-    }
-
-    private func evaluateBatteryAdvisory() {
-        // Never interrupt an active take. The next timer/wake/power-state event can present it when idle.
-        guard !Settings.isDictationActive else { return }
-        let evaluation = BatteryAdvisoryPolicy.evaluate(
-            snapshot: SystemBatteryReader.current(), powerMode: Settings.powerMode,
-            dismissedFor: Settings.batteryAdvisoryDismissedState)
-        if evaluation.shouldClearDismissal { Settings.batteryAdvisoryDismissedState = nil }
-        guard evaluation.shouldSuggest, let reason = evaluation.reason else { return }
-
-        // Recording the material state at presentation makes the auto-dismissing toast a one-shot advisory.
-        // It becomes eligible again only after plug/unplug, threshold crossing, or macOS Low Power change.
-        Settings.batteryAdvisoryDismissedState = evaluation.materialState
-        Log.write("battery advisory: shown reason=\(reason)")
-        controller.hud.toast(reason.message, duration: 8, forceFull: true)
     }
 
     private func configureCloudUpdateChecks() {
@@ -1111,7 +1065,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func didWake() {
         controller.handleWake()
-        evaluateBatteryAdvisory()
         codexSchedule.woke(now: Date().timeIntervalSince1970)
         armCodexScheduleTimer()
         // A revoked Accessibility/Input-Monitoring grant after wake looks like a dead app; surface it.
@@ -1128,8 +1081,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     deinit {
         hangWatchdog.stop()
-        batteryAdvisoryTimer?.invalidate()
-        if let token = powerStateToken { NotificationCenter.default.removeObserver(token) }
         if let token = writeFailureToken { NotificationCenter.default.removeObserver(token) }
         if let token = cloudCheckRequestToken { NotificationCenter.default.removeObserver(token) }
         if let token = cloudCheckIdleToken { NotificationCenter.default.removeObserver(token) }

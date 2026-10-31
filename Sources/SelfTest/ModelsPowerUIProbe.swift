@@ -66,8 +66,6 @@ enum ModelsPowerUIProbe {
             customStore: custom,
             codexOutcomeStore: codexOutcome,
             codexCatalogLoader: { catalog })
-        let powerView = PowerSettingsView(width: 640)
-        checkPowerStructureAndCallbacks(powerView)
         checkStructure(view)
         checkAdvancedCleanup(view)
         checkAdvancedPromptPrepAndCustom(view)
@@ -192,43 +190,6 @@ enum ModelsPowerUIProbe {
         let retry = find("retry|email", in: view) as? NSButton
         check("retry affordance is present and failure-gated", retry != nil && retry?.isEnabled == false)
         check("collapsed cards keep every control inside their bounds", cardsHaveNoOverflow(view))
-    }
-
-    private static func checkPowerStructureAndCallbacks(_ view: PowerSettingsView) {
-        check("Display power card", find("card.power", in: view) != nil)
-        guard let segmented = find("power-mode", in: view) as? NSSegmentedControl else {
-            check("manual Live / Final-only control", false)
-            check("power callback fires exactly once", false)
-            return
-        }
-        check("manual Live / Final-only control", true)
-        check("battery advisory surface", find("battery-advisory", in: view) is NSTextField)
-
-        let originalMode = Settings.powerMode
-        defer { Settings.powerMode = originalMode }
-        var callbackCount = 0
-        view.onPowerModeChanged = { callbackCount += 1 }
-        segmented.selectedSegment = originalMode == .live ? 1 : 0
-        _ = segmented.sendAction(segmented.action, to: segmented.target)
-        check("power action flips Settings.powerMode",
-              Settings.powerMode == (originalMode == .live ? .finalOnly : .live))
-        check("power callback fires exactly once", callbackCount == 1)
-
-        Settings.powerMode = .live
-        callbackCount = 0
-        let sentBatteryAction = NSApp.sendAction(NSSelectorFromString("useFinalOnly"),
-                                                 to: view, from: nil)
-        check("battery action selects Final-only",
-              sentBatteryAction && Settings.powerMode == .finalOnly)
-        check("battery action callback fires exactly once", callbackCount == 1)
-
-        // The Appearance tab owns this view's placement (it sits below the HUD block), so a rebuild must
-        // resize without moving. Every refresh() -- show(), the menubar toggle, any mode change --
-        // would otherwise stack the card back on top of the HUD controls.
-        let ownerOrigin = NSPoint(x: 0, y: 116)
-        view.frame.origin = ownerOrigin
-        view.refresh()
-        check("refresh keeps the owner-assigned origin", view.frame.origin == ownerOrigin)
     }
 
     private static func checkAdvancedCleanup(_ view: ModelsPowerSettingsView) {

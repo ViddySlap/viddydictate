@@ -102,8 +102,6 @@ enum AudioRetentionSelfTest {
         let sharedSnapshot = slice(controller,
                                    from: "private func transcribeAudioSnapshot(",
                                    to: "/// Finalize an in-flight take")
-        let partial = slice(controller, from: "private func tickPartial() {",
-                            to: "private func finishNothingHeard(")
         let finish = slice(controller, from: "private func finish() {",
                            to: "func deliver(text rawText:")
         let oneShotFinal = slice(controller, from: "func finalizeTakeAndTranscribe(",
@@ -112,9 +110,6 @@ enum AudioRetentionSelfTest {
         let postIndex = sharedSnapshot.range(of: "DaemonClient.transcribe")?.lowerBound
         reporter.record("retention enqueue is before the transcribe POST on a separate store queue",
                         retainIndex != nil && postIndex != nil && retainIndex! < postIndex!)
-        reporter.record("partial-preview snapshot never supplies a persistence UUID",
-                        partial.contains("transcribeAudioSnapshot {")
-                            && !partial.contains("retainingAs:"))
         reporter.record("both real finalization paths mint and retain one take UUID",
                         [finish, oneShotFinal].allSatisfy {
                             $0.contains("UUID()")

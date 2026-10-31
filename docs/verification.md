@@ -11,7 +11,7 @@ Run the rail from the repository root:
 
 | Tier | What it runs | External dependencies |
 | --- | --- | --- |
-| `deterministic` | Web/native builds; custom-mode, typed-routing, Models & Power storage, provider-neutral transport, synthetic Codex provider, a synthetic/offline Codex isolation selftest (UNVERIFIED-graceful under nested-sandbox denial), Power Mode, history, notes, and notes-HTTP checks; `git diff --check` | Preinstalled `node_modules`; no model, web, mic, live-app, real-note, or real-preference access |
+| `deterministic` | Web/native builds; custom-mode, typed-routing, Models & Power storage, provider-neutral transport, synthetic Codex provider, a synthetic/offline Codex isolation selftest (UNVERIFIED-graceful under nested-sandbox denial), history, notes, and notes-HTTP checks; `git diff --check` | Preinstalled `node_modules`; no model, web, mic, live-app, real-note, or real-preference access |
 | `services` | Cleanup/email LM Studio tests, the legacy-named `--cloudmode-selftest` Claude subscription smoke, the all-distinct-shipped-pair contained Codex verifier, web-search pipeline, and residency test | LM Studio, Claude subscription CLI/auth, dedicated Codex subscription auth + external containment, installed search helper/network, and `lms` |
 | `gui` | Models & Power UI probe, HUD probe/render, and `--mic-probe` | Logged-in GUI/AppKit session and enumerated input devices; no capture |
 | `full` | All three tiers, then `git diff --check` and a clean-worktree gate | Everything above |

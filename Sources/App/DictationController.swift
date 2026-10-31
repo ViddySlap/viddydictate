@@ -73,9 +73,6 @@ final class DictationController {
     private let callbacks: DictationControllerCallbacks
     private var target: DictationTarget?
     private var targetWasNotesWindow = false
-    private var partialTimer: Timer?
-    private var partialInFlight = false
-    private var liveText = ""
     /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
     /// arms drive a REAL `finalize()` call through the deterministic, AX-free locked-no-target delivery
     /// branch, which this flag selects. Production behavior is unchanged -- the hotkey/state-machine path
@@ -321,7 +318,7 @@ final class DictationController {
                 AudioRetentionStore.shared.retain(
                     wav, id: takeID, enabled: retentionEnabled ?? Settings.retainDictationAudio)
             }
-            let take = takeID?.uuidString ?? "partial-preview"
+            let take = takeID?.uuidString ?? "final"
             Log.write("audio.snapshot take=\(take) raw_s=\(String(format: "%.3f", snapshot.rawDuration)) "
                 + "post_trim_s=\(String(format: "%.3f", snapshot.retainedDuration)) "
                 + "trailing_trimmed_s=\(String(format: "%.3f", snapshot.trimmedTrailingDuration)) "
@@ -331,14 +328,13 @@ final class DictationController {
     }
 
     /// Finalize an in-flight take for a one-shot mode that acts on the fresh transcript (email
-    /// dictation, web search): stop the partial loop, snapshot + stop the audio, drop the active flag,
+    /// dictation, web search): snapshot + stop the audio, drop the active flag,
     /// switch the HUD to the thinking ring, and transcribe. `completion` runs on the MAIN thread with
     /// the transcript (or nil) plus any daemon error. Part of the `OneShotContext` seam: the registry's
     /// transcript-acting modes (email dictation, web search) call it through the seam rather than reaching
     /// onto the coordinator.
     func finalizeTakeAndTranscribe(noteLabel: String,
                                    completion: @escaping (String?, String?, UUID, Bool) -> Void) {
-        partialTimer?.invalidate(); partialTimer = nil
         state = .oneShotFinishing
         let takeID = UUID()
         let retentionEnabled = Settings.retainDictationAudio
@@ -348,7 +344,7 @@ final class DictationController {
         // This one-shot is still cancelable while transcribe / client / landing run, so undo
         // setActive(false)'s takeActive side effect without restoring the app-wide active flag.
         hotkey.takeActive = true
-        hud.update(state: "Transcribing…", target: target?.label, text: liveText, locked: false)
+        hud.update(state: "Transcribing…", target: target?.label, text: "", locked: false)
         hud.setThinking(true)
         note(noteLabel)
         transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { text, err, _ in
@@ -527,7 +523,7 @@ final class DictationController {
         case .lock:
             state = .locked
             wasLocked = LockTransition.wasLockedAfterToggle(current: wasLocked, phase: phase)  // latches true
-            hud.update(state: "Locked — speaking", target: target?.label, text: liveText, locked: true)
+            hud.update(state: "Locked — speaking", target: target?.label, text: "", locked: true)
             note("locked")
         case .unlock:
             // PURE toggle back to interface-unlocked recording — NOT finish(). The take keeps recording; it
@@ -536,7 +532,7 @@ final class DictationController {
             // .locked case called finish(), so a second spacebar transcribed + delivered + idled the session.
             state = .recording
             wasLocked = LockTransition.wasLockedAfterToggle(current: wasLocked, phase: phase)  // preserved (true)
-            hud.update(state: "Listening…", target: target?.label, text: liveText, locked: false)
+            hud.update(state: "Listening…", target: target?.label, text: "", locked: false)
             note("recording")
         case .ignore:
             break
@@ -596,8 +592,6 @@ final class DictationController {
     private enum TeardownScope { case full, gestureContinues, stateOnly }
 
     private func teardownTake(_ scope: TeardownScope) {
-        partialTimer?.invalidate(); partialTimer = nil
-        partialInFlight = false
         targetWasNotesWindow = false
         // Only a take whose gesture is also over may drop the snapshot; see TeardownScope.
         if case .full = scope { notesDelivery.noteTarget = nil }
@@ -1014,7 +1008,6 @@ final class DictationController {
             targetWasNotesWindow = (target?.pid == getpid()) && callbacks.notesWindowIsKey()
             Log.write("beginRecording target=\(target?.label ?? "nil") textLike=\(target?.isTextLike ?? false) notesWindow=\(targetWasNotesWindow)")
         }
-        liveText = ""
         wasLocked = false
         DaemonClient.ensureUp { ok in Log.write("daemon ensureUp ok=\(ok)") }
         // Mark active BEFORE starting the engine so the settings preview releases the input device
@@ -1038,38 +1031,6 @@ final class DictationController {
         hud.setCleanup(enabled: CleanupState.shared.cleanupEnabled, level: CleanupState.shared.cleanupLevel.rawValue)
         hud.setArmedMode(glyph: TransformArmState.shared.armedOneShot?.glyph)
         note("recording")
-        partialTimer?.invalidate()
-        // Final-only: no live preview loop — the repeated Whisper passes on the growing take are the
-        // dictation-time power cost. Both modes still perform one final transcription at release.
-        guard let partialInterval = Settings.powerMode.partialTranscriptionInterval else {
-            partialTimer = nil
-            Log.write("power mode final-only: partial-preview loop skipped")
-            return
-        }
-        partialTimer = Timer.scheduledTimer(withTimeInterval: partialInterval, repeats: true) { [weak self] _ in
-            self?.tickPartial()
-        }
-    }
-
-    private func tickPartial() {
-        // Second gate for a mid-take settings flip: an already-armed timer goes inert immediately.
-        guard Settings.powerMode.partialTranscriptionInterval != nil else { return }
-        guard state == .recording || state == .locked, !partialInFlight, audio.hasAudio else { return }
-        partialInFlight = true
-        transcribeAudioSnapshot { [weak self] text, _, _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.partialInFlight = false
-                guard self.state == .recording || self.state == .locked else { return }
-                if let raw = text, !raw.isEmpty {
-                    let cleaned = CleanupLogic.cleanRepeats(raw)
-                    self.liveText = cleaned
-                    let label = self.state == .locked ? "Locked — speaking" : "Listening…"
-                    self.hud.update(state: label, target: self.target?.label, text: cleaned,
-                                    locked: self.state == .locked)
-                }
-            }
-        }
     }
 
     /// The one "Nothing heard" landing for both audio-side silence and text-side punctuation-only
@@ -1092,7 +1053,6 @@ final class DictationController {
         levelAtRelease = CleanupState.shared.cleanupLevel
         Log.write("finish → final transcribe (cleanup=\(cleanupAtRelease) level=\(levelAtRelease.label))")
         state = .finishing
-        partialTimer?.invalidate(); partialTimer = nil
         let spoke = audio.detectedSpeech
         let takeID = spoke ? UUID() : nil
         logRecordingStop(takeID: takeID)
@@ -1103,7 +1063,7 @@ final class DictationController {
             return
         }
         let retentionEnabled = Settings.retainDictationAudio
-        hud.update(state: "Transcribing…", target: target?.label, text: liveText, locked: false)
+        hud.update(state: "Transcribing…", target: target?.label, text: "", locked: false)
         note("transcribing")
         let generation = takeGeneration   // BT5: capture so an Esc-cancel during transcribe drops this landing
         transcribeAudioSnapshot(retainingAs: takeID, retentionEnabled: retentionEnabled) { [weak self] text, err, segments in
@@ -1239,7 +1199,7 @@ final class DictationController {
         // transcript through the LM Studio cleanup, and land the cleaned text in one shot. On
         // LM-Studio-down / timeout / bad output, fall back to the raw transcript + a toast (the two
         // failure modes collapse to one recovery path).
-        hud.update(state: "Cleaning…", target: target?.label, text: raw, locked: false)
+        hud.update(state: "Cleaning…", target: target?.label, text: "", locked: false)
         hud.setThinking(true)
         note("cleaning")
         // Length gate: short single utterances fall back to plain Cleanup so Tighten/Summarize can't

@@ -40,9 +40,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var keepHistorySwitch: NSSwitch!
     private var positionPopup: NSPopUpButton!
 
-    /// Invoked when Power Mode flips, so the menubar checkmark stays in sync.
-    var onPowerModeChanged: (() -> Void)?
-
     /// Hotkey-rebinding plumbing: the Hotkeys tab arms/cancels capture in the live tap and reports
     /// persisted changes, all routed through the controller (which owns the tap). Wired by AppDelegate.
     var onBeginHotkeyCapture: ((@escaping (KeySpec) -> Void, @escaping () -> Void) -> Void)?
@@ -56,7 +53,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private weak var stickySkillsView: StickySkillsSettingsView?
     private weak var speechView: WhisperSpeechSettingsView?
     private weak var setupView: SetupSettingsView?
-    private weak var powerView: PowerSettingsView?
     /// One flow for getting a provider connected (Public V1 spec W4, item P9), shared by the Setup tab's
     /// per-provider sign-in buttons - both of them, since L4 moved Codex's here - and the Hotkeys tab's
     /// inline rescue (D6). The first-run window owns a second presenter only because it outlives no window
@@ -111,7 +107,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         stickySkillsView?.refresh()
         stickySkillsView?.refreshAvailableLocalModels()
         speechView?.refresh()
-        powerView?.refresh()
         CodexConnectionController.shared.refreshAvailability()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
@@ -396,8 +391,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         return root
     }
 
-    /// The former Display page, now the leading group on Appearance: HUD placement and the independent
-    /// Live / Final-only presentation choice. It stays a child view so both former pages retain every
+    /// The former Display page, now the leading group on Appearance: HUD placement.
+    /// It stays a child view so both former pages retain every
     /// control while the combined document view owns only their vertical composition.
     private func buildDisplayContent() -> NSView {
         let AW = contentWidth
@@ -426,14 +421,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         card.addSubview(hint("Where the dictation popup appears on screen — applies to the full HUD and the Final-only pill. Dragging it moves it for that take only.",
                              y: 42, width: card.bounds.width - 28, x: 14))
 
-        let powerY = card.frame.maxY + 14
-        let pv = PowerSettingsView(width: AW)
-        pv.onPowerModeChanged = { [weak self] in self?.onPowerModeChanged?() }
-        pv.frame.origin = NSPoint(x: 0, y: powerY)
-        powerView = pv
-        root.addSubview(pv)
-
-        root.frame = NSRect(x: 0, y: 0, width: AW, height: powerY + pv.frame.height)
+        root.frame = NSRect(x: 0, y: 0, width: AW, height: card.frame.maxY + 14)
         return root
     }
 
@@ -532,11 +520,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let raw = (positionPopup.selectedItem?.representedObject as? String) ?? ""
         Settings.hudPosition = HUDPosition(rawValue: raw) ?? .bottomCenter
         Log.write("settings: HUD position -> \(Settings.hudPosition.rawValue)")
-    }
-
-    /// Reflect an external Power Mode flip (the menubar toggle) in the Appearance tab, if built.
-    func refreshPowerModeSwitch() {
-        powerView?.refresh()
     }
 
     // MARK: mic picker

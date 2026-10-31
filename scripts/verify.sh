@@ -674,9 +674,6 @@ tier_deterministic() {
         run_gate deterministic "Codex S2 login AUTH-GATE fixture selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$CODEX_AUDIT" --login-gate-selftest || true
-        run_gate deterministic "Power Mode, migration, provider-independence, and battery-advisory selftest" \
-            env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
-            "$TEST_APP" --lowpower-selftest || true
         run_gate deterministic "HUD font and picker-layout characterization selftest" \
             env HOME="$SCRATCH_HOME" CFFIXED_USER_HOME="$SCRATCH_HOME" TMPDIR="$SCRATCH_TMP/" \
             "$TEST_APP" --hud-polish-selftest || true

@@ -48,7 +48,7 @@ enum HUDRender {
         let scopeOK = verify(raw: raw, faded: faded)
         print("[hud-render] --- Item B (info pill) ---")
         let infoOK = renderInfo(outDir: outDir)
-        print("[hud-render] --- low-power pill toasts ---")
+        print("[hud-render] --- pill toasts ---")
         let toastOK = renderToasts(outDir: outDir)
         print("[hud-render] --- V1 keycap proportion + glyph centering ---")
         let keycapOK = renderKeycaps(outDir: outDir)
@@ -250,9 +250,9 @@ enum HUDRender {
         "(\(fmt(Double(r.minX))),\(fmt(Double(r.minY))) \(fmt(Double(r.width)))x\(fmt(Double(r.height))))"
     }
 
-    // MARK: low-power in-pill status toasts
+    // MARK: in-pill status toasts
 
-    /// Render the low-power in-pill status toast: a SHORT message and a LONGER (wrapping) one as
+    /// Render the in-pill status toast: a SHORT message and a LONGER (wrapping) one as
     /// pill-styled capsules grown to fit, plus a paragraph-length `answer()` that must stay the full
     /// box. Writes a PNG each (for a human/vision legibility check) and asserts the capsule grows with
     /// the message while `answer()` stays wider (full box) and every capture is non-blank green.
@@ -260,7 +260,6 @@ enum HUDRender {
         let snapshot = HUDDefaultsSnapshot()
         defer { snapshot.restore() }
 
-        Settings.powerMode = .finalOnly
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .bottomCenter

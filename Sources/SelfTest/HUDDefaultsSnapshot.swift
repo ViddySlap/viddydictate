@@ -1,6 +1,6 @@
 import Foundation
 
-/// A restorable capture of the four HUD display-setting UserDefaults keys touched by the offscreen
+/// A restorable capture of the three HUD display-setting UserDefaults keys touched by the offscreen
 /// render/probe seams (`--hud-render`, `--hud-probe`), so those tools can mutate Settings for the
 /// duration of a run and leave the user's real values untouched on exit.
 ///
@@ -8,7 +8,7 @@ import Foundation
 /// and restoring those would persist shadow copies of the defaults (the UserDefaults shadowing trap
 /// documented in Settings.swift).
 struct HUDDefaultsSnapshot {
-    static let keys = ["powerMode", "hudPosition", "hudScale", "hudLowPowerScale"]
+    static let keys = ["hudPosition", "hudScale", "hudLowPowerScale"]
 
     private let saved: [(String, Any?)]
     private let domain: String
