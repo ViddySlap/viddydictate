@@ -376,7 +376,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 notesWindowIsKey: { [weak self] in self?.notesRegistry.isAnyKey == true },
                 onCleanupModeChange: { [weak self] enabled in
                     DispatchQueue.main.async { self?.updateCleanupIndicator(enabled) }
-                }
+                },
+                onOpenHistory: { [weak self] in self?.settingsWC.show(tab: .history) }
             ),
             notesDelivery: notesDelivery
         )

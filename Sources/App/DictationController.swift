@@ -10,6 +10,7 @@ struct DictationControllerCallbacks {
     let onOpenNotes: () -> Void
     let notesWindowIsKey: () -> Bool
     let onCleanupModeChange: (Bool) -> Void
+    let onOpenHistory: () -> Void
 }
 
 /// The state machine that ties the hotkey, audio, daemon, HUD, and target delivery together.
@@ -71,6 +72,7 @@ final class DictationController {
     /// this controller. `AppDelegate` wires its callbacks (formerly wired onto the controller directly).
     let notesDelivery: NotesDeliveryCoordinator
     private let callbacks: DictationControllerCallbacks
+    private var recentDictationsPanel: RecentDictationsPanel?
     private var target: DictationTarget?
     private var targetWasNotesWindow = false
     private var partialTimer: Timer?
@@ -375,7 +377,20 @@ final class DictationController {
         case .dictionary:       callbacks.onOpenDictionary()
         case .bullseyeToggle:   toggleBullseye()
         case .bullseyeReveal:   revealBullseye()
+        case .recentDictations: showRecentDictations()
         }
+    }
+
+    /// Option+H toggles the recent-dictations pop-up: a second press closes it.
+    private func showRecentDictations() {
+        if let panel = recentDictationsPanel, panel.isVisible {
+            panel.dismiss()
+            return
+        }
+        if recentDictationsPanel == nil {
+            recentDictationsPanel = RecentDictationsPanel(onOpenHistory: callbacks.onOpenHistory)
+        }
+        recentDictationsPanel?.show()
     }
 
     /// Route a matched custom-mode chord (by id) through the shared one-shot engine. Resolves the id to

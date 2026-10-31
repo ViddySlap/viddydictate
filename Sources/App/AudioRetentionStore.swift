@@ -99,6 +99,22 @@ final class AudioRetentionStore {
         queue.sync { retainedFilesLocked().compactMap { UUID(uuidString: $0.url.deletingPathExtension().lastPathComponent) } }
     }
 
+    /// Return the retained takes, newest first by content-modification date (equal dates break by
+    /// file name, as the eviction code does), read inside the store's serial queue like `retainedIDs()`.
+    func retainedTakes() -> [(id: UUID, date: Date)] {
+        queue.sync {
+            retainedFilesLocked()
+                .sorted {
+                    if $0.modified != $1.modified { return $0.modified > $1.modified }
+                    return $0.url.lastPathComponent > $1.url.lastPathComponent
+                }
+                .compactMap { file in
+                    UUID(uuidString: file.url.deletingPathExtension().lastPathComponent)
+                        .map { (id: $0, date: file.modified) }
+                }
+        }
+    }
+
     private func url(for id: UUID) -> URL {
         directory.appendingPathComponent(id.uuidString, isDirectory: false)
             .appendingPathExtension("wav")

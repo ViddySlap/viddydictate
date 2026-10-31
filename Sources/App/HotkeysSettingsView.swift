@@ -63,7 +63,7 @@ final class HotkeysSettingsView: NSView {
     /// command — P, M, and the two web-search modes — has an LLM route, and since L9 its chord is edited
     /// on that route's card rather than here, beside the model and prompt it shares a hotkey with.
     private let rebindOnlyCore: [HotkeyCommand] = [.lock, .cleanupToggle, .undo, .levelUp, .levelDown, .notes, .dictionary,
-                                                   .bullseyeToggle, .bullseyeReveal]
+                                                   .bullseyeToggle, .bullseyeReveal, .recentDictations]
 
     /// The hotkey that fires each routed card, keyed by the card's route key. The merged tab reads this
     /// in one direction only: routing asks which hotkey owns a route, never the reverse.

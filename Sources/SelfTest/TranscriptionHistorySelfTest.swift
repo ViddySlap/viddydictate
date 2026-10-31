@@ -96,6 +96,8 @@ enum TranscriptionHistorySelfTest {
             }
         }
 
+        RecentDictationsSelfTest.run(reporter)
+
         print(reporter.summaryLine(prefix: "[transcription-history-selftest]"))
         return reporter.passed
     }

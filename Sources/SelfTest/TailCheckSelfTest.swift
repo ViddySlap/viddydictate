@@ -1479,7 +1479,7 @@ enum TailCheckSelfTest {
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
                 onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
-                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }, onOpenHistory: {}),
             notesDelivery: notesDelivery,
             tailCheckHook: tailCheckHook,
             clipboardPasteboard: pasteboard,
@@ -1529,7 +1529,7 @@ enum TailCheckSelfTest {
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
                 onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
-                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }, onOpenHistory: {}),
             notesDelivery: notesDelivery,
             tailCheckHook: tailCheckHook,
             hud: NullHUDPresenter())
@@ -1674,7 +1674,7 @@ enum TailCheckSelfTest {
                 let controller = DictationController(
                     callbacks: DictationControllerCallbacks(
                         onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
-                        notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+                        notesWindowIsKey: { false }, onCleanupModeChange: { _ in }, onOpenHistory: {}),
                     notesDelivery: notesDelivery,
                     tailCheckHook: hook,
                     hud: NullHUDPresenter())
