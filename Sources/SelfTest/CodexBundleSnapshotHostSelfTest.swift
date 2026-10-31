@@ -216,25 +216,73 @@ enum CodexBundleSnapshotHostSelfTest {
 
     // MARK: (a) the 74b34e6 order
 
+    private static func hostRefusesRenameOfReadOnlyDirectory(root: URL) -> (refused: Bool, detail: String) {
+        let fm = FileManager.default
+        let parent = root.appendingPathComponent("rename-probe-\(UUID().uuidString)", isDirectory: true)
+        let source = parent.appendingPathComponent("readonly", isDirectory: true)
+        let destination = parent.appendingPathComponent("sibling", isDirectory: true)
+        defer {
+            for url in [source, destination] where fm.fileExists(atPath: url.path) {
+                _ = chmod(url.path, 0o700)
+                try? fm.removeItem(at: url)
+            }
+            try? fm.removeItem(at: parent)
+        }
+        do {
+            try fm.createDirectory(at: source, withIntermediateDirectories: true)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o500)], ofItemAtPath: source.path)
+            if rename(source.path, destination.path) == 0 {
+                return (refused: false, detail: "rename rc=0")
+            }
+            let code = errno
+            return (refused: code == EACCES, detail: "errno \(code)")
+        } catch {
+            return (refused: false, detail: String(describing: error))
+        }
+    }
+
     private static func checkRestrictThenRenameMutant(
         root: URL, fixture: Fixture, reporter: SelfTestReporter
     ) throws {
         let fm = FileManager.default
         let paths = CodexIsolationFoundation.scratchPaths(
             root: root.appendingPathComponent("store-mutant", isDirectory: true))
-        do {
-            _ = try CodexIsolationFoundation.installExecutableSnapshot(
-                for: fixture.candidate, originIdentity: fixture.identity,
-                originBundle: fixture.seal, paths: paths, bundleRootOrder: .restrictThenRename)
-            reporter.record("negative control (a): restrict-then-rename is refused with EACCES", false,
-                            "the 74b34e6 order installed; this filesystem does not enforce APFS rename rules")
-        } catch {
-            let text = String(describing: error)
-            reporter.record("negative control (a): restrict-then-rename is refused with EACCES",
-                            text.contains("could not install Codex bundle snapshot")
-                                && text.contains("errno \(EACCES):"),
-                            text)
+
+        let probe = hostRefusesRenameOfReadOnlyDirectory(root: root)
+        reporter.record("host probe: rename of a 0500 directory in one parent is refused", true,
+                        "probe refused=\(probe.refused) detail=\(probe.detail) os=\(ProcessInfo.processInfo.operatingSystemVersionString)")
+
+        if probe.refused {
+            do {
+                _ = try CodexIsolationFoundation.installExecutableSnapshot(
+                    for: fixture.candidate, originIdentity: fixture.identity,
+                    originBundle: fixture.seal, paths: paths, bundleRootOrder: .restrictThenRename)
+                reporter.record("negative control (a): restrict-then-rename is refused with EACCES", false,
+                                "the 74b34e6 order installed; this filesystem does not enforce APFS rename rules")
+            } catch {
+                let text = String(describing: error)
+                reporter.record("negative control (a): restrict-then-rename is refused with EACCES",
+                                text.contains("could not install Codex bundle snapshot")
+                                    && text.contains("errno \(EACCES):"),
+                                text)
+            }
+        } else {
+            do {
+                _ = try CodexIsolationFoundation.installExecutableSnapshot(
+                    for: fixture.candidate, originIdentity: fixture.identity,
+                    originBundle: fixture.seal, paths: paths, bundleRootOrder: .restrictThenRename)
+                reporter.record("negative control (a): restrict-then-rename is refused with EACCES", true,
+                                "host permits rename of a 0500 directory (\(probe.detail)); the refusal cannot be demonstrated here")
+                try CodexSnapshotRetention.removeSnapshotEntry(
+                    paths.executableStore.appendingPathComponent(
+                        "codex-\(fixture.identity.sha256).app", isDirectory: true))
+            } catch {
+                let text = String(describing: error)
+                reporter.record("negative control (a): restrict-then-rename is refused with EACCES", false,
+                                text)
+            }
         }
+
         let left = (try? fm.contentsOfDirectory(atPath: paths.executableStore.path)) ?? ["<unreadable>"]
         reporter.record("the refused install leaves no snapshot and no staging copy", left.isEmpty,
                         left.joined(separator: ","))

@@ -9,6 +9,8 @@ reset through a `bash` subprocess exactly as `scripts/verify.sh` does, and check
 selected domain is cleared. A managed sandbox can refuse `defaults write` for every domain, so when
 the real command cannot seed a domain the test installs a small `defaults` shim backed by a temp
 store. The reset script is still the real script; only the storage backend is controlled.
+On macOS 27.2, `defaults read` of a deleted domain exits 0 and prints an empty dictionary,
+so a domain is read as absent only when its non-whitespace stdout is non-empty and not `{}`.
 """
 
 import os
@@ -157,8 +159,14 @@ def read_key(domain, key="providerOnboardingSatisfied"):
     return proc.stdout.strip()
 
 
+def read_shows_domain(returncode, stdout):
+    stripped = "".join(stdout.split())
+    return returncode == 0 and stripped != "" and stripped != "{}"
+
+
 def domain_exists(domain):
-    return defaults("read", domain).returncode == 0
+    proc = defaults("read", domain)
+    return read_shows_domain(proc.returncode, proc.stdout)
 
 
 def call_reset(root, override=None):
@@ -400,6 +408,25 @@ def test_verify_sh_guard():
     expect(ok, kind, name, "defaults delete lines=%r" % deletes)
 
 
+def test_guard_emptied_domain_reads_as_absent():
+    kind = "guard"
+    name = "an emptied domain reads as absent"
+    cases = [
+        (0, "{\n}\n", False),
+        (0, "{\n    k = 1;\n}\n", True),
+        (1, "", False),
+        (0, "", False),
+    ]
+    details = []
+    ok = True
+    for returncode, stdout, expected in cases:
+        got = read_shows_domain(returncode, stdout)
+        ok = ok and got == expected
+        details.append(
+            "read_shows_domain(%r, %r)=%r expected=%r" % (returncode, stdout, got, expected))
+    expect(ok, kind, name, "; ".join(details))
+
+
 def cleanup():
     for domain in (DOMAIN_A, DOMAIN_B):
         try:
@@ -413,6 +440,7 @@ def main():
     try:
         detect_mode()
         test_throwaway_reset()
+        test_guard_emptied_domain_reads_as_absent()
         test_second_domain_untouched()
         test_refusals_delete_nothing()
         test_trailing_newline_refused()
