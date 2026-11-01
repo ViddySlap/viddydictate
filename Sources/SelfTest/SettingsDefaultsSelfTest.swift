@@ -33,6 +33,7 @@ enum SettingsDefaultsSelfTest {
         checkBundleIdentifierMigration(reporter)
         checkLiveViewCleanup(reporter)
         checkLaunchAgentIdentity(reporter)
+        HUDPointerPlacementSelfTest.run(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "Settings defaults"))

@@ -173,6 +173,11 @@ final class HUDPanel: NSObject, HUDPresenting {
     private var origin = NSPoint.zero
     private var currentText = ""
     private var toastTimer: Timer?
+    /// The 30 Hz pointer-follow loop (VDCURB1). At most ONE exists: started when a following mode
+    /// (`.pillScope` / `.thinking`) comes on screen, invalidated on `hide()` and on every
+    /// non-following mode. It lives here rather than in a display link so it is a plain RunLoop timer
+    /// in `.common` mode, which keeps ticking while the panel is up and the app is inactive.
+    private var followTimer: Timer?
     /// The optional action a clickable toast runs. Set by `toast(_:duration:forceFull:action:)` and
     /// cleared on every new toast, dismiss, or hide, so a stale action can never fire.
     private var toastAction: (() -> Void)?
@@ -356,13 +361,84 @@ final class HUDPanel: NSObject, HUDPresenting {
         origin = Settings.hudPosition.origin(for: size, in: vf)
     }
 
+    // MARK: pointer following (VDCURB1)
+
+    /// Exactly the two modes that ride with the pointer. Toasts (both kinds) keep the fixed
+    /// `Settings.hudPosition` placement.
+    private var followsPointer: Bool { mode == .pillScope || mode == .thinking }
+
+    /// The scale the placement offset is multiplied by: the pill's own setting for `.pillScope`, the
+    /// spinner's for `.thinking`. Read live so a settings change applies from the next tick.
+    private func followScale() -> CGFloat {
+        switch mode {
+        case .pillScope: return CGFloat(Settings.hudPillScale)
+        case .thinking: return CGFloat(Settings.hudSpinnerScale)
+        case .pillToast, .fullToast: return CGFloat(Settings.hudPillScale)
+        }
+    }
+
+    /// The live pointer, unless a test provider replaces it.
+    private func followPointer() -> NSPoint {
+        pointerProviderForTesting?() ?? NSEvent.mouseLocation
+    }
+
+    /// Every screen as `HUDPointerPlacement.Screen`, unless a test provider replaces the list.
+    private func followScreens() -> [HUDPointerPlacement.Screen] {
+        screensProviderForTesting?() ?? NSScreen.screens.map {
+            HUDPointerPlacement.Screen(frame: $0.frame, visible: $0.visibleFrame)
+        }
+    }
+
+    /// The seam screen (the one a pointer INSIDE two frames prefers). A test provider list has no
+    /// notion of a main screen, so it is index 0; production uses `NSScreen.main`'s index, or 0.
+    private func followFallbackIndex() -> Int {
+        if screensProviderForTesting != nil { return 0 }
+        guard let main = NSScreen.main,
+              let index = NSScreen.screens.firstIndex(where: { $0 === main }) else { return 0 }
+        return index
+    }
+
+    /// The target origin for `panelSize` under the current pointer/screens/scale. Both `presentBox`
+    /// and `followTick` go through here so the first placement and every later tick cannot drift.
+    private func followOrigin(panelSize: NSSize) -> NSPoint {
+        HUDPointerPlacement.origin(pointer: followPointer(), size: panelSize, scale: followScale(),
+                                   screens: followScreens(), fallback: followFallbackIndex())
+    }
+
+    /// One pointer-follow tick (30 Hz). A no-op when the panel is off screen or the mode no longer
+    /// follows, so a stale timer can never move a toast or a hidden panel.
+    private func followTick() {
+        guard panel.isVisible && followsPointer else { return }
+        let target = followOrigin(panelSize: panel.frame.size)
+        panel.setFrameOrigin(target)
+        origin = target
+        // Re-anchor the info pill under the (moving) scope pill without animating every tick.
+        if mode == .pillScope { updateInfoPill(animated: false) }
+    }
+
+    private func startFollowTimer() {
+        guard followTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.followTick() }
+        RunLoop.main.add(t, forMode: .common)
+        followTimer = t
+    }
+
+    private func stopFollowTimer() {
+        followTimer?.invalidate()
+        followTimer = nil
+    }
+
     /// Apply the shared window/content/display framing used by every HUD mode. The thinking mode
     /// may supply the origin that preserves its current on-screen anchor; all other modes home
     /// normally for their new size.
     @discardableResult
     private func presentBox(panelSize: NSSize, displayBox: NSRect? = nil,
                             cornerRadius: CGFloat, visibleOrigin: NSPoint? = nil) -> NSRect {
-        if panel.isVisible, let visibleOrigin {
+        if followsPointer {
+            // The scope pill and the thinking ring ride with the pointer: no position setting, no
+            // carry-over of a previous on-screen anchor (that anchor was itself the last pointer spot).
+            origin = followOrigin(panelSize: panelSize)
+        } else if panel.isVisible, let visibleOrigin {
             origin = visibleOrigin
         } else {
             applyHome(for: panelSize)
@@ -461,7 +537,9 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// sets `mode` first (this is what lets `dismissToast()` re-summon the recording scope after a toast).
     private func presentForCurrentMode() {
         relayout()                       // sizes the panel, then applyHome anchors it
-        clampOnScreen()
+        // A following mode was already clamped to the POINTER's visible frame by the placement helper;
+        // clamping again to NSScreen.main would drag it back off a secondary screen.
+        if !followsPointer { clampOnScreen() }
         if mode == .pillScope { updateInfoPill() }   // re-anchor the info pill to the CLAMPED scope frame
         Log.write("HUD present frame=\(panel.frame) mode=\(mode) screen=\(NSScreen.main?.visibleFrame ?? .zero)")
         switch mode {
@@ -476,6 +554,7 @@ final class HUDPanel: NSObject, HUDPresenting {
             break                                        // setThinking owns the spinner bring-up
         }
         panel.orderFrontRegardless()
+        if followsPointer { startFollowTimer() } else { stopFollowTimer() }
     }
 
     private func clampOnScreen() {
@@ -490,6 +569,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     func hide() {
+        stopFollowTimer()
         toastTimer?.invalidate()
         toastAction = nil
         toastClickView?.onClick = nil
@@ -574,6 +654,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         relayout()
         if !wasThinking { spinner.start() }
         panel.orderFrontRegardless()
+        startFollowTimer()               // the ring follows the pointer too
     }
 
     /// Update the persistent cleanup indicators in the info bar: the `?` keycap lights when cleanup is
@@ -727,10 +808,10 @@ final class HUDPanel: NSObject, HUDPresenting {
 
     /// Refresh the low-power info pill (Item B) from the latched live state, anchored under the current
     /// scope-pill frame. Content-gated inside `InfoPillPanel`: nothing locked and cleanup off ⇒ no pill.
-    private func updateInfoPill() {
+    private func updateInfoPill(animated: Bool = true) {
         infoPill.apply(locked: lockedState, cleanupEnabled: cleanupEnabled, level: cleanupLevel,
                        bullseyeArmed: bullseyeArmed, armedModeGlyph: armedModeGlyph,
-                       scope: panel.frame, ps: CGFloat(Settings.hudPillScale), animated: true)
+                       scope: panel.frame, ps: CGFloat(Settings.hudPillScale), animated: animated)
     }
 
     /// Latch the sticky-note bullseye armed state and refresh the info pill so its bullseye glyph appears /
@@ -822,6 +903,18 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// Test seam for `--hud-probe`: the live panel frame, so the layout probe can assert
     /// position/size numerically without reaching into the private panel.
     var frameForTesting: NSRect { panel.frame }
+
+    // MARK: pointer-follow test seams (VDCURB1)
+
+    /// Replaces `NSEvent.mouseLocation` when set, so a probe can place the pointer deterministically.
+    var pointerProviderForTesting: (() -> NSPoint)?
+    /// Replaces `NSScreen.screens` when set (`fallback` is then 0), so a probe can describe any
+    /// screen arrangement — including two screens — without a second display.
+    var screensProviderForTesting: (() -> [HUDPointerPlacement.Screen])?
+    /// Run one follow tick synchronously, without waiting for the 30 Hz timer.
+    func followTickForTesting() { followTick() }
+    var followTimerIsActiveForTesting: Bool { followTimer?.isValid == true }
+    var followTimerIntervalForTesting: TimeInterval? { followTimer?.timeInterval }
 
     /// Test seam for `--hud-probe`: mirror DragHandle.mouseDragged followed by mouseUp so the probe
     /// exercises the real onMoved closure that records both the panel origin and user-drag state.

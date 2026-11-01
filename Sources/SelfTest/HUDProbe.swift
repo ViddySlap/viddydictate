@@ -31,6 +31,11 @@ enum HUDProbe {
         }
         print("[hud-probe] screen visibleFrame=\(vf)")
         let hud = HUDPanel()
+        // Stable providers for the whole run: the scope pill's frame is now derived from the pointer, so
+        // every probe that asserts a scope-* frame pins the pointer to one spot on the one visible screen.
+        // (The pointer and screen seams both fall back to production when not set.)
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
 
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
@@ -38,6 +43,7 @@ enum HUDProbe {
         probeModeAdaptiveRouterToast(hud, visibleFrame: vf)
         probePillAfterToast(hud)
         probeToastRevertMidTake(hud, visibleFrame: vf)
+        probePointerFollow(hud, visibleFrame: vf)
 
         hud.hide()
         print("[hud-probe] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
@@ -45,18 +51,24 @@ enum HUDProbe {
     }
 
     private static func probeLowPowerPill(_ hud: HUDPanel, visibleFrame vf: NSRect) {
-        // 4) Low-power pill: compact capsule, scaled, honoring the anchor.
+        // 4) Low-power pill: compact capsule, scaled, and FOLLOWING THE POINTER (VDCURB1) — the pill no
+        //    longer homes to the position setting, so the pointer and screen sources are pinned here.
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .topRight
+        let point = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
+        let screens = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
+        hud.pointerProviderForTesting = { point }
+        hud.screensProviderForTesting = { screens }
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         hud.show()
         var f = hud.frameForTesting
         check("pill-size", approx(f.width, 300) && approx(f.height, 64), "size=\(f.size) expect≈(300, 64)")
-        let pillExpect = HUDPosition.topRight.origin(for: f.size, in: vf)
-        check("pill-anchor-topRight",
+        let pillExpect = HUDPointerPlacement.origin(pointer: point, size: f.size, scale: 1.0,
+                                                    screens: screens, fallback: 0)
+        check("pill-follows-pointer",
               approx(f.origin.x, pillExpect.x) && approx(f.origin.y, pillExpect.y),
-              "origin=\(f.origin) expect≈\(pillExpect)")
+              "origin=\(f.origin) expect≈\(pillExpect) (equals HUDPointerPlacement.origin(...) for the provider pointer)")
 
         // Item A: the scope spans the FULL pill width (x≈0, width≈pill width).
         var wf = hud.pillWaveFrameForTesting
@@ -264,31 +276,36 @@ enum HUDProbe {
         //    take-aware dismissToast(). It is the pin the last conductor recommended but never added.
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
-        Settings.hudPosition = .topRight            // 300x64 topRight needs no clamp — a stable scope home
+        Settings.hudPosition = .topRight            // toasts still home here; the scope follows the pointer
+
+        let point = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
+        let screens = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
+        hud.pointerProviderForTesting = { point }
+        hud.screensProviderForTesting = { screens }
 
         hud.hide()
         hud.setCleanup(enabled: false, level: 0)
         hud.setTakeActive(false)
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         hud.show()                                  // the low-power scope pill is up, wave running
-        let homeScope = hud.frameForTesting
-        let draggedOrigin = NSPoint(x: homeScope.minX - 72, y: homeScope.minY - 36)
-        hud.simulateDragForTesting(to: draggedOrigin)
         let scopeBefore = hud.frameForTesting
-        check("revert-drag-applied-before-toast",
-              approx(scopeBefore.minX, draggedOrigin.x) && approx(scopeBefore.minY, draggedOrigin.y),
-              "origin=\(scopeBefore.origin) expect=\(draggedOrigin)")
+        let scopeExpected = HUDPointerPlacement.origin(pointer: point, size: scopeBefore.size,
+                                                       scale: 1.0, screens: screens, fallback: 0)
+        check("revert-scope-at-pointer-before-toast",
+              approx(scopeBefore.minX, scopeExpected.x) && approx(scopeBefore.minY, scopeExpected.y),
+              "origin=\(scopeBefore.origin) expect≈\(scopeExpected) (HUDPointerPlacement.origin(...))")
         check("revert-scope-up-before-toast",
               hud.panelVisibleForTesting && hud.pillWaveActiveForTesting && approx(scopeBefore.width, 300),
               "visible=\(hud.panelVisibleForTesting) wave=\(hud.pillWaveActiveForTesting) w=\(scopeBefore.width)")
 
-        hud.setTakeActive(true)                     // the drag is complete; now the take is live
+        hud.setTakeActive(true)                     // the take is live
         hud.toast(NotesBullseyeLogic.setToast, duration: 0.2)         // the exact mid-take confirmation toast
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))   // mid-dwell: the toast is up, scope stopped
         let toastDuring = hud.frameForTesting
-        check("revert-drag-origin-during-toast",
-              approx(toastDuring.minX, draggedOrigin.x) && approx(toastDuring.minY, draggedOrigin.y),
-              "origin=\(toastDuring.origin) expect=\(draggedOrigin)")
+        let toastHome = Settings.hudPosition.origin(for: toastDuring.size, in: vf)
+        check("revert-toast-at-home-during-toast",
+              approx(toastDuring.minX, toastHome.x) && approx(toastDuring.minY, toastHome.y),
+              "origin=\(toastDuring.origin) expect home=\(toastHome) (toast placement unchanged)")
         check("revert-toast-stops-scope-mid-dwell", !hud.pillWaveActiveForTesting,
               "wave=\(hud.pillWaveActiveForTesting) expect false (scope stopped for the toast dwell)")
 
@@ -298,19 +315,16 @@ enum HUDProbe {
               "visible=\(hud.panelVisibleForTesting) expect true (HUD must NOT order out mid-take)")
         check("revert-wave-active-after-dwell", hud.pillWaveActiveForTesting,
               "wave=\(hud.pillWaveActiveForTesting) expect true (oscilloscope back)")
-        check("revert-drag-origin-after-dwell",
-              approx(scopeAfter.minX, draggedOrigin.x) && approx(scopeAfter.minY, draggedOrigin.y),
-              "origin=\(scopeAfter.origin) expect=\(draggedOrigin)")
+        check("revert-scope-at-pointer-after-dwell",
+              approx(scopeAfter.minX, scopeExpected.x) && approx(scopeAfter.minY, scopeExpected.y),
+              "origin=\(scopeAfter.origin) expect≈\(scopeExpected) (back at the pointer)")
         check("revert-is-scope-pill", approx(scopeAfter.width, 300) && frameEq(scopeAfter, scopeBefore),
               "after=\(scopeAfter) before=\(scopeBefore) expect the 300x64 scope pill back in place")
 
-        // With NO take live, the same drag-first sequence must still re-home the toast and then hide it.
+        // With NO take live, a toast over a scope pill must still re-home the toast and then hide it.
         hud.setTakeActive(false)
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         hud.show()
-        let noTakeScope = hud.frameForTesting
-        let noTakeDraggedOrigin = NSPoint(x: noTakeScope.minX - 72, y: noTakeScope.minY - 36)
-        hud.simulateDragForTesting(to: noTakeDraggedOrigin)
         hud.toast(NotesBullseyeLogic.setToast, duration: 0.2)
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
         let noTakeToast = hud.frameForTesting
@@ -323,5 +337,125 @@ enum HUDProbe {
               "visible=\(hud.panelVisibleForTesting) expect false (no take -> dwell hides)")
 
         hud.hide()
+    }
+
+    private static func probePointerFollow(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        // 8) VDCURB1: the scope pill and the thinking ring follow the pointer (30 Hz), the info pill
+        //    rides with them, and a toast keeps the fixed home. Two screens are described through the
+        //    screen seam so "uses the pointer's screen, not NSScreen.main" is assertable on one display.
+        let oneScreen = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
+        let ringScale = CGFloat(Settings.hudSpinnerScale)
+
+        // 8a) A moved pointer moves the pill.
+        hud.hide()
+        Settings.hudPillScale = 1.0
+        hud.screensProviderForTesting = { oneScreen }
+        let a = NSPoint(x: vf.minX + 300, y: vf.maxY - 300)
+        let b = NSPoint(x: a.x + 120, y: a.y - 120)
+        hud.pointerProviderForTesting = { a }
+        hud.show()
+        hud.followTickForTesting()
+        hud.pointerProviderForTesting = { b }
+        hud.followTickForTesting()
+        var f = hud.frameForTesting
+        var expected = HUDPointerPlacement.origin(pointer: b, size: f.size, scale: 1.0,
+                                                 screens: oneScreen, fallback: 0)
+        check("pill-tracks-pointer-move",
+              approx(f.origin.x, expected.x) && approx(f.origin.y, expected.y),
+              "origin=\(f.origin) expect≈\(expected)")
+
+        // 8b) The thinking ring follows too, at the spinner scale.
+        hud.hide()
+        hud.setThinking(true)
+        let c = NSPoint(x: vf.minX + 260, y: vf.maxY - 260)
+        let d = NSPoint(x: c.x + 140, y: c.y - 140)
+        hud.pointerProviderForTesting = { c }
+        hud.followTickForTesting()
+        hud.pointerProviderForTesting = { d }
+        hud.followTickForTesting()
+        f = hud.frameForTesting
+        expected = HUDPointerPlacement.origin(pointer: d, size: f.size, scale: ringScale,
+                                             screens: oneScreen, fallback: 0)
+        check("thinking-tracks-pointer-move",
+              approx(f.origin.x, expected.x) && approx(f.origin.y, expected.y),
+              "origin=\(f.origin) expect≈\(expected) ringScale=\(ringScale)")
+        hud.setThinking(false)
+
+        // 8c) On a second screen the pill goes there — it is NOT clamped back to NSScreen.main.
+        hud.hide()
+        Settings.hudPillScale = 1.0
+        let second = NSRect(x: vf.maxX, y: vf.minY, width: vf.width, height: vf.height)
+        let twoScreens = [HUDPointerPlacement.Screen(frame: vf, visible: vf),
+                          HUDPointerPlacement.Screen(frame: second, visible: second)]
+        hud.screensProviderForTesting = { twoScreens }
+        hud.pointerProviderForTesting = { NSPoint(x: vf.maxX + 200, y: vf.maxY - 200) }
+        hud.show()
+        f = hud.frameForTesting
+        check("pill-not-clamped-to-main-screen",
+              f.minX >= second.minX - 1.5 && f.maxX <= second.maxX + 1.5
+                  && f.minY >= second.minY - 1.5 && f.maxY <= second.maxY + 1.5,
+              "frame=\(f) expect inside second visible=\(second)")
+
+        // 8d) A plain toast does NOT follow: a tick leaves it exactly where it was.
+        hud.hide()
+        hud.screensProviderForTesting = { oneScreen }
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 300, y: vf.maxY - 300) }
+        hud.toast("probe", duration: 10)
+        let toastBefore = hud.frameForTesting
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 700, y: vf.maxY - 500) }
+        hud.followTickForTesting()
+        check("toast-does-not-follow-pointer", frameEq(hud.frameForTesting, toastBefore),
+              "frame=\(hud.frameForTesting) expect unchanged=\(toastBefore)")
+        hud.hide()   // hide() also invalidates the still-pending toast timer
+
+        // 8e) The follow timer's lifecycle: exactly one, 30 Hz, only while a following mode is shown.
+        hud.hide()
+        hud.screensProviderForTesting = { oneScreen }
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 300, y: vf.maxY - 300) }
+        hud.setTakeActive(false)
+        hud.show()
+        let activeAfterShow = hud.followTimerIsActiveForTesting
+        let interval = hud.followTimerIntervalForTesting
+        var lifecycleOK = activeAfterShow
+            && (interval.map { abs($0 - 1.0 / 30) <= 1e-6 } ?? false)
+        hud.show()
+        lifecycleOK = lifecycleOK && hud.followTimerIsActiveForTesting
+        hud.hide()
+        lifecycleOK = lifecycleOK && !hud.followTimerIsActiveForTesting
+        hud.setThinking(true)
+        lifecycleOK = lifecycleOK && hud.followTimerIsActiveForTesting
+        hud.setThinking(false)
+        hud.toast("probe", duration: 10)
+        lifecycleOK = lifecycleOK && !hud.followTimerIsActiveForTesting
+        check("pill-follow-timer-lifecycle", lifecycleOK,
+              "show=\(activeAfterShow) interval=\(String(describing: interval)) final=\(hud.followTimerIsActiveForTesting)")
+        hud.hide()
+
+        // 8f) The 30 Hz loop moves the pill with NO manual tick: change the provider, pump the runloop.
+        hud.hide()
+        hud.screensProviderForTesting = { oneScreen }
+        Settings.hudPillScale = 1.0
+        let pa = NSPoint(x: vf.minX + 200, y: vf.maxY - 200)
+        let pb = NSPoint(x: pa.x + 100, y: pa.y - 100)
+        hud.pointerProviderForTesting = { pa }
+        hud.show()
+        f = hud.frameForTesting
+        let targetA = HUDPointerPlacement.origin(pointer: pa, size: f.size, scale: 1.0,
+                                                 screens: oneScreen, fallback: 0)
+        let startsAtA = approx(f.origin.x, targetA.x) && approx(f.origin.y, targetA.y)
+        hud.pointerProviderForTesting = { pb }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        f = hud.frameForTesting
+        let targetB = HUDPointerPlacement.origin(pointer: pb, size: f.size, scale: 1.0,
+                                                 screens: oneScreen, fallback: 0)
+        let endsAtB = approx(f.origin.x, targetB.x) && approx(f.origin.y, targetB.y)
+        let targetsDiffer = abs(targetB.x - targetA.x) >= 50 && abs(targetB.y - targetA.y) >= 50
+        let leftA = !(approx(f.origin.x, targetA.x) && approx(f.origin.y, targetA.y))
+        check("pill-follows-without-manual-tick", startsAtA && endsAtB && targetsDiffer && leftA,
+              "start=\(startsAtA) atA=\(targetA) end=\(f.origin) atB=\(targetB) differs=\(targetsDiffer)")
+
+        hud.hide()
+        hud.pointerProviderForTesting = nil
+        hud.screensProviderForTesting = nil
     }
 }
