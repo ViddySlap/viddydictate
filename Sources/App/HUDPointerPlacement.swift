@@ -18,6 +18,37 @@ enum HUDPointerPlacement {
     /// pill's (or ring's) own scale.
     static let offset: CGFloat = 18
 
+    /// How far a trailing toast moves toward the pointer each 30 Hz tick: one fifth of the gap.
+    static let trail: CGFloat = 0.2
+
+    /// A window origin lands on whole points, so a step under a point would round back and stall the
+    /// trail. Each axis therefore moves at least this far per step while it is still more than half a
+    /// point out, capped at the gap so it never overshoots.
+    static let trailMinStep: CGFloat = 1
+
+    /// One trailing step: move a fifth of the way from `current` toward `target`, snapping to the
+    /// target once both axis gaps are within half a point (so the trail always arrives and never
+    /// overshoots).
+    static func trailStep(current: NSPoint, target: NSPoint) -> NSPoint {
+        let dx = target.x - current.x
+        let dy = target.y - current.y
+        if abs(dx) <= 0.5 && abs(dy) <= 0.5 {
+            return target
+        }
+        let fifth = NSPoint(x: current.x + dx * trail, y: current.y + dy * trail)
+        return NSPoint(x: minimumStep(current: current.x, fifth: fifth.x, target: target.x),
+                       y: minimumStep(current: current.y, fifth: fifth.y, target: target.y))
+    }
+
+    /// The per-axis trailing rule: keep the fifth-of-the-way step when the axis is already within half
+    /// a point of the target or the fifth already moves at least `trailMinStep`; otherwise move a whole
+    /// `trailMinStep` toward the target, capped at the gap so the step never overshoots.
+    private static func minimumStep(current: CGFloat, fifth: CGFloat, target: CGFloat) -> CGFloat {
+        let gap = target - current
+        if abs(gap) <= 0.5 || abs(fifth - current) >= trailMinStep { return fifth }
+        return gap > 0 ? current + min(trailMinStep, gap) : current + max(-trailMinStep, gap)
+    }
+
     /// The screen whose frame contains `pointer`. A seam (a point inside two frames) prefers `fallback`
     /// when `fallback` is one of those frames. A pointer outside every screen takes the nearest frame,
     /// measured as the Euclidean distance from the point to the rectangle; ties take the lower index.

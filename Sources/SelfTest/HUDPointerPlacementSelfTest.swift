@@ -91,5 +91,70 @@ enum HUDPointerPlacementSelfTest {
                                                    scale: 1, screens: [], fallback: 0)
         reporter.record("pointer: no screens gives the unclamped offset",
                         noScreens == NSPoint(x: 418, y: 418))
+
+        // VDCURB2: the trailing toast moves a fifth of the way each step and snaps within half a point.
+        let stepFifth = HUDPointerPlacement.trailStep(current: NSPoint(x: 0, y: 0),
+                                                      target: NSPoint(x: 100, y: 40))
+        reporter.record("trail: steps a fifth of the way toward the target",
+                        abs(stepFifth.x - 20) <= 1e-9 && abs(stepFifth.y - 8) <= 1e-9)
+
+        let snap = HUDPointerPlacement.trailStep(current: NSPoint(x: 99.7, y: 39.8),
+                                                 target: NSPoint(x: 100, y: 40))
+        reporter.record("trail: snaps to the target within half a point",
+                        snap == NSPoint(x: 100, y: 40))
+
+        let noSnap = HUDPointerPlacement.trailStep(current: NSPoint(x: 0, y: 0),
+                                                   target: NSPoint(x: 3, y: 0))
+        reporter.record("trail: does not snap beyond half a point",
+                        abs(noSnap.x - 1) <= 1e-9 && noSnap.y == 0 && noSnap != NSPoint(x: 3, y: 0))
+
+        var cur = NSPoint(x: 0, y: 0)
+        let finalTarget = NSPoint(x: 300, y: -200)
+        var lastDX = abs(finalTarget.x - cur.x)
+        var lastDY = abs(finalTarget.y - cur.y)
+        var converges = true
+        for _ in 0..<80 {
+            let next = HUDPointerPlacement.trailStep(current: cur, target: finalTarget)
+            let dx = abs(finalTarget.x - next.x)
+            let dy = abs(finalTarget.y - next.y)
+            if dx > lastDX || dy > lastDY { converges = false }
+            lastDX = dx
+            lastDY = dy
+            cur = next
+        }
+        reporter.record("trail: converges to the target and never overshoots",
+                        converges && cur == finalTarget)
+
+        let parked = NSPoint(x: 42, y: -17)
+        reporter.record("trail: a point already at the target stays put",
+                        HUDPointerPlacement.trailStep(current: parked, target: parked) == parked)
+
+        let small = HUDPointerPlacement.trailStep(current: NSPoint(x: 0, y: 0), target: NSPoint(x: 4, y: -3))
+        let capped = HUDPointerPlacement.trailStep(current: NSPoint(x: 0, y: 0), target: NSPoint(x: 0.8, y: 0))
+        reporter.record("trail: a small gap moves a point per step and never overshoots",
+                        abs(small.x - 1) <= 1e-9 && abs(small.y + 1) <= 1e-9 && capped == NSPoint(x: 0.8, y: 0))
+
+        var gapFour = NSPoint(x: 914, y: 402)
+        var gapFourSteps = 0
+        while gapFour != NSPoint(x: 918, y: 402) && gapFourSteps < 10 {
+            gapFour = HUDPointerPlacement.trailStep(current: gapFour, target: NSPoint(x: 918, y: 402))
+            gapFourSteps += 1
+        }
+        reporter.record("trail: a gap of four points arrives in at most four steps",
+                        gapFour == NSPoint(x: 918, y: 402) && gapFourSteps <= 4)
+
+        func wholePointWalk(_ quantize: (CGFloat) -> CGFloat) -> Bool {
+            let goal = NSPoint(x: 918, y: 402)
+            var at = NSPoint(x: 518, y: 702)
+            var steps = 0
+            while at != goal && steps < 200 {
+                let next = HUDPointerPlacement.trailStep(current: at, target: goal)
+                at = NSPoint(x: quantize(next.x), y: quantize(next.y))
+                steps += 1
+            }
+            return at == goal
+        }
+        reporter.record("trail: a whole-point walk still arrives",
+                        wholePointWalk({ $0.rounded(.down) }) && wholePointWalk({ $0.rounded() }))
     }
 }

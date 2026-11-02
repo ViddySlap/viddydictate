@@ -127,7 +127,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     private let panel: NSPanel
     private let effect = NSVisualEffectView()
     private let display = DisplayView()
-    private let handle = DragHandle()
     private let statusLabel = NSTextField(labelWithString: "")
     private let settingsButton = NSButton()
     private let wave = WaveformView(frame: .zero)
@@ -140,6 +139,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// mode noun and recovery suffix needs a third line. The cap is still a cap: a custom mode's
     /// user-supplied name is unbounded, and the capsule must stay a pill rather than become the box.
     static let pillToastMaxLines = 3
+    static let toastFadeDuration: TimeInterval = 0.3
     /// Whether the last `layoutPillToast()` had to clip the message at the line cap. Read by the
     /// offscreen render gate so "the pill carries this sentence whole" is an assertion, not an opinion.
     private(set) var pillToastTruncatedForTesting = false
@@ -171,8 +171,15 @@ final class HUDPanel: NSObject, HUDPresenting {
     private var bullseyeArmed = false
 
     private var origin = NSPoint.zero
+    /// Set at the top of every `toast(...)` so a new toast is placed beside the CURRENT pointer even
+    /// when a previous panel is still on screen; consumed (cleared) by `presentBox`.
+    private var toastPlacePending = false
     private var currentText = ""
     private var toastTimer: Timer?
+    /// When a plain toast should finish fading (nil for held toasts, which never fade).
+    private var toastDeadline: Date?
+    /// The length of the fade at the end of a plain toast's dwell (min of `toastFadeDuration` and dwell).
+    private var toastFadeLength: TimeInterval = 0.3
     /// The 30 Hz pointer-follow loop (VDCURB1). At most ONE exists: started when a following mode
     /// (`.pillScope` / `.thinking`) comes on screen, invalidated on `hide()` and on every
     /// non-following mode. It lives here rather than in a display link so it is a plain RunLoop timer
@@ -194,9 +201,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// true; idle/finishing → false). `dismissToast()` reads it to decide whether a dismissing toast reverts
     /// to the recording scope (take still live) or hides outright (no take) — the core of the BUG 1 fix.
     private var takeActive = false
-    /// The user dragged the panel this take — keep their origin through relayouts instead of
-    /// re-homing to the position setting (home resets on the next show, as before).
-    private var userDragged = false
 
     private var W: CGFloat
     private var waveH: CGFloat = 72
@@ -264,7 +268,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         pillToastLabel.textColor = Phosphor.green.withAlphaComponent(0.92)
         pillToastLabel.isHidden = true
 
-        handle.onMoved = { [weak self] o in self?.origin = o; self?.userDragged = true }   // drag moves it live; home resets on next show
         lockButton.target = self; lockButton.action = #selector(lockClicked)
         stopButton.target = self; stopButton.action = #selector(stopClicked)
         // The scope only ever shows live mic input now; the cleanup wait is a separate spinner that
@@ -291,7 +294,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         settingsButton.target = self
         settingsButton.action = #selector(settingsClicked)
 
-        display.addSubview(handle)
         display.addSubview(statusLabel)
         display.addSubview(settingsButton)
         display.addSubview(keycap)
@@ -313,12 +315,10 @@ final class HUDPanel: NSObject, HUDPresenting {
     @objc private func stopClicked() { onStop?() }
     @objc private func settingsClicked() { onSettings?() }
 
-    /// A click on a toast that carries an action runs it once and dismisses; the stored action is
-    /// cleared before running so a re-entrant click cannot fire it twice.
     private func toastClicked() {
-        guard let action = toastAction else { return }
+        let action = toastAction
         toastAction = nil
-        action()
+        action?()
         dismissToast()
     }
 
@@ -353,19 +353,14 @@ final class HUDPanel: NSObject, HUDPresenting {
         pillToastLabel.textColor = Phosphor.green.withAlphaComponent(0.92)
     }
 
-    /// Home the panel per the position setting for its current size — unless the user dragged it
-    /// this take, in which case their origin wins until the next show.
-    private func applyHome(for size: NSSize) {
-        guard !userDragged else { return }
-        let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        origin = Settings.hudPosition.origin(for: size, in: vf)
-    }
-
     // MARK: pointer following (VDCURB1)
 
-    /// Exactly the two modes that ride with the pointer. Toasts (both kinds) keep the fixed
-    /// `Settings.hudPosition` placement.
+    /// The modes that ride with the pointer every tick: the scope pill and the thinking ring.
     private var followsPointer: Bool { mode == .pillScope || mode == .thinking }
+
+    /// A plain toast (in the pill capsule, no action) trails the pointer and fades; every other
+    /// toast state (a clickable pill toast or an `answer()` full toast) holds still.
+    private var trailsPointer: Bool { mode == .pillToast && toastAction == nil }
 
     /// The scale the placement offset is multiplied by: the pill's own setting for `.pillScope`, the
     /// spinner's for `.thinking`. Read live so a settings change applies from the next tick.
@@ -373,7 +368,8 @@ final class HUDPanel: NSObject, HUDPresenting {
         switch mode {
         case .pillScope: return CGFloat(Settings.hudPillScale)
         case .thinking: return CGFloat(Settings.hudSpinnerScale)
-        case .pillToast, .fullToast: return CGFloat(Settings.hudPillScale)
+        case .pillToast: return CGFloat(Settings.hudPillScale)
+        case .fullToast: return scale
         }
     }
 
@@ -408,12 +404,23 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// One pointer-follow tick (30 Hz). A no-op when the panel is off screen or the mode no longer
     /// follows, so a stale timer can never move a toast or a hidden panel.
     private func followTick() {
-        guard panel.isVisible && followsPointer else { return }
-        let target = followOrigin(panelSize: panel.frame.size)
-        panel.setFrameOrigin(target)
-        origin = target
-        // Re-anchor the info pill under the (moving) scope pill without animating every tick.
-        if mode == .pillScope { updateInfoPill(animated: false) }
+        guard panel.isVisible && (followsPointer || trailsPointer) else { return }
+        if trailsPointer {
+            let target = followOrigin(panelSize: panel.frame.size)
+            let next = HUDPointerPlacement.trailStep(current: panel.frame.origin, target: target)
+            panel.setFrameOrigin(next)
+            origin = next
+            if let deadline = toastDeadline {
+                let left = deadline.timeIntervalSinceNow
+                panel.alphaValue = left >= toastFadeLength ? 1 : CGFloat(max(0, left / toastFadeLength))
+            }
+        } else {
+            let target = followOrigin(panelSize: panel.frame.size)
+            panel.setFrameOrigin(target)
+            origin = target
+            // Re-anchor the info pill under the (moving) scope pill without animating every tick.
+            if mode == .pillScope { updateInfoPill(animated: false) }
+        }
     }
 
     private func startFollowTimer() {
@@ -428,20 +435,20 @@ final class HUDPanel: NSObject, HUDPresenting {
         followTimer = nil
     }
 
-    /// Apply the shared window/content/display framing used by every HUD mode. The thinking mode
-    /// may supply the origin that preserves its current on-screen anchor; all other modes home
-    /// normally for their new size.
+    /// Apply the shared window/content/display framing used by every HUD mode. Placement comes from
+    /// the pointer helper; a visible held or trailing toast keeps its current origin through relayouts.
     @discardableResult
     private func presentBox(panelSize: NSSize, displayBox: NSRect? = nil,
                             cornerRadius: CGFloat, visibleOrigin: NSPoint? = nil) -> NSRect {
-        if followsPointer {
-            // The scope pill and the thinking ring ride with the pointer: no position setting, no
-            // carry-over of a previous on-screen anchor (that anchor was itself the last pointer spot).
+        if followsPointer || toastPlacePending {
             origin = followOrigin(panelSize: panelSize)
+            toastPlacePending = false
         } else if panel.isVisible, let visibleOrigin {
             origin = visibleOrigin
+        } else if panel.isVisible {
+            origin = panel.frame.origin
         } else {
-            applyHome(for: panelSize)
+            origin = followOrigin(panelSize: panelSize)
         }
         panel.setFrame(NSRect(origin: origin, size: panelSize), display: true)
         panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
@@ -487,7 +494,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         let rowY = displayH - padTop - statusH
         let rowMidY = rowY + statusH / 2
         let gearW: CGFloat = 18
-        handle.frame = NSRect(x: PADX, y: rowY, width: 16, height: statusH)
         statusLabel.frame = NSRect(x: PADX + 24, y: rowY - 1, width: W * 0.5, height: statusH + 2)
         wave.frame = NSRect(x: PADX, y: padBottom + textH + gap2, width: innerW, height: waveH)
         transcription.frame = NSRect(x: PADX, y: padBottom, width: innerW, height: textH)
@@ -517,7 +523,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         stopButton.frame = NSRect(x: startX + lw + 12, y: 0, width: sw, height: buttonsH)
 
         spinner.isHidden = true
-        handle.isHidden = false; statusLabel.isHidden = false; settingsButton.isHidden = false
+        statusLabel.isHidden = false; settingsButton.isHidden = false
         wave.isHidden = false; transcription.isHidden = false
         lockButton.isHidden = false; stopButton.isHidden = false
     }
@@ -527,7 +533,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     func show() {
         refreshDisplaySettings()         // re-read scales for this take
         mode = .pillScope                // a fresh take is always the scope pill
-        userDragged = false              // always spawn at the position-setting home
         presentForCurrentMode()
     }
 
@@ -536,11 +541,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// identical however the mode was reached. It does NOT choose the mode or re-read settings — the caller
     /// sets `mode` first (this is what lets `dismissToast()` re-summon the recording scope after a toast).
     private func presentForCurrentMode() {
-        relayout()                       // sizes the panel, then applyHome anchors it
-        // A following mode was already clamped to the POINTER's visible frame by the placement helper;
-        // clamping again to NSScreen.main would drag it back off a secondary screen.
-        if !followsPointer { clampOnScreen() }
-        if mode == .pillScope { updateInfoPill() }   // re-anchor the info pill to the CLAMPED scope frame
+        relayout()                       // sizes the panel; placement comes from the pointer helper
+        if mode == .pillScope { updateInfoPill() }   // re-anchor the info pill to the scope frame
         Log.write("HUD present frame=\(panel.frame) mode=\(mode) screen=\(NSScreen.main?.visibleFrame ?? .zero)")
         switch mode {
         case .pillToast:
@@ -554,21 +556,12 @@ final class HUDPanel: NSObject, HUDPresenting {
             break                                        // setThinking owns the spinner bring-up
         }
         panel.orderFrontRegardless()
-        if followsPointer { startFollowTimer() } else { stopFollowTimer() }
-    }
-
-    private func clampOnScreen() {
-        guard let vf = NSScreen.main?.visibleFrame else { return }
-        var f = panel.frame
-        if f.maxX > vf.maxX { f.origin.x = vf.maxX - f.width }
-        if f.minX < vf.minX { f.origin.x = vf.minX }
-        if f.maxY > vf.maxY { f.origin.y = vf.maxY - f.height }
-        if f.minY < vf.minY { f.origin.y = vf.minY }
-        origin = f.origin
-        panel.setFrameOrigin(f.origin)
+        if followsPointer || trailsPointer { startFollowTimer() } else { stopFollowTimer() }
     }
 
     func hide() {
+        toastDeadline = nil
+        panel.alphaValue = 1
         stopFollowTimer()
         toastTimer?.invalidate()
         toastAction = nil
@@ -650,7 +643,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         mode = .thinking
         wave.stop()
         badge.hide()
-        if panel.isVisible { origin = panel.frame.origin }  // else applyHome positions it
+        if panel.isVisible { origin = panel.frame.origin }  // else followOrigin positions it
         relayout()
         if !wasThinking { spinner.start() }
         panel.orderFrontRegardless()
@@ -682,7 +675,7 @@ final class HUDPanel: NSObject, HUDPresenting {
 
     /// Show/hide the whole recording chrome in one shot (used when collapsing to / from the spinner).
     private func setRecordingChrome(hidden: Bool) {
-        handle.isHidden = hidden; statusLabel.isHidden = hidden; settingsButton.isHidden = hidden
+        statusLabel.isHidden = hidden; settingsButton.isHidden = hidden
         wave.isHidden = hidden; transcription.isHidden = hidden; keycap.isHidden = hidden
         lockButton.isHidden = hidden; stopButton.isHidden = hidden
         pillToastLabel.isHidden = true   // never part of the recording chrome; the pill-toast shows it explicitly
@@ -833,21 +826,32 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// even in Final-only. Live mode always uses the full box.
     func toast(_ message: String, duration: TimeInterval = 3.5, forceFull: Bool = false,
                action: (() -> Void)? = nil) {
+        toastPlacePending = true
         toastTimer?.invalidate()
         toastAction = action
-        toastClickView?.onClick = action == nil ? nil : { [weak self] in self?.toastClicked() }
+        toastClickView?.onClick = (action != nil || forceFull) ? { [weak self] in self?.toastClicked() } : nil
+        toastFadeLength = min(HUDPanel.toastFadeDuration, duration)
+        toastDeadline = (action == nil && !forceFull) ? Date(timeIntervalSinceNow: duration) : nil
+        panel.alphaValue = 1
         refreshDisplaySettings()          // re-read scales so the pill sizing is current
         mode = toastMode(forceFull: forceFull)
-        // A toast over a live take is transient, so preserve the origin chosen through the drag handle.
-        // Standalone toasts keep the historical behavior of re-homing to the position setting.
-        if !takeActive { userDragged = false }
         statusLabel.attributedStringValue = NSAttributedString(string: "")
         currentText = message
         transcription.attributedStringValue = transcriptionAttr(message)   // full-box path (forceFull / full mode)
         presentForCurrentMode()
+        settleToastPlacement()
         // The dwell fires dismissToast(), NOT hide(): while a take is live it reverts to the recording
         // scope so the oscilloscope returns; only with no take live does it hide (BUG 1).
         toastTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in self?.dismissToast() }
+    }
+
+    /// Place a toast once more after its full layout has finished: the complete box is taller than the
+    /// size `presentBox` was handed when layout began, so the origin computed then is off by the extra
+    /// height. Called once from `toast(...)`, so a relayout of a toast already on screen never moves it.
+    private func settleToastPlacement() {
+        let settled = followOrigin(panelSize: panel.frame.size)
+        panel.setFrameOrigin(settled)
+        origin = settled
     }
 
     /// End a toast's dwell. If a take is still live (DictationController pushed `setTakeActive(true)`), the
@@ -857,6 +861,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// reserving `panel.orderOut(nil)` for the genuine take-end. Deciding this in HUDPanel (rather than
     /// auditing every toast call site) means it holds for every current and future toast.
     private func dismissToast() {
+        toastDeadline = nil
+        panel.alphaValue = 1
         toastTimer?.invalidate(); toastTimer = nil
         toastAction = nil
         toastClickView?.onClick = nil
@@ -888,7 +894,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     func renderToastForSeam(message: String, forceFull: Bool) -> CGImage? {
         refreshDisplaySettings()
         mode = toastMode(forceFull: forceFull)
-        userDragged = false
         statusLabel.attributedStringValue = NSAttributedString(string: "")
         currentText = message
         transcription.attributedStringValue = transcriptionAttr(message)
@@ -916,12 +921,12 @@ final class HUDPanel: NSObject, HUDPresenting {
     var followTimerIsActiveForTesting: Bool { followTimer?.isValid == true }
     var followTimerIntervalForTesting: TimeInterval? { followTimer?.timeInterval }
 
-    /// Test seam for `--hud-probe`: mirror DragHandle.mouseDragged followed by mouseUp so the probe
-    /// exercises the real onMoved closure that records both the panel origin and user-drag state.
-    func simulateDragForTesting(to newOrigin: NSPoint) {
-        panel.setFrameOrigin(newOrigin)
-        handle.onMoved?(newOrigin)
-    }
+    /// Test seam for `--hud-probe`: the live panel alpha (toast fade coverage).
+    var panelAlphaForTesting: CGFloat { panel.alphaValue }
+    /// Test seam for `--hud-probe`: whether a plain toast has scheduled its end-of-dwell fade.
+    var toastFadeScheduledForTesting: Bool { toastDeadline != nil }
+    /// Test seam for `--hud-probe`: simulate a click on the toast click view.
+    func simulateToastClickForTesting() { toastClickView?.onClick?() }
 
     /// Test seams for the Item-A scope pill: the scope's frame (to assert it now spans the full pill
     /// width).
