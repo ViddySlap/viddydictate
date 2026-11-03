@@ -428,9 +428,7 @@ enum PointOfUseOfferRender {
     private static func renderPriorToast(outDir: String) {
         let snapshot = HUDDefaultsSnapshot()
         defer { snapshot.restore() }
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
-        Settings.hudPosition = .bottomCenter
+        Settings.hudUIScale = 1.0
 
         let message = "⚠️ Email writer: "
             + TextTransformRetryDescriptor.Failure.unavailable.userMessage

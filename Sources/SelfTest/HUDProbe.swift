@@ -1,7 +1,7 @@
 import Cocoa
 
 /// Headless-ish HUD layout probe (`--hud-probe`): drive the real `HUDPanel` through the scope-pill and
-/// toast display settings — anchors, both size scales —
+/// toast display settings — anchors, the single size scale —
 /// and assert the resulting panel frames numerically. Needs a GUI session (panels flash briefly on
 /// screen) but no mic, no key tap, no LM Studio. It covers the layout math, which is where regressions
 /// would hide.
@@ -45,6 +45,7 @@ enum HUDProbe {
         probeToastRevertMidTake(hud, visibleFrame: vf)
         probePointerFollow(hud, visibleFrame: vf)
         probeToastFollow(hud, visibleFrame: vf)
+        probeUISize(hud, visibleFrame: vf)
 
         hud.hide()
         print("[hud-probe] \(failures == 0 ? "ALL PASS" : "\(failures) FAILURE(S)")")
@@ -54,8 +55,7 @@ enum HUDProbe {
     private static func probeLowPowerPill(_ hud: HUDPanel, visibleFrame vf: NSRect) {
         // 4) Low-power pill: compact capsule, scaled, and FOLLOWING THE POINTER (VDCURB1) — the pill no
         //    longer homes to the position setting, so the pointer and screen sources are pinned here.
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let point = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
         let screens = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
         hud.pointerProviderForTesting = { point }
@@ -76,7 +76,7 @@ enum HUDProbe {
               approx(wf.origin.x, 0) && approx(wf.width, 300),
               "waveFrame=\(wf) expect x≈0, width≈300")
 
-        Settings.hudPillScale = 1.5
+        Settings.hudUIScale = 1.5
         hud.show()
         f = hud.frameForTesting
         check("pill-scale", approx(f.width, 450) && approx(f.height, 96), "size=\(f.size) expect≈(450, 96)")
@@ -91,7 +91,7 @@ enum HUDProbe {
         // Item B: the low-power INFO PILL is content-gated (lock and/or cleanup), grows as more
         // elements join, sits just below the scope, and NEVER moves the scope pill — its on-screen
         // frame is invariant across every info-pill show/hide/resize.
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
 
         // idle: nothing locked, cleanup off -> scope only, no info pill.
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
@@ -196,7 +196,7 @@ enum HUDProbe {
         //    full box); a LONGER message grows the capsule wider; and `answer()` (paragraph-length web
         //    results) still forces the full readable box. This is the intended behavior change from the
         //    old "every low-power toast pops the full box".
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let fullBoxW = min(1080, vf.width - 80)
 
         hud.toast("Nothing heard", duration: 0.2)
@@ -220,8 +220,7 @@ enum HUDProbe {
     private static func probeModeAdaptiveRouterToast(_ hud: HUDPanel, visibleFrame vf: NSRect) {
         // Router status toasts use the default non-forced path. Pin that exact path renders in the pill
         // so a current-mode refresh cannot silently collapse back to an always-full presentation.
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let fullBoxW = min(1080, vf.width - 80)
         let message = "🔒 Private vault files are refused."
 
@@ -271,8 +270,7 @@ enum HUDProbe {
         //    pre-fix code the dwell called hide(), so the whole HUD vanished for the rest of the take while
         //    audio kept capturing — the exact BUG 1 symptom. This pin fails there and passes only with the
         //    take-aware dismissToast(). It is the pin the last conductor recommended but never added.
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
 
         let point = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
         let screens = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
@@ -342,11 +340,11 @@ enum HUDProbe {
         //    rides with them, and a toast keeps the fixed home. Two screens are described through the
         //    screen seam so "uses the pointer's screen, not NSScreen.main" is assertable on one display.
         let oneScreen = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
-        let ringScale = CGFloat(Settings.hudSpinnerScale)
+        let ringScale = CGFloat(Settings.hudUIScale)
 
         // 8a) A moved pointer moves the pill.
         hud.hide()
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         hud.screensProviderForTesting = { oneScreen }
         let a = NSPoint(x: vf.minX + 300, y: vf.maxY - 300)
         let b = NSPoint(x: a.x + 120, y: a.y - 120)
@@ -362,7 +360,7 @@ enum HUDProbe {
               approx(f.origin.x, expected.x) && approx(f.origin.y, expected.y),
               "origin=\(f.origin) expect≈\(expected)")
 
-        // 8b) The thinking ring follows too, at the spinner scale.
+        // 8b) The thinking ring follows too, at the single size scale.
         hud.hide()
         hud.setThinking(true)
         let c = NSPoint(x: vf.minX + 260, y: vf.maxY - 260)
@@ -381,7 +379,7 @@ enum HUDProbe {
 
         // 8c) On a second screen the pill goes there — it is NOT clamped back to NSScreen.main.
         hud.hide()
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let second = NSRect(x: vf.maxX, y: vf.minY, width: vf.width, height: vf.height)
         let twoScreens = [HUDPointerPlacement.Screen(frame: vf, visible: vf),
                           HUDPointerPlacement.Screen(frame: second, visible: second)]
@@ -425,7 +423,7 @@ enum HUDProbe {
         // 8f) The 30 Hz loop moves the pill with NO manual tick: change the provider, pump the runloop.
         hud.hide()
         hud.screensProviderForTesting = { oneScreen }
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let pa = NSPoint(x: vf.minX + 200, y: vf.maxY - 200)
         let pb = NSPoint(x: pa.x + 100, y: pa.y - 100)
         hud.pointerProviderForTesting = { pa }
@@ -455,8 +453,7 @@ enum HUDProbe {
         //    a clickable/answer toast holds still and dismisses on a click.
         hud.setTakeActive(false)
         hud.hide()
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let oneScreen = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
         hud.screensProviderForTesting = { oneScreen }
 
@@ -528,24 +525,24 @@ enum HUDProbe {
               "origin=\(smallToast.origin) expect≈\(nearPlacement) converged=\(smallConverged) elapsed=\(String(format: "%.2f", smallElapsed))s")
         hud.hide()
 
-        // 9b) held-toast placement: clickable at pill scale, then answer() at hudScale (full toast).
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        // 9b) held-toast placement: clickable at 0.8, then answer() at 1.25 (full toast).
+        Settings.hudUIScale = 1.0
         hud.pointerProviderForTesting = { P0 }
         hud.show()
         hud.pointerProviderForTesting = { A }
+        Settings.hudUIScale = 0.8
         hud.toast("probe", duration: 10, action: {})
         let clickToast = hud.frameForTesting
-        let clickAtA = HUDPointerPlacement.origin(pointer: A, size: clickToast.size, scale: 1.0,
+        let clickAtA = HUDPointerPlacement.origin(pointer: A, size: clickToast.size, scale: 0.8,
                                                   screens: oneScreen, fallback: 0)
         let clickPlacedOK = approx(clickToast.minX, clickAtA.x) && approx(clickToast.minY, clickAtA.y)
 
         hud.hide()
-        Settings.hudScale = 1.25
-        Settings.hudPillScale = 0.8
+        Settings.hudUIScale = 1.0
         hud.pointerProviderForTesting = { P0 }
         hud.show()
         hud.pointerProviderForTesting = { A }
+        Settings.hudUIScale = 1.25
         hud.answer("probe answer")
         let answerToast = hud.frameForTesting
         let answerAtA = HUDPointerPlacement.origin(pointer: A, size: answerToast.size, scale: 1.25,
@@ -553,8 +550,7 @@ enum HUDProbe {
         let answerPlacedOK = approx(answerToast.minX, answerAtA.x) && approx(answerToast.minY, answerAtA.y)
         check("held-toast-placed-at-pointer", clickPlacedOK && answerPlacedOK,
               "click=\(clickToast.origin) expect≈\(clickAtA); answer=\(answerToast.origin) expect≈\(answerAtA) answerSize=\(answerToast.size) clickSize=\(clickToast.size) vf=\(vf)")
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         hud.hide()
 
         // 9c) held toasts do not follow: clickable and answer stay put, and the follow timer is off.
@@ -627,8 +623,7 @@ enum HUDProbe {
         hud.hide()
 
         // 9f) a toast on a second screen is placed (and clamped) there, for all three toast kinds.
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
         let second = NSRect(x: vf.maxX, y: vf.minY, width: vf.width, height: vf.height)
         let twoScreens = [HUDPointerPlacement.Screen(frame: vf, visible: vf),
                           HUDPointerPlacement.Screen(frame: second, visible: second)]
@@ -686,7 +681,74 @@ enum HUDProbe {
         hud.hide()
         hud.pointerProviderForTesting = nil
         hud.screensProviderForTesting = nil
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
+        Settings.hudUIScale = 1.0
+    }
+
+    private static func probeUISize(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        // 10) The single UI size setting scales the ring, the pill toast, the answer toast, and the
+        //     pointer-follow offset together.
+        hud.setTakeActive(false)
+        hud.hide()
+        Settings.hudUIScale = 1.0
+        let point = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
+        let oneScreen = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
+        hud.pointerProviderForTesting = { point }
+        hud.screensProviderForTesting = { oneScreen }
+
+        Settings.hudUIScale = 1.6
+        hud.setThinking(true)
+        var bigRing = hud.frameForTesting
+        hud.setThinking(false)
+        Settings.hudUIScale = 0.7
+        hud.setThinking(true)
+        var smallRing = hud.frameForTesting
+        hud.setThinking(false)
+        check("ui-size-scales-ring",
+              approx(bigRing.width, 320) && approx(bigRing.height, 208)
+                  && approx(smallRing.width, 140) && approx(smallRing.height, 91),
+              "1.6=\(bigRing.size) expect≈(320, 208); 0.7=\(smallRing.size) expect≈(140, 91)")
+
+        Settings.hudUIScale = 1.0
+        hud.toast("probe", duration: 10)
+        let baseToast = hud.frameForTesting
+        hud.hide()
+        Settings.hudUIScale = 1.6
+        hud.toast("probe", duration: 10)
+        let bigToast = hud.frameForTesting
+        check("ui-size-scales-pill-toast",
+              bigToast.width >= baseToast.width * 1.5 && bigToast.height >= baseToast.height * 1.5,
+              "1.0=\(baseToast.size) 1.6=\(bigToast.size) expect 1.6 >= 1.5x both")
+        hud.hide()
+
+        Settings.hudUIScale = 0.7
+        hud.answer("probe answer")
+        let smallAnswer = hud.frameForTesting
+        hud.hide()
+        Settings.hudUIScale = 1.0
+        hud.answer("probe answer")
+        let baseAnswer = hud.frameForTesting
+        hud.hide()
+        Settings.hudUIScale = 1.6
+        hud.answer("probe answer")
+        let bigAnswer = hud.frameForTesting
+        check("ui-size-scales-answer-toast",
+              smallAnswer.width < baseAnswer.width && bigAnswer.width >= baseAnswer.width,
+              "0.7=\(smallAnswer.width) 1.0=\(baseAnswer.width) 1.6=\(bigAnswer.width)")
+        hud.hide()
+
+        Settings.hudUIScale = 1.6
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.show()
+        let pill = hud.frameForTesting
+        let expected = HUDPointerPlacement.origin(pointer: point, size: pill.size, scale: 1.6,
+                                                  screens: oneScreen, fallback: 0)
+        check("ui-size-pill-offset-uses-the-setting",
+              approx(pill.origin.x, expected.x) && approx(pill.origin.y, expected.y),
+              "origin=\(pill.origin) expect≈\(expected) (scale 1.6)")
+
+        hud.hide()
+        hud.pointerProviderForTesting = nil
+        hud.screensProviderForTesting = nil
+        Settings.hudUIScale = 1.0
     }
 }

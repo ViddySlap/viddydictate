@@ -339,10 +339,10 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     /// Re-read the display settings that shape the panel (called at each show, so settings changes
-    /// apply from the next take). Scale drives the full HUD's width, scope height, and body font;
-    /// the pill has its own scale applied in `layoutPill`.
+    /// apply from the next take). The one size setting scales the full HUD, the pill, the ring and the
+    /// toasts together.
     private func refreshDisplaySettings() {
-        scale = CGFloat(Settings.hudScale)
+        scale = CGFloat(Settings.hudUIScale)
         W = min(1080 * scale, (NSScreen.main?.visibleFrame.width ?? 1100) - 80)
         waveH = round(72 * scale)
         // Re-read the accent so a theme change recolors the one-shot-tinted chrome from the next take
@@ -362,13 +362,11 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// toast state (a clickable pill toast or an `answer()` full toast) holds still.
     private var trailsPointer: Bool { mode == .pillToast && toastAction == nil }
 
-    /// The scale the placement offset is multiplied by: the pill's own setting for `.pillScope`, the
-    /// spinner's for `.thinking`. Read live so a settings change applies from the next tick.
+    /// The scale the placement offset is multiplied by: the one size setting for every following mode.
+    /// Read live so a settings change applies from the next tick.
     private func followScale() -> CGFloat {
         switch mode {
-        case .pillScope: return CGFloat(Settings.hudPillScale)
-        case .thinking: return CGFloat(Settings.hudSpinnerScale)
-        case .pillToast: return CGFloat(Settings.hudPillScale)
+        case .pillScope, .thinking, .pillToast: return CGFloat(Settings.hudUIScale)
         case .fullToast: return scale
         }
     }
@@ -683,12 +681,12 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     /// The compact "thinking" layout: a small CRT box centered where the HUD was, holding only the
-    /// spinning wheel. When the HUD isn't up, it homes to the position setting like every layout.
+    /// spinning wheel. When the HUD isn't up, it homes to the pointer anchor like every layout.
     private func layoutThinking() {
         // The spinner rides in a transparent square whose size (and thus the ring's radius) follows the
-        // spinner-size setting. The frosted box + CRT fill are hidden (see relayout), so only the ring
+        // single size setting. The frosted box + CRT fill are hidden (see relayout), so only the ring
         // shows — a bigger square just gives a bigger ring, centered where the HUD was.
-        let ss = CGFloat(Settings.hudSpinnerScale)
+        let ss = CGFloat(Settings.hudUIScale)
         let tw = round(200 * ss), th = round(130 * ss)
         let visibleOrigin: NSPoint?
         if panel.isVisible {
@@ -711,7 +709,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// spans the FULL capsule width and `WaveformView` alpha-fades the trace at both rounded ends
     /// (no hard bounding box).
     private func layoutPill() {
-        let ps = CGFloat(Settings.hudPillScale)
+        let ps = CGFloat(Settings.hudUIScale)
         let pw = round(HUDPillMetrics.baseWidth * ps), ph = round(HUDPillMetrics.baseHeight * ps)
         presentBox(panelSize: NSSize(width: pw, height: ph), cornerRadius: ph / 2)
         spinner.isHidden = true
@@ -753,7 +751,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// Callers that pass `forceFull: true` (paragraph-length answers, high-salience advisories) are a
     /// separate, deliberate choice and are unaffected.
     private func layoutPillToast() {
-        let ps = CGFloat(Settings.hudPillScale)
+        let ps = CGFloat(Settings.hudUIScale)
         let baseW = round(HUDPillMetrics.baseWidth * ps)          // scope-pill width — the floor
         let baseH = round(HUDPillMetrics.baseHeight * ps)           // scope-pill height — the floor
         let padX = round(26 * ps)
@@ -804,7 +802,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     private func updateInfoPill(animated: Bool = true) {
         infoPill.apply(locked: lockedState, cleanupEnabled: cleanupEnabled, level: cleanupLevel,
                        bullseyeArmed: bullseyeArmed, armedModeGlyph: armedModeGlyph,
-                       scope: panel.frame, ps: CGFloat(Settings.hudPillScale), animated: animated)
+                       scope: panel.frame, ps: CGFloat(Settings.hudUIScale), animated: animated)
     }
 
     /// Latch the sticky-note bullseye armed state and refresh the info pill so its bullseye glyph appears /

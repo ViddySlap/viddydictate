@@ -38,7 +38,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var reduceSwitch: NSSwitch!
     private var retainAudioSwitch: NSSwitch!
     private var keepHistorySwitch: NSSwitch!
-    private var positionPopup: NSPopUpButton!
 
     /// Hotkey-rebinding plumbing: the Hotkeys tab arms/cancels capture in the live tap and reports
     /// persisted changes, all routed through the controller (which owns the tap). Wired by AppDelegate.
@@ -391,52 +390,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         return root
     }
 
-    /// The former Display page, now the leading group on Appearance: HUD placement.
-    /// It stays a child view so both former pages retain every
-    /// control while the combined document view owns only their vertical composition.
-    private func buildDisplayContent() -> NSView {
-        let AW = contentWidth
-        let root = FlippedView(frame: NSRect(x: 0, y: 0, width: AW, height: 10))
-        let L: CGFloat = 20
-
-        root.addSubview(sectionHeader("HUD", y: 16))
-        let card = SettingsSectionKit.card(
-            frame: NSRect(x: L, y: 38, width: AW - 2 * L, height: 86),
-            identifier: "card.appearance-hud")
-        root.addSubview(card)
-        card.addSubview(plainLabel("Position", x: 14, y: 13, w: 82, bold: false))
-        positionPopup = NSPopUpButton(frame: NSRect(x: 96, y: 8, width: card.bounds.width - 110, height: 25),
-                                      pullsDown: false)
-        positionPopup.identifier = NSUserInterfaceItemIdentifier("hud-position")
-        for pos in HUDPosition.allCases {
-            positionPopup.addItem(withTitle: pos.label)
-            positionPopup.lastItem?.representedObject = pos.rawValue
-        }
-        if let item = positionPopup.itemArray.first(where: {
-            ($0.representedObject as? String) == Settings.hudPosition.rawValue
-        }) { positionPopup.select(item) }
-        positionPopup.target = self
-        positionPopup.action = #selector(positionChanged)
-        card.addSubview(positionPopup)
-        card.addSubview(hint("Where the dictation popup appears on screen — applies to the full HUD and the Final-only pill. Dragging it moves it for that take only.",
-                             y: 42, width: card.bounds.width - 28, x: 14))
-
-        root.frame = NSRect(x: 0, y: 0, width: AW, height: card.frame.maxY + 14)
-        return root
-    }
-
-    /// One scroll document for the two former adjacent tabs. The child views keep ownership of their
-    /// controls and actions; this view only stacks them so nothing is deleted or rewired by consolidation.
+    /// One scroll document for the Appearance tab: the theme + size settings view at the top of the
+    /// document.
     private func buildAppearanceContent() -> NSView {
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: 10))
-        let display = buildDisplayContent()
-        display.identifier = NSUserInterfaceItemIdentifier("appearance-display-groups")
-        display.frame.origin = .zero
-        root.addSubview(display)
-
         let appearance = AppearanceSettingsView(width: contentWidth)
-        appearance.identifier = NSUserInterfaceItemIdentifier("appearance-theme-groups")
-        appearance.frame.origin = NSPoint(x: 0, y: display.frame.maxY + 8)
+        appearance.frame.origin = .zero
         root.addSubview(appearance)
         root.frame.size.height = appearance.frame.maxY
         return root
@@ -514,14 +473,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         Log.write("settings: keep-full-dictation-history -> \(Settings.keepFullHistory ? "ON" : "OFF")")
     }
 
-    // MARK: display tab actions
-
-    @objc private func positionChanged() {
-        let raw = (positionPopup.selectedItem?.representedObject as? String) ?? ""
-        Settings.hudPosition = HUDPosition(rawValue: raw) ?? .bottomCenter
-        Log.write("settings: HUD position -> \(Settings.hudPosition.rawValue)")
-    }
-
     // MARK: mic picker
 
     /// Fill the popup: option 0 = follow the system default, then each present input device by name.
@@ -581,16 +532,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 }
 
 /// The visual half of the consolidated Appearance tab: the one monochromatic theme color (the macOS
-/// color panel via a color well), a live preview of the derived shades, and all three HUD-size controls.
+/// color panel via a color well), a live preview of the derived shades, and the one HUD-size slider
+/// with a drawn size preview.
 private final class AppearanceSettingsView: NSView {
     override var isFlipped: Bool { true }
 
-    private var hudSizeSlider: NSSlider!
-    private var hudSizeVal: NSTextField!
-    private var pillSizeSlider: NSSlider!
-    private var pillSizeVal: NSTextField!
-    private var spinnerSizeSlider: NSSlider!
-    private var spinnerSizeVal: NSTextField!
+    private var uiSizeSlider: NSSlider!
+    private var uiSizeVal: NSTextField!
+    private var sizePreview: HUDSizePreviewView!
     private var colorWell: NSColorWell!
     private var themePreview: ThemePreviewView!
 
@@ -626,7 +575,7 @@ private final class AppearanceSettingsView: NSView {
         let sizeHeaderY = themeCard.frame.maxY + 16
         addSubview(sectionHeader("UI SIZE", y: sizeHeaderY))
         let sizeCard = SettingsSectionKit.card(
-            frame: NSRect(x: L, y: sizeHeaderY + 22, width: width - 2 * L, height: 198),
+            frame: NSRect(x: L, y: sizeHeaderY + 22, width: width - 2 * L, height: 176),
             identifier: "card.appearance-size")
         addSubview(sizeCard)
         let labelW: CGFloat = 82
@@ -635,47 +584,25 @@ private final class AppearanceSettingsView: NSView {
         let valW: CGFloat = 44
         let sliderW = valX - sliderX - 8
 
-        sizeCard.addSubview(plainLabel("Pill size", x: 14, y: 14, w: labelW, bold: false))
-        pillSizeSlider = NSSlider(value: Settings.hudPillScale,
-                                  minValue: Settings.hudPillScaleRange.lowerBound,
-                                  maxValue: Settings.hudPillScaleRange.upperBound,
-                                  target: self, action: #selector(displaySlidersChanged))
-        pillSizeSlider.identifier = NSUserInterfaceItemIdentifier("hud-pill-scale")
-        pillSizeSlider.frame = NSRect(x: sliderX, y: 13, width: sliderW, height: 20)
-        pillSizeSlider.isContinuous = true
-        sizeCard.addSubview(pillSizeSlider)
-        pillSizeVal = valueLabel(at: 13, x: valX, w: valW, into: sizeCard)
-        sizeCard.addSubview(hint("Size of the Final-only pill (the oscilloscope capsule).",
+        sizeCard.addSubview(plainLabel("UI size", x: 14, y: 14, w: labelW, bold: false))
+        uiSizeSlider = NSSlider(value: Settings.hudUIScale,
+                                minValue: Settings.hudUIScaleRange.lowerBound,
+                                maxValue: Settings.hudUIScaleRange.upperBound,
+                                target: self, action: #selector(uiSizeChanged))
+        uiSizeSlider.identifier = NSUserInterfaceItemIdentifier("hud-ui-scale")
+        uiSizeSlider.frame = NSRect(x: sliderX, y: 13, width: sliderW, height: 20)
+        uiSizeSlider.isContinuous = true
+        sizeCard.addSubview(uiSizeSlider)
+        uiSizeVal = valueLabel(at: 13, x: valX, w: valW, into: sizeCard)
+        uiSizeVal.stringValue = "\(Int(round(Settings.hudUIScale * 100)))%"
+        sizeCard.addSubview(hint("Size of the dictation pill, its toasts, the answer box and the thinking ring, all together. 100% is today's size.",
                                  y: 37, width: sizeCard.bounds.width - 28, x: 14))
 
-        sizeCard.addSubview(plainLabel("HUD size", x: 14, y: 74, w: labelW, bold: false))
-        hudSizeSlider = NSSlider(value: Settings.hudScale,
-                                 minValue: Settings.hudScaleRange.lowerBound,
-                                 maxValue: Settings.hudScaleRange.upperBound,
-                                 target: self, action: #selector(displaySlidersChanged))
-        hudSizeSlider.identifier = NSUserInterfaceItemIdentifier("hud-scale")
-        hudSizeSlider.frame = NSRect(x: sliderX, y: 73, width: sliderW, height: 20)
-        hudSizeSlider.isContinuous = true
-        sizeCard.addSubview(hudSizeSlider)
-        hudSizeVal = valueLabel(at: 73, x: valX, w: valW, into: sizeCard)
-        sizeCard.addSubview(hint("Size of the full dictation HUD (normal mode). 100% is today's full-width layout.",
-                                 y: 97, width: sizeCard.bounds.width - 28, x: 14))
-
-        sizeCard.addSubview(plainLabel("Spinner size", x: 14, y: 134, w: labelW, bold: false))
-        spinnerSizeSlider = NSSlider(value: Settings.hudSpinnerScale,
-                                     minValue: Settings.hudSpinnerScaleRange.lowerBound,
-                                     maxValue: Settings.hudSpinnerScaleRange.upperBound,
-                                     target: self, action: #selector(displaySlidersChanged))
-        spinnerSizeSlider.identifier = NSUserInterfaceItemIdentifier("hud-spinner-scale")
-        spinnerSizeSlider.frame = NSRect(x: sliderX, y: 133, width: sliderW, height: 20)
-        spinnerSizeSlider.isContinuous = true
-        sizeCard.addSubview(spinnerSizeSlider)
-        spinnerSizeVal = valueLabel(at: 133, x: valX, w: valW, into: sizeCard)
-        sizeCard.addSubview(hint("Size of the processing spinner — the ring shown while your dictation is being cleaned up.",
-                                 y: 157, width: sizeCard.bounds.width - 28, x: 14))
+        sizePreview = HUDSizePreviewView(
+            frame: NSRect(x: 14, y: 78, width: sizeCard.bounds.width - 28, height: 84))
+        sizeCard.addSubview(sizePreview)
 
         frame = NSRect(x: 0, y: 0, width: width, height: sizeCard.frame.maxY + 16)
-        refreshDisplayValueLabels()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -713,18 +640,10 @@ private final class AppearanceSettingsView: NSView {
         return field
     }
 
-    @objc private func displaySlidersChanged() {
-        Settings.hudScale = hudSizeSlider.doubleValue
-        Settings.hudPillScale = pillSizeSlider.doubleValue
-        Settings.hudSpinnerScale = spinnerSizeSlider.doubleValue
-        refreshDisplayValueLabels()
-    }
-
-    private func refreshDisplayValueLabels() {
-        guard hudSizeVal != nil, pillSizeVal != nil, spinnerSizeVal != nil else { return }
-        hudSizeVal.stringValue = "\(Int(round(Settings.hudScale * 100)))%"
-        pillSizeVal.stringValue = "\(Int(round(Settings.hudPillScale * 100)))%"
-        spinnerSizeVal.stringValue = "\(Int(round(Settings.hudSpinnerScale * 100)))%"
+    @objc private func uiSizeChanged() {
+        Settings.hudUIScale = uiSizeSlider.doubleValue
+        uiSizeVal.stringValue = "\(Int(round(Settings.hudUIScale * 100)))%"
+        sizePreview.needsDisplay = true
     }
 
     /// The color well changed (continuous, so this fires while the user drags in the color panel). Persist the
@@ -967,5 +886,42 @@ private final class ThemePreviewView: NSView {
             stroke.setStroke(); chip.lineWidth = 1; chip.stroke()
             x += chipW + gap
         }
+    }
+}
+
+/// A drawn preview of the HUD UI size: a mouse-pointer arrow beside the scope-pill capsule, both
+/// scaled by the live `Settings.hudUIScale`. Not a second HUD — just the relative size cue for the
+/// Appearance > UI size slider.
+private final class HUDSizePreviewView: NSView {
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        let scale = Settings.hudUIScale
+        let capsule = HUDSizePreviewMetrics.capsuleSize(forScale: scale)
+        let arrowH = HUDSizePreviewMetrics.arrowHeight(forScale: scale)
+        let step = round(arrowH * 0.5)
+        let groupH = step + capsule.height
+        let inset: CGFloat = 12
+        let tip = NSPoint(x: bounds.minX + inset, y: bounds.minY + round((bounds.height - groupH) / 2))
+
+        // Mouse-pointer arrow glyph: a filled polygon in phosphor green, tip at the group's top-left.
+        let arrow = NSBezierPath()
+        arrow.move(to: tip)
+        arrow.line(to: NSPoint(x: tip.x + 0.75 * arrowH, y: tip.y + 0.45 * arrowH))
+        arrow.line(to: NSPoint(x: tip.x + 0.45 * arrowH, y: tip.y + 0.45 * arrowH))
+        arrow.line(to: NSPoint(x: tip.x + 0.45 * arrowH, y: tip.y + arrowH))
+        arrow.line(to: NSPoint(x: tip.x + 0.20 * arrowH, y: tip.y + 0.62 * arrowH))
+        arrow.close()
+        Phosphor.green.setFill()
+        arrow.fill()
+
+        // The capsule, round(arrowH * 0.5) right of and below the tip.
+        let capOrigin = NSPoint(x: tip.x + step, y: tip.y + step)
+        let capPath = NSBezierPath(roundedRect: NSRect(origin: capOrigin, size: capsule),
+                                   xRadius: capsule.height / 2, yRadius: capsule.height / 2)
+        Phosphor.panelBG.withAlphaComponent(0.8).setFill()
+        capPath.fill()
+        Phosphor.green.withAlphaComponent(0.5).setStroke()
+        capPath.lineWidth = 1
+        capPath.stroke()
     }
 }
