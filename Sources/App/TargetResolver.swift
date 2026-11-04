@@ -8,18 +8,100 @@ struct DictationTarget {
     let pid: pid_t
     let label: String
     let isTextLike: Bool
+    let role: String
+    let capturedAt: Date
     /// Content-free Accessibility identity for a captured selection/caret. Selection transforms use it
     /// when the target exposes AXSelectedTextRange; dictation retry replacement validates the field only
     /// because the first raw landing necessarily moved this range.
     let selectedTextRange: CFRange?
 
     init(element: AXUIElement, pid: pid_t, label: String, isTextLike: Bool,
+         role: String = "", capturedAt: Date = Date(),
          selectedTextRange: CFRange? = nil) {
         self.element = element
         self.pid = pid
         self.label = label
         self.isTextLike = isTextLike
+        self.role = role
+        self.capturedAt = capturedAt
         self.selectedTextRange = selectedTextRange
+    }
+}
+
+/// A single read of the captured destination, taken fresh on every retry evaluation.
+struct LandingReading {
+    var failure: TargetResolver.CapturedTargetLandingOutcome.Failure? = nil
+    var targetIsFrontmost = true
+    var focusedPresent = true
+    var focusedIsTextLike = true
+    var focusedRole = "AXTextArea"
+    var sameElement = true
+    var selection = "match"
+    var frontBundle = "?"
+    var appActive = false
+    var keyWindow = false
+}
+
+/// The captured-target landing retry loop, with every outside effect injected so the
+/// self-test can drive the real flow with fakes and a synchronous scheduler.
+struct CapturedLandingDriver {
+    let allowRelaxed: Bool
+    let capturedRole: String
+    let read: () -> LandingReading
+    let refocus: () -> Void
+    let scheduleAfter: (TimeInterval, @escaping () -> Void) -> Void
+    let paste: (@escaping (Bool) -> Void) -> Void
+    let landed: () -> Void
+    let fallback: (TargetResolver.CapturedTargetLandingOutcome.Failure) -> Void
+    let elapsedSeconds: () -> Double
+    let log: (String) -> Void
+
+    func run() { evaluate(TargetResolver.refocusAttempts) }
+
+    private func evaluate(_ attemptsLeft: Int) {
+        let reading = read()
+        let step = TargetResolver.landingStep(
+            failure: reading.failure,
+            allowRelaxed: allowRelaxed,
+            targetIsFrontmost: reading.targetIsFrontmost,
+            focusedPresent: reading.focusedPresent,
+            focusedIsTextLike: reading.focusedIsTextLike,
+            focusedRole: reading.focusedRole,
+            capturedRole: capturedRole,
+            refocusAttemptsLeft: attemptsLeft
+        )
+        if let failure = reading.failure {
+            log(TargetResolver.landingDiagnosticLog(
+                prefix: "captured-target landing",
+                failureToken: failure.rawValue,
+                stepToken: step.logToken,
+                attemptsLeft: attemptsLeft,
+                elapsedSeconds: elapsedSeconds(),
+                frontBundle: reading.frontBundle,
+                frontIsTarget: reading.targetIsFrontmost,
+                focusedReadable: reading.focusedPresent,
+                sameElement: reading.sameElement,
+                selection: reading.selection,
+                capturedRole: capturedRole,
+                focusedRole: reading.focusedRole,
+                appActive: reading.appActive,
+                keyWindow: reading.keyWindow
+            ))
+        }
+        switch step {
+        case .pasteExact, .pasteRelaxed:
+            if step == .pasteRelaxed {
+                log("captured-target landing relaxed from=\(reading.failure?.rawValue ?? "none") roles=\(capturedRole)/\(reading.focusedRole)")
+            }
+            paste { sent in
+                if sent { landed() } else { fallback(.eventDispatchFailed) }
+            }
+        case .refocus:
+            if attemptsLeft == TargetResolver.refocusAttempts { refocus() }
+            scheduleAfter(TargetResolver.refocusStepSeconds) { self.evaluate(attemptsLeft - 1) }
+        case .clipboard(let failure):
+            fallback(failure)
+        }
     }
 }
 
@@ -71,6 +153,70 @@ enum TargetResolver {
                 return "\(failure.userMessage) — output copied to clipboard"
             }
         }
+    }
+
+    /// The pure retry decision, so the self-test can exercise every arm without AX.
+    enum LandingStep: Equatable {
+        case pasteExact
+        case pasteRelaxed
+        case refocus
+        case clipboard(CapturedTargetLandingOutcome.Failure)
+
+        var logToken: String {
+            switch self {
+            case .pasteExact: return "paste_exact"
+            case .pasteRelaxed: return "paste_relaxed"
+            case .refocus: return "refocus"
+            case .clipboard: return "clipboard"
+            }
+        }
+    }
+
+    static let refocusAttempts = 5
+    static let refocusStepSeconds: TimeInterval = 0.05
+
+    static func landingStep(
+        failure: CapturedTargetLandingOutcome.Failure?,
+        allowRelaxed: Bool,
+        targetIsFrontmost: Bool,
+        focusedPresent: Bool,
+        focusedIsTextLike: Bool,
+        focusedRole: String,
+        capturedRole: String,
+        refocusAttemptsLeft: Int
+    ) -> LandingStep {
+        guard let failure = failure else { return .pasteExact }
+        switch failure {
+        case .targetAppUnavailable, .eventDispatchFailed: return .clipboard(failure)
+        case .destinationChanged, .destinationUnverifiable, .selectionChanged: break
+        }
+        let needsRefocus = failure == .destinationChanged || failure == .destinationUnverifiable || !targetIsFrontmost
+        if needsRefocus && refocusAttemptsLeft > 0 { return .refocus }
+        let relaxedOK = allowRelaxed
+            && (failure == .destinationChanged || failure == .selectionChanged)
+            && targetIsFrontmost && focusedPresent && focusedIsTextLike
+            && !capturedRole.isEmpty && focusedRole == capturedRole
+        return relaxedOK ? .pasteRelaxed : .clipboard(failure)
+    }
+
+    static func landingDiagnosticLog(
+        prefix: String,
+        failureToken: String,
+        stepToken: String,
+        attemptsLeft: Int,
+        elapsedSeconds: Double,
+        frontBundle: String,
+        frontIsTarget: Bool,
+        focusedReadable: Bool,
+        sameElement: Bool,
+        selection: String,
+        capturedRole: String,
+        focusedRole: String,
+        appActive: Bool,
+        keyWindow: Bool
+    ) -> String {
+        func yn(_ b: Bool) -> String { b ? "yes" : "no" }
+        return "\(prefix) mismatch failure=\(failureToken) step=\(stepToken) attempts_left=\(attemptsLeft) elapsed_s=\(String(format: "%.1f", elapsedSeconds)) front=\(frontBundle) front_is_target=\(yn(frontIsTarget)) focused=\(yn(focusedReadable)) same=\(yn(sameElement)) selection=\(selection) captured_role=\(capturedRole.isEmpty ? "?" : capturedRole) focused_role=\(focusedRole.isEmpty ? "?" : focusedRole) app_active=\(yn(appActive)) key_window=\(yn(keyWindow))"
     }
 
     private static func axErr(_ e: AXError) -> String {
@@ -135,6 +281,67 @@ enum TargetResolver {
         return nil
     }
 
+    /// One fresh read of the captured destination for the retry driver. Reads exactly what
+    /// `validateAndLand` used to read, plus the focused element's role/text-likeness and the
+    /// diagnostic facts. Stays on the main queue exactly where the old reads were.
+    static func readLanding(target: DictationTarget, validateSelection: Bool) -> LandingReading {
+        var reading = LandingReading()
+        let runningApp = NSRunningApplication(processIdentifier: target.pid)
+        let appIsRunning = runningApp.map { !$0.isTerminated } ?? false
+        var elementPID: pid_t = 0
+        let elementIdentityAvailable = AXUIElementGetPid(target.element, &elementPID) == .success
+            && elementPID == target.pid
+        let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
+        reading.targetIsFrontmost = isFrontmost
+        let focused = isFrontmost ? focusedElement(in: target.pid) : nil
+        reading.focusedPresent = focused != nil
+        reading.sameElement = focused.map { CFEqual($0, target.element) } ?? false
+
+        if let focused = focused {
+            var roleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &roleRef)
+            let role = (roleRef as? String) ?? ""
+            reading.focusedRole = role
+            var settable: DarwinBoolean = false
+            AXUIElementIsAttributeSettable(focused, kAXValueAttribute as CFString, &settable)
+            reading.focusedIsTextLike = textRoles.contains(role) || settable.boolValue
+        } else {
+            reading.focusedRole = ""
+            reading.focusedIsTextLike = false
+        }
+
+        let expectedRange = validateSelection ? target.selectedTextRange : nil
+        let currentRange = focused.flatMap { selectedTextRange(in: $0) }
+        let selectionMatches = expectedRange.flatMap { expected in
+            currentRange.map { current in
+                expected.location == current.location && expected.length == current.length
+            }
+        } ?? false
+        if expectedRange == nil {
+            reading.selection = "skipped"
+        } else if currentRange == nil {
+            reading.selection = "unreadable"
+        } else if selectionMatches {
+            reading.selection = "match"
+        } else {
+            reading.selection = "moved"
+        }
+
+        reading.failure = capturedTargetValidation(
+            appIsRunning: appIsRunning,
+            elementIdentityAvailable: elementIdentityAvailable,
+            focusedDestinationAvailable: focused != nil,
+            sameElement: reading.sameElement,
+            selectionIdentityRequired: expectedRange != nil,
+            selectionIdentityAvailable: currentRange != nil,
+            selectionMatches: selectionMatches
+        )
+        reading.frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+        reading.appActive = NSApp.isActive
+        reading.keyWindow = NSApp.keyWindow != nil
+        return reading
+    }
+
     static func captureFocused() -> DictationTarget? {
         var element: AXUIElement?
 
@@ -173,6 +380,7 @@ enum TargetResolver {
         let label = "\(appName) — \(roleDesc.isEmpty ? "field" : roleDesc)"
         Log.write("AX capture OK role=\(role.isEmpty ? "?" : role) textLike=\(isTextLike) app=\(appName)")
         return DictationTarget(element: element, pid: pid, label: label, isTextLike: isTextLike,
+                               role: role, capturedAt: Date(),
                                selectedTextRange: selectedTextRange(in: element))
     }
 
@@ -242,6 +450,7 @@ enum TargetResolver {
         completion: @escaping (CapturedTargetLandingOutcome) -> Void
     ) {
         performCapturedTargetLanding(text, target: target, validateSelection: true,
+                                     allowRelaxed: true,
                                      operation: { done in done(pasteIntoFocus(text)) },
                                      completion: completion)
     }
@@ -336,6 +545,7 @@ enum TargetResolver {
         completion: @escaping (CapturedTargetLandingOutcome) -> Void
     ) {
         performCapturedTargetLanding(text, target: target, validateSelection: false,
+                                     allowRelaxed: false,
                                      operation: { done in
                                          undoLastPasteAndPasteRaw(text, completion: done)
                                      },
@@ -346,6 +556,7 @@ enum TargetResolver {
         _ text: String,
         target: DictationTarget,
         validateSelection: Bool,
+        allowRelaxed: Bool,
         operation: @escaping (@escaping (Bool) -> Void) -> Void,
         completion: @escaping (CapturedTargetLandingOutcome) -> Void
     ) {
@@ -357,42 +568,18 @@ enum TargetResolver {
         }
 
         let validateAndLand = {
-            let runningApp = NSRunningApplication(processIdentifier: target.pid)
-            let appIsRunning = runningApp.map { !$0.isTerminated } ?? false
-            var elementPID: pid_t = 0
-            let elementIdentityAvailable = AXUIElementGetPid(target.element, &elementPID) == .success
-                && elementPID == target.pid
-            let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
-            let focused = isFrontmost ? focusedElement(in: target.pid) : nil
-            let sameElement = focused.map { CFEqual($0, target.element) } ?? false
-
-            let expectedRange = validateSelection ? target.selectedTextRange : nil
-            let currentRange = focused.flatMap { selectedTextRange(in: $0) }
-            let selectionMatches = expectedRange.flatMap { expected in
-                currentRange.map { current in
-                    expected.location == current.location && expected.length == current.length
-                }
-            } ?? false
-            if let failure = capturedTargetValidation(
-                appIsRunning: appIsRunning,
-                elementIdentityAvailable: elementIdentityAvailable,
-                focusedDestinationAvailable: focused != nil,
-                sameElement: sameElement,
-                selectionIdentityRequired: expectedRange != nil,
-                selectionIdentityAvailable: currentRange != nil,
-                selectionMatches: selectionMatches
-            ) {
-                clipboardFallback(failure)
-                return
-            }
-
-            operation { sent in
-                guard sent else {
-                    clipboardFallback(.eventDispatchFailed)
-                    return
-                }
-                completion(.landed)
-            }
+            CapturedLandingDriver(
+                allowRelaxed: allowRelaxed,
+                capturedRole: target.role,
+                read: { readLanding(target: target, validateSelection: validateSelection) },
+                refocus: { _ = AXUIElementSetAttributeValue(target.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) },
+                scheduleAfter: { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) },
+                paste: operation,
+                landed: { completion(.landed) },
+                fallback: clipboardFallback,
+                elapsedSeconds: { Date().timeIntervalSince(target.capturedAt) },
+                log: { Log.write($0) }
+            ).run()
         }
 
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated else {

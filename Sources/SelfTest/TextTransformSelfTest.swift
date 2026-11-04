@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import ApplicationServices
 
 /// Pure/scratch-only A2 coverage for the provider-neutral dispatch seam and Claude process transport.
 /// No installed provider, credentials, preferences, live app, or user data is consulted.
@@ -24,6 +25,7 @@ enum TextTransformSelfTest {
         checkInertArming(reporter.record, okText: okText, isUnavailable: isUnavailable)
         checkPendingRetryOwnership(reporter.record)
         checkCapturedTargetRetryLanding(reporter.record)
+        checkLandingStep(reporter.record)
         checkCustomAndSearchRequestRoutes(reporter.record)
         checkClaudePrivateTransport(reporter.record, okText: okText)
         checkTransientExitHelperCleanup(reporter.record)
@@ -478,6 +480,215 @@ enum TextTransformSelfTest {
               DictationController.shouldRecordForeignRetryLanding(.landed)
                 && !DictationController.shouldRecordForeignRetryLanding(deadOutcome)
                 && !DictationController.shouldRecordForeignRetryLanding(clipboardOutcome))
+    }
+
+    private static func checkLandingStep(_ check: (String, Bool) -> Void) {
+        print("--- captured-target landing step state machine ---")
+
+        func drive(
+            allowRelaxed: Bool,
+            capturedRole: String,
+            readings: [LandingReading],
+            pasteSucceeds: Bool
+        ) -> (reads: Int, refocuses: Int, schedules: Int, delays: [TimeInterval], pastes: Int,
+              landed: Int, fallbacks: [TargetResolver.CapturedTargetLandingOutcome.Failure], logLines: [String]) {
+            var reads = 0
+            var refocuses = 0
+            var schedules = 0
+            var delays: [TimeInterval] = []
+            var pastes = 0
+            var landed = 0
+            var fallbacks: [TargetResolver.CapturedTargetLandingOutcome.Failure] = []
+            var logLines: [String] = []
+            var index = 0
+            let driver = CapturedLandingDriver(
+                allowRelaxed: allowRelaxed,
+                capturedRole: capturedRole,
+                read: {
+                    reads += 1
+                    defer { index += 1 }
+                    return readings[min(index, readings.count - 1)]
+                },
+                refocus: { refocuses += 1 },
+                scheduleAfter: { delay, work in
+                    schedules += 1
+                    delays.append(delay)
+                    work()
+                },
+                paste: { done in
+                    pastes += 1
+                    done(pasteSucceeds)
+                },
+                landed: { landed += 1 },
+                fallback: { fallbacks.append($0) },
+                elapsedSeconds: { 12.3 },
+                log: { logLines.append($0) }
+            )
+            driver.run()
+            return (reads, refocuses, schedules, delays, pastes, landed, fallbacks, logLines)
+        }
+
+        var movedA = LandingReading()
+        movedA.failure = .destinationChanged
+
+        var r1reading = LandingReading()
+        r1reading.focusedIsTextLike = false
+        r1reading.focusedRole = "AXGroup"
+        let r1 = drive(allowRelaxed: false, capturedRole: "AXTextArea", readings: [r1reading], pasteSucceeds: true)
+        check("landing: a field that validates pastes at once (today's Claude case)",
+              r1.reads == 1 && r1.refocuses == 0 && r1.schedules == 0 && r1.pastes == 1
+                && r1.landed == 1 && r1.fallbacks.isEmpty && r1.logLines.isEmpty)
+
+        var movedB = LandingReading()
+        movedB.failure = .destinationChanged
+        let r2 = drive(allowRelaxed: true, capturedRole: "AXTextArea",
+                       readings: [movedA, movedB, LandingReading()], pasteSucceeds: true)
+        check("landing: a moved field refocuses once and pastes when a later read matches",
+              r2.reads == 3 && r2.refocuses == 1 && r2.schedules == 2
+                && r2.delays.allSatisfy { $0 == 0.05 } && r2.pastes == 1 && r2.landed == 1
+                && r2.fallbacks.isEmpty && !r2.logLines.contains { $0.contains("relaxed") })
+
+        let r3 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [movedA], pasteSucceeds: true)
+        check("landing: with the attempts used a moved field in the same role pastes relaxed",
+              r3.reads == 6 && r3.refocuses == 1 && r3.schedules == 5
+                && r3.delays.allSatisfy { $0 == 0.05 } && r3.pastes == 1 && r3.landed == 1
+                && r3.fallbacks.isEmpty
+                && r3.logLines.filter { $0.contains("step=refocus") }.count == 5
+                && r3.logLines.contains { $0.contains("step=paste_relaxed") }
+                && r3.logLines.contains { $0.contains("attempts_left=5") }
+                && r3.logLines.contains { $0.contains("attempts_left=0") }
+                && r3.logLines.contains { $0 == "captured-target landing relaxed from=destination_changed roles=AXTextArea/AXTextArea" })
+
+        var webRole = LandingReading()
+        webRole.failure = .destinationChanged
+        webRole.focusedRole = "AXWebArea"
+        let r4 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [webRole], pasteSucceeds: true)
+        check("landing: a different role keeps the clipboard",
+              r4.reads == 6 && r4.refocuses == 1 && r4.pastes == 0
+                && r4.fallbacks == [.destinationChanged] && r4.landed == 0)
+
+        var nonText = LandingReading()
+        nonText.failure = .destinationChanged
+        nonText.focusedIsTextLike = false
+        let r5 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [nonText], pasteSucceeds: true)
+        check("landing: a non-text field keeps the clipboard",
+              r5.reads == 6 && r5.pastes == 0 && r5.fallbacks == [.destinationChanged])
+
+        let r6 = drive(allowRelaxed: false, capturedRole: "AXTextArea", readings: [movedA], pasteSucceeds: true)
+        check("landing: a caller that forbids relaxing keeps the clipboard (replaceLastPaste)",
+              r6.reads == 6 && r6.pastes == 0 && r6.fallbacks == [.destinationChanged] && r6.landed == 0)
+
+        var dead = LandingReading()
+        dead.failure = .targetAppUnavailable
+        let r7 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [dead], pasteSucceeds: true)
+        check("landing: a dead app goes to the clipboard on the first read",
+              r7.reads == 1 && r7.refocuses == 0 && r7.schedules == 0 && r7.pastes == 0
+                && r7.fallbacks == [.targetAppUnavailable] && r7.landed == 0)
+
+        var deadMid = LandingReading()
+        deadMid.failure = .targetAppUnavailable
+        let r8 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [movedA, deadMid], pasteSucceeds: true)
+        check("landing: an app that dies mid-retry goes to the clipboard",
+              r8.reads == 2 && r8.pastes == 0 && r8.fallbacks == [.targetAppUnavailable])
+
+        var unverifiable = LandingReading()
+        unverifiable.failure = .destinationUnverifiable
+        let r9 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [unverifiable], pasteSucceeds: true)
+        check("landing: an unreadable field is never relaxed",
+              r9.reads == 6 && r9.pastes == 0 && r9.fallbacks == [.destinationUnverifiable])
+
+        var notFront = LandingReading()
+        notFront.failure = .destinationChanged
+        notFront.targetIsFrontmost = false
+        let r10a = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [notFront], pasteSucceeds: true)
+        var switched = LandingReading()
+        switched.failure = .destinationUnverifiable
+        switched.targetIsFrontmost = false
+        let r10b = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [movedA, switched], pasteSucceeds: true)
+        check("landing: a target that is not frontmost is never relaxed",
+              r10a.reads == 6 && r10a.pastes == 0 && r10a.fallbacks == [.destinationChanged]
+                && r10b.reads == 6 && r10b.refocuses == 1 && r10b.pastes == 0
+                && r10b.fallbacks == [.destinationUnverifiable])
+
+        var selectionChanged = LandingReading()
+        selectionChanged.failure = .selectionChanged
+        let r11a = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [selectionChanged], pasteSucceeds: true)
+        var selectionNoFocus = LandingReading()
+        selectionNoFocus.failure = .selectionChanged
+        selectionNoFocus.focusedPresent = false
+        let r11b = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [selectionNoFocus], pasteSucceeds: true)
+        check("landing: a moved selection pastes without waiting, but only with a focused field",
+              r11a.reads == 1 && r11a.refocuses == 0 && r11a.schedules == 0 && r11a.pastes == 1
+                && r11a.landed == 1
+                && r11a.logLines.contains { $0 == "captured-target landing relaxed from=selection_changed roles=AXTextArea/AXTextArea" }
+                && r11b.reads == 1 && r11b.pastes == 0 && r11b.fallbacks == [.selectionChanged])
+
+        var emptyRole = LandingReading()
+        emptyRole.failure = .destinationChanged
+        emptyRole.focusedRole = ""
+        let r12 = drive(allowRelaxed: true, capturedRole: "", readings: [emptyRole], pasteSucceeds: true)
+        check("landing: an unknown captured role is never relaxed",
+              r12.reads == 6 && r12.pastes == 0 && r12.fallbacks == [.destinationChanged])
+
+        let r13 = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [LandingReading()], pasteSucceeds: false)
+        check("landing: a paste that cannot be sent falls back once",
+              r13.pastes == 1 && r13.landed == 0 && r13.fallbacks == [.eventDispatchFailed])
+
+        let scenarios: [(reads: Int, schedules: Int, landed: Int, fallbacks: Int)] = [
+            (r1.reads, r1.schedules, r1.landed, r1.fallbacks.count),
+            (r2.reads, r2.schedules, r2.landed, r2.fallbacks.count),
+            (r3.reads, r3.schedules, r3.landed, r3.fallbacks.count),
+            (r4.reads, r4.schedules, r4.landed, r4.fallbacks.count),
+            (r5.reads, r5.schedules, r5.landed, r5.fallbacks.count),
+            (r6.reads, r6.schedules, r6.landed, r6.fallbacks.count),
+            (r7.reads, r7.schedules, r7.landed, r7.fallbacks.count),
+            (r8.reads, r8.schedules, r8.landed, r8.fallbacks.count),
+            (r9.reads, r9.schedules, r9.landed, r9.fallbacks.count),
+            (r10a.reads, r10a.schedules, r10a.landed, r10a.fallbacks.count),
+            (r10b.reads, r10b.schedules, r10b.landed, r10b.fallbacks.count),
+            (r11a.reads, r11a.schedules, r11a.landed, r11a.fallbacks.count),
+            (r11b.reads, r11b.schedules, r11b.landed, r11b.fallbacks.count),
+            (r12.reads, r12.schedules, r12.landed, r12.fallbacks.count),
+            (r13.reads, r13.schedules, r13.landed, r13.fallbacks.count),
+        ]
+        check("landing: every scenario completes exactly once and schedules nothing after",
+              scenarios.allSatisfy { $0.landed + $0.fallbacks == 1 && $0.schedules == $0.reads - 1 })
+
+        let expectedDiag = "captured-target landing mismatch failure=destination_changed step=refocus attempts_left=5 elapsed_s=12.3 front=com.test.app front_is_target=yes focused=yes same=yes selection=match captured_role=AXTextArea focused_role=AXTextArea app_active=no key_window=no"
+        let diag = TargetResolver.landingDiagnosticLog(
+            prefix: "captured-target landing", failureToken: "destination_changed", stepToken: "refocus",
+            attemptsLeft: 5, elapsedSeconds: 12.3, frontBundle: "com.test.app", frontIsTarget: true,
+            focusedReadable: true, sameElement: true, selection: "match", capturedRole: "AXTextArea",
+            focusedRole: "AXTextArea", appActive: false, keyWindow: false)
+        var diagReading = LandingReading()
+        diagReading.failure = .destinationChanged
+        diagReading.frontBundle = "com.test.app"
+        let rDiag = drive(allowRelaxed: true, capturedRole: "AXTextArea", readings: [diagReading], pasteSucceeds: true)
+        check("landing: the diagnostic line is content-free and complete",
+              diag == expectedDiag
+                && TargetResolver.LandingStep.pasteExact.logToken == "paste_exact"
+                && TargetResolver.LandingStep.pasteRelaxed.logToken == "paste_relaxed"
+                && TargetResolver.LandingStep.refocus.logToken == "refocus"
+                && TargetResolver.LandingStep.clipboard(.destinationChanged).logToken == "clipboard"
+                && rDiag.logLines.first == expectedDiag)
+
+        let noRoleTarget = DictationTarget(element: AXUIElementCreateSystemWide(), pid: 1, label: "x", isTextLike: true)
+        check("landing: a target built without a role keeps working", noRoleTarget.role == "")
+
+        let dead17 = TargetResolver.capturedTargetValidation(
+            appIsRunning: false, elementIdentityAvailable: false, focusedDestinationAvailable: false,
+            sameElement: false, selectionIdentityRequired: false, selectionIdentityAvailable: false,
+            selectionMatches: false)
+        let moved17 = TargetResolver.capturedTargetValidation(
+            appIsRunning: true, elementIdentityAvailable: true, focusedDestinationAvailable: true,
+            sameElement: false, selectionIdentityRequired: true, selectionIdentityAvailable: true,
+            selectionMatches: true)
+        let valid17 = TargetResolver.capturedTargetValidation(
+            appIsRunning: true, elementIdentityAvailable: true, focusedDestinationAvailable: true,
+            sameElement: true, selectionIdentityRequired: true, selectionIdentityAvailable: true,
+            selectionMatches: true)
+        check("landing: the existing validation outcomes still classify",
+              dead17 == .targetAppUnavailable && moved17 == .destinationChanged && valid17 == nil)
     }
 
     private static func checkCustomAndSearchRequestRoutes(_ check: (String, Bool) -> Void) {
