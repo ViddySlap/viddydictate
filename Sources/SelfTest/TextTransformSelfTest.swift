@@ -26,6 +26,7 @@ enum TextTransformSelfTest {
         checkPendingRetryOwnership(reporter.record)
         checkCapturedTargetRetryLanding(reporter.record)
         checkLandingStep(reporter.record)
+        checkPasteVerify(reporter.record)
         checkCustomAndSearchRequestRoutes(reporter.record)
         checkClaudePrivateTransport(reporter.record, okText: okText)
         checkTransientExitHelperCleanup(reporter.record)
@@ -689,6 +690,388 @@ enum TextTransformSelfTest {
             selectionMatches: true)
         check("landing: the existing validation outcomes still classify",
               dead17 == .targetAppUnavailable && moved17 == .destinationChanged && valid17 == nil)
+    }
+
+    private static func checkPasteVerify(_ check: (String, Bool) -> Void) {
+        print("--- verified focus paste ---")
+
+        typealias PasteResult = (
+            result: Bool, posts: Int, reads: Int, delays: [TimeInterval],
+            lines: [String], events: [String], restores: Int, giveUps: Int, seen: Set<String>
+        )
+
+        func S(_ text: String) -> PasteFieldState {
+            PasteFieldState(value: text)
+        }
+
+        func drivePaste(
+            delivered: String = "world",
+            states: [PasteFieldState],
+            postResults: [Bool] = [true],
+            seen: Bool = false,
+            canContinue: [Bool] = [true],
+            pasteboardUnchanged: Bool = true
+        ) -> PasteResult {
+            var stateIndex = 0
+            var postIndex = 0
+            var continueIndex = 0
+            var posts = 0
+            var reads = 0
+            var scheduleCount = 0
+            var delays: [TimeInterval] = []
+            var lines: [String] = []
+            var events: [String] = []
+            var restores = 0
+            var giveUps = 0
+            var seenApps = seen ? Set(["app"]) : Set<String>()
+            let driver = PasteVerifyDriver(
+                delivered: delivered,
+                readState: {
+                    reads += 1
+                    events.append("read")
+                    let state = states[min(stateIndex, states.count - 1)]
+                    stateIndex += 1
+                    return state
+                },
+                postPaste: {
+                    posts += 1
+                    events.append("post")
+                    let result = postResults[min(postIndex, postResults.count - 1)]
+                    postIndex += 1
+                    return result
+                },
+                scheduleAfter: { delay, work in
+                    scheduleCount += 1
+                    delays.append(delay)
+                    events.append("sched(\(delay))")
+                    if scheduleCount <= 40 { work() }
+                },
+                pasteboardUnchanged: { pasteboardUnchanged },
+                canContinue: {
+                    let result = canContinue[min(continueIndex, canContinue.count - 1)]
+                    continueIndex += 1
+                    return result
+                },
+                seenLive: { seenApps.contains("app") },
+                markSeenLive: { seenApps.insert("app") },
+                restore: {
+                    restores += 1
+                    events.append("restore")
+                },
+                onGiveUp: { giveUps += 1 },
+                log: {
+                    lines.append($0)
+                    events.append("log")
+                })
+            let result = driver.run()
+            return (result, posts, reads, delays, lines, events, restores, giveUps, seenApps)
+        }
+
+        // ROWS BEGIN
+        let r1 = drivePaste(states: [S("hello"), S("hello world")], seen: true)
+        let ok1 = r1.result && r1.posts == 1 && r1.reads == 2
+            && r1.delays == [0.7, 0.35]
+            && r1.lines == ["paste verify: readable=true landed=true retries=0 seen=true wait_ms=1050"]
+            && r1.restores == 1 && r1.giveUps == 0
+        check("paste verify: a first check that finds the text pastes nothing more", ok1)
+
+        var ok2 = true
+        for k in 1...4 {
+            let states = Array(repeating: S("hello"), count: 2 * k + 1) + [S("hello world")]
+            let r2k = drivePaste(states: states, seen: true)
+            let expected = "paste verify: readable=true landed=true retries=\(k) seen=true wait_ms=\((k + 1) * 700 + k * 150 + 350)"
+            let expectedDelays = Array(repeating: [0.7, 0.15], count: k).flatMap { $0 } + [0.7, 0.35]
+            ok2 = ok2 && r2k.posts == k + 1 && r2k.reads == 2 * k + 2
+                && r2k.delays == expectedDelays
+                && r2k.lines == [expected] && r2k.restores == 1 && r2k.giveUps == 0
+                && r2k.events.last == "restore"
+        }
+        check("paste verify: an unchanged field is pasted again until the text lands, k retries", ok2)
+
+        let r3 = drivePaste(states: [S("hello")], seen: true)
+        let ok3 = r3.result && r3.posts == 5 && r3.reads == 10
+            && r3.delays == [0.7, 0.15, 0.7, 0.15, 0.7, 0.15, 0.7, 0.15, 0.7]
+            && r3.lines == ["paste verify: readable=true landed=false retries=4 seen=true wait_ms=4100",
+                            "paste verify: gave_up=true"]
+            && r3.restores == 0 && r3.giveUps == 1
+        check("paste verify: a seen app that never shows the text gets 4 retries and 5 pastes, then gives up", ok3)
+
+        let r4 = drivePaste(states: [S("hello")], seen: false)
+        let ok4 = r4.posts == 2 && r4.reads == 4
+            && r4.delays == [0.7, 0.15, 0.7]
+            && r4.lines == ["paste verify: readable=true landed=false retries=1 seen=false wait_ms=1550",
+                            "paste verify: gave_up=true"]
+            && r4.restores == 0 && r4.giveUps == 1
+        check("paste verify: an unseen app gets 1 retry at most, then gives up", ok4)
+
+        let r5a = drivePaste(states: [S("hello"), S("hello world")], seen: false)
+        let r5b = drivePaste(
+            delivered: "world peace now",
+            states: [S("hello"), S("Hello, World Peace Now!")],
+            seen: false)
+        let r5c = drivePaste(states: [S("hello")], seen: false)
+        let ok5 = r5a.seen.contains("app")
+            && r5a.lines.first?.contains("seen=true") == true
+            && r5b.posts == 1 && r5b.lines.first?.contains("landed=true retries=0 seen=false") == true
+            && r5b.seen.isEmpty && r5c.seen.isEmpty
+        check("paste verify: a verified landing marks the app seen live, a grown field alone does not", ok5)
+
+        let r6 = drivePaste(
+            states: [S("hello"), S("hello"), S("hello"), PasteFieldState(value: nil)],
+            seen: true)
+        let ok6 = r6.posts == 2 && r6.reads == 4
+            && r6.lines == ["paste verify: readable=false landed=false retries=1 seen=true wait_ms=1900"]
+            && r6.delays == [0.7, 0.15, 0.7, 0.35] && r6.restores == 1 && r6.giveUps == 0
+        check("paste verify: a later unreadable read stops the loop and restores", ok6)
+
+        let r7 = drivePaste(
+            delivered: "the quick brown fox",
+            states: [S("hello"), S("hellos")],
+            seen: true)
+        let ok7 = r7.posts == 5 && r7.lines.contains { $0.contains("landed=false retries=4") }
+            && r7.giveUps == 1
+        check("paste verify: a user typing elsewhere in the field does not count as landed", ok7)
+
+        let rewritten = "Line One / Line Two / Line Three"
+        let r8 = drivePaste(
+            delivered: "line one\nline two\nline three",
+            states: [S(""), S(rewritten)],
+            seen: false)
+        let ok8 = r8.posts == 1 && r8.lines.first?.contains("landed=true retries=0") == true
+            && r8.restores == 1 && r8.seen.isEmpty
+        check("paste verify: an editor that rewrites the text counts as landed when the field grew by half", ok8)
+
+        let r9a = drivePaste(
+            states: [S("hello"), PasteFieldState(value: "hello", elementSame: false)],
+            seen: true)
+        let r9b = drivePaste(
+            states: [S("hello"), PasteFieldState(value: "hello", appSame: false)],
+            seen: true)
+        let r9c = drivePaste(
+            states: [S("hello"), S("hello"), S("hello"),
+                     PasteFieldState(value: "hello", elementSame: false)],
+            seen: true)
+        let ok9 = r9a.posts == 1 && r9a.restores == 1
+            && r9a.lines.first?.contains("readable=true landed=false retries=0 seen=true wait_ms=1050") == true
+            && r9b.posts == 1 && r9b.restores == 1
+            && r9c.posts == 2 && r9c.lines.first?.contains("retries=1") == true
+        check("paste verify: a changed element or a changed app stops the loop", ok9)
+
+        let r10a = drivePaste(states: [PasteFieldState(value: nil)])
+        let r10b = drivePaste(states: [PasteFieldState(value: "hello", elementSame: false)])
+        let ok10 = r10a.result && r10a.posts == 1 && r10a.reads == 1
+            && r10a.delays == [0.35]
+            && r10a.lines == ["paste verify: readable=false landed=false retries=0 seen=false wait_ms=350"]
+            && r10a.restores == 1 && r10b.reads == 1 && r10b.restores == 1
+        check("paste verify: an unreadable first read means no retry and today's restore", ok10)
+
+        let ok11 = TargetResolver.pasteVerifyBound(String(repeating: "a", count: 200_000)) != nil
+            && TargetResolver.pasteVerifyBound(String(repeating: "a", count: 200_001)) == nil
+            && TargetResolver.pasteVerifyBound(nil) == nil
+        check("paste verify: a value over the bound is unreadable", ok11)
+
+        let longText = String(repeating: "A", count: 20) + " "
+            + String(repeating: "m", count: 30) + " "
+            + String(repeating: "Z", count: 20)
+        let headOnly = "hello " + String(repeating: "A", count: 20)
+        let fullLong = "hello " + longText
+        let r12 = drivePaste(delivered: longText, states: [S("hello"), S(headOnly)], seen: true)
+        let ok12 = !TargetResolver.pasteVerifyLanded(before: "hello", after: headOnly, delivered: longText)
+            && TargetResolver.pasteVerifyLanded(before: "hello", after: fullLong, delivered: longText)
+            && r12.posts == 5 && r12.giveUps == 1
+        check("paste verify: a long text needs both probes to rise", ok12)
+
+        let selectedBefore = String(repeating: "Q", count: 50) + " selected part here"
+        let selectedAfter = String(repeating: "Q", count: 50) + " foo\nbar"
+        let ok13 = TargetResolver.pasteVerifyCollapse("  a \n\t b  ") == "a b"
+            && TargetResolver.pasteVerifyCollapse("") == ""
+            && TargetResolver.pasteVerifyCollapse(" \n ") == ""
+            && TargetResolver.pasteVerifyProbes("") == []
+            && TargetResolver.pasteVerifyProbes(String(repeating: "a", count: 40)) == [String(repeating: "a", count: 40)]
+            && TargetResolver.pasteVerifyProbes(String(repeating: "a", count: 41)) == [
+                String(repeating: "a", count: 20), String(repeating: "a", count: 20)]
+            && TargetResolver.pasteVerifyProbes("a  b") == ["a b"]
+            && TargetResolver.pasteVerifyCount(of: "aa", in: "aaaa") == 2
+            && TargetResolver.pasteVerifyCount(of: "", in: "abc") == 0
+            && TargetResolver.pasteVerifyCount(of: "y", in: "x") == 0
+            && TargetResolver.pasteVerifyLanded(before: "hello", after: "hello world", delivered: "world")
+            && !TargetResolver.pasteVerifyLanded(before: "hello", after: "hellos",
+                                                 delivered: "the quick brown fox")
+            && TargetResolver.pasteVerifyLanded(before: selectedBefore, after: selectedAfter, delivered: "foo bar")
+            && TargetResolver.pasteVerifyLanded(before: "", after: "x", delivered: "")
+            && TargetResolver.pasteVerifyLanded(before: "", after: "x", delivered: "  \n")
+            && !TargetResolver.pasteVerifyLanded(before: "hello", after: "hello", delivered: "world")
+            && !TargetResolver.pasteVerifyLanded(before: "hello world", after: "hello wor", delivered: "world")
+            && !TargetResolver.pasteVerifyProbesRose(before: "hello", after: "hello", delivered: "")
+        check("paste verify: the landed decision and its helpers, table", ok13)
+
+        let r14 = drivePaste(
+            states: Array(repeating: S("hello"), count: 5) + [S("hello world")],
+            seen: true)
+        let restoreIndex = r14.events.firstIndex(of: "restore") ?? -1
+        let lastPost = r14.events.lastIndex(of: "post") ?? -1
+        let reportIndex = r14.events.lastIndex(of: "log") ?? -1
+        let ok14 = r14.restores == 1 && restoreIndex > lastPost && restoreIndex > reportIndex
+            && restoreIndex > 0 && r14.events[restoreIndex - 1] == "sched(0.35)"
+        check("paste verify: the clipboard is restored once, after the loop plus 0.35 s", ok14)
+
+        let r15a = drivePaste(states: [S("hello")], seen: true, canContinue: [false])
+        let r15b = drivePaste(states: [S("hello")], seen: true, canContinue: [true, false])
+        let ok15 = r15a.posts == 1 && r15a.reads == 3
+            && r15a.delays == [0.7, 0.15]
+            && r15a.lines == ["paste verify: readable=true landed=false retries=0 seen=true wait_ms=850",
+                              "paste verify: stopped=true"]
+            && r15a.restores == 0 && r15a.giveUps == 0
+            && r15b.posts == 2 && r15b.lines.contains { $0.contains("retries=1") && $0.contains("wait_ms=1700") }
+            && r15b.restores == 0
+        check("paste verify: a changed pasteboard before a retry stops the loop with no restore", ok15)
+
+        let r16 = drivePaste(
+            states: [S("hello"), S("hello world")], seen: true, pasteboardUnchanged: false)
+        let ok16 = r16.restores == 0
+            && r16.lines.filter { $0 == "paste clipboard restore skipped: pasteboard changed" }.count == 1
+            && r16.delays == [0.7, 0.35]
+        check("paste verify: a changed pasteboard before the restore skips it and logs it", ok16)
+
+        let r17 = drivePaste(states: [S("hello")], postResults: [false])
+        let ok17 = !r17.result && r17.posts == 1 && r17.reads == 1
+            && r17.delays.isEmpty && r17.lines.isEmpty && r17.restores == 0
+        check("paste verify: a first paste that cannot be sent returns false and schedules nothing", ok17)
+
+        let r18 = drivePaste(states: [S("hello")], postResults: [true, false], seen: true)
+        let ok18 = r18.posts == 2
+            && r18.lines.contains { $0.contains("retries=0") && $0.contains("wait_ms=850") }
+            && r18.lines.contains("paste verify: gave_up=true")
+            && r18.restores == 0 && r18.giveUps == 1
+        check("paste verify: a retry that cannot be sent gives up", ok18)
+
+        let ok19 = r3.restores == 0 && r3.giveUps == 1
+            && r3.lines.filter { $0 == "paste verify: gave_up=true" }.count == 1
+            && !r3.events.contains("sched(0.35)")
+            && r3.events.last == "log"
+        check("paste verify: giving up keeps the clipboard, logs gave_up=true and calls onGiveUp once", ok19)
+
+        func contentFree(_ lines: [String]) -> Bool {
+            lines.allSatisfy {
+                if ["paste verify: gave_up=true", "paste verify: stopped=true",
+                    "paste verify: ambiguous=true",
+                    "paste clipboard restore skipped: pasteboard changed"].contains($0) {
+                    return true
+                }
+                return $0.range(of: #"^paste verify: readable=(true|false) landed=(true|false) retries=[0-4] seen=(true|false) wait_ms=[0-9]+$"#,
+                                options: .regularExpression) != nil
+            }
+        }
+        let secret3 = drivePaste(delivered: "SECRETTEXT123", states: [S("PRIVATEFIELD")], seen: true)
+        let secret4 = drivePaste(delivered: "SECRETTEXT123", states: [S("PRIVATEFIELD")], seen: false)
+        let secret1 = drivePaste(delivered: "SECRETTEXT123",
+                                 states: [S("PRIVATEFIELD"), S("PRIVATEFIELD SECRETTEXT123")],
+                                 seen: true)
+        let secretLines = secret3.lines + secret4.lines + secret1.lines
+        let ok20 = !secretLines.joined(separator: "\n").contains("SECRET")
+            && !secretLines.joined(separator: "\n").contains("PRIVATE")
+            && contentFree(secretLines)
+        check("paste verify: the log lines are content-free and exact", ok20)
+
+        let ok21 = r1.events.count > 1 && r1.events[0] == "read" && r1.events[1] == "post"
+        check("paste verify: the first read happens before the first paste", ok21)
+
+        let ok22 = TargetResolver.pasteVerifyCheckSeconds == 0.7
+            && TargetResolver.pasteVerifyRestoreSeconds == 0.35
+            && TargetResolver.pasteVerifySettleSeconds == 0.15
+            && TargetResolver.pasteVerifyMaxRetries == 4
+            && TargetResolver.pasteVerifyMaxRetriesUnseen == 1
+            && TargetResolver.pasteVerifyMaxValueChars == 200_000
+            && TargetResolver.pasteVerifyProbeWholeMax == 40
+            && TargetResolver.pasteVerifyProbeEdge == 20
+            && TargetResolver.pasteVerifyLog(
+                readable: true, landed: false, retries: 2, seen: true, waitMs: 2450)
+                == "paste verify: readable=true landed=false retries=2 seen=true wait_ms=2450"
+        check("paste verify: the constants and the log helper are as decided", ok22)
+
+        func lockedPaste(postResults: [Bool]) -> (landed: Int,
+                                                    fallbacks: [TargetResolver.CapturedTargetLandingOutcome.Failure],
+                                                    verify: PasteResult) {
+            var landed = 0
+            var fallbacks: [TargetResolver.CapturedTargetLandingOutcome.Failure] = []
+            var verify = drivePaste(states: [S("hello")], postResults: postResults, seen: false)
+            let landing = CapturedLandingDriver(
+                allowRelaxed: true,
+                capturedRole: "AXTextArea",
+                read: { LandingReading() },
+                refocus: { },
+                scheduleAfter: { _, work in work() },
+                paste: { done in
+                    verify = drivePaste(states: [S("hello")], postResults: postResults, seen: false)
+                    done(verify.result)
+                },
+                landed: { landed += 1 },
+                fallback: { fallbacks.append($0) },
+                elapsedSeconds: { 0 },
+                log: { _ in })
+            landing.run()
+            return (landed, fallbacks, verify)
+        }
+        let r23a = lockedPaste(postResults: [true])
+        let r23b = lockedPaste(postResults: [false])
+        let ok23 = r23a.landed == 1 && r23a.fallbacks.isEmpty
+            && r23a.verify.posts == 2 && r23a.verify.giveUps == 1
+            && r23b.landed == 0 && r23b.fallbacks == [.eventDispatchFailed]
+        check("paste verify: a locked landing's paste step drives the verified paste", ok23)
+
+        let r24a = drivePaste(delivered: "world",
+                              states: [S("say world now"), S("say world now")], seen: true)
+        let r24b = drivePaste(delivered: "world",
+                              states: [S("say world now"), S("say world now")], seen: false)
+        let r24c = drivePaste(delivered: "world",
+                              states: [S("hello world"), S("hello wor")], seen: true)
+        let ok24 = r24a.posts == 1 && r24a.reads == 2
+            && r24a.delays == [0.7, 0.35]
+            && r24a.lines == ["paste verify: readable=true landed=true retries=0 seen=true wait_ms=1050",
+                              "paste verify: ambiguous=true"]
+            && r24a.restores == 1 && r24a.giveUps == 0
+            && r24b.posts == 1 && r24b.seen.isEmpty
+            && r24c.posts == 5 && r24c.giveUps == 1
+            && TargetResolver.pasteVerifyAmbiguous(before: "a world b", after: "a  world\nb", delivered: "world")
+            && !TargetResolver.pasteVerifyAmbiguous(before: "hello", after: "hello", delivered: "world")
+            && !TargetResolver.pasteVerifyAmbiguous(before: "world", after: "world x", delivered: "world")
+            && !TargetResolver.pasteVerifyAmbiguous(before: "hello", after: "hello", delivered: "")
+            && TargetResolver.pasteVerifyAmbiguous(before: longText, after: longText, delivered: longText)
+            && !TargetResolver.pasteVerifyAmbiguous(before: longText, after: headOnly, delivered: longText)
+        check("paste verify: an unchanged field that already held the delivered text is not pasted again", ok24)
+
+        let r25a = drivePaste(delivered: "x", states: [S("")], seen: true)
+        let r25b = drivePaste(delivered: "ok", states: [S("hello"), S("hellos")], seen: true)
+        let r25c = drivePaste(delivered: "x", states: [S(""), S("x")], seen: true)
+        let ok25 = r25a.posts == 5 && r25a.giveUps == 1
+            && r25b.posts == 5 && r25b.giveUps == 1
+            && r25c.posts == 1 && r25c.lines.first?.contains("landed=true retries=0") == true
+            && !TargetResolver.pasteVerifyLanded(before: "", after: "", delivered: "x")
+            && !TargetResolver.pasteVerifyLanded(before: "hello", after: "hellos", delivered: "ok")
+            && !TargetResolver.pasteVerifyLanded(before: "hello", after: "hello!", delivered: "abc")
+            && TargetResolver.pasteVerifyLanded(before: "hello", after: "hello ok", delivered: "ok")
+            && TargetResolver.pasteVerifyLanded(before: "hello", after: "hello OK", delivered: "ok")
+        check("paste verify: a one- or two-character dictation is not called landed by an unrelated change", ok25)
+
+        let r26a = drivePaste(
+            states: [S("hello"), S("hello"), S("hello world")], seen: true)
+        let r26b = drivePaste(
+            states: [S("hello"), S("hello"), PasteFieldState(value: nil)], seen: true)
+        let r26c = drivePaste(
+            states: [S("hello"), S("hello"),
+                     PasteFieldState(value: "hello", elementSame: false)], seen: true)
+        let r26d = drivePaste(
+            states: [S("hello"), S("hello"), S("hello world")], seen: false)
+        let ok26 = r26a.posts == 1 && r26a.reads == 3
+            && r26a.delays == [0.7, 0.15, 0.35]
+            && r26a.lines == ["paste verify: readable=true landed=true retries=0 seen=true wait_ms=1200"]
+            && r26a.restores == 1 && r26a.giveUps == 0
+            && r26b.posts == 1 && r26b.restores == 1
+            && r26b.lines == ["paste verify: readable=false landed=false retries=0 seen=true wait_ms=1200"]
+            && r26c.posts == 1 && r26c.restores == 1
+            && r26c.lines == ["paste verify: readable=true landed=false retries=0 seen=true wait_ms=1200"]
+            && r26d.posts == 1 && r26d.seen.contains("app")
+        check("paste verify: a landing that shows up between the check and the settle read is not pasted again", ok26)
     }
 
     private static func checkCustomAndSearchRequestRoutes(_ check: (String, Bool) -> Void) {

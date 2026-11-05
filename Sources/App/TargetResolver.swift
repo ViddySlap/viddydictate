@@ -105,6 +105,128 @@ struct CapturedLandingDriver {
     }
 }
 
+struct PasteFieldState: Equatable {
+    var value: String? = nil
+    var elementSame: Bool = true
+    var appSame: Bool = true
+}
+
+struct PasteVerifyDriver {
+    let delivered: String
+    let readState: () -> PasteFieldState
+    let postPaste: () -> Bool
+    let scheduleAfter: (TimeInterval, @escaping () -> Void) -> Void
+    let pasteboardUnchanged: () -> Bool
+    let canContinue: () -> Bool
+    let seenLive: () -> Bool
+    let markSeenLive: () -> Void
+    let restore: () -> Void
+    let onGiveUp: () -> Void
+    let log: (String) -> Void
+
+    func run() -> Bool {
+        var retries = 0
+        var settles = 0
+        let first = readState()
+
+        func restoreLater() {
+            scheduleAfter(TargetResolver.pasteVerifyRestoreSeconds) {
+                if self.pasteboardUnchanged() {
+                    self.restore()
+                } else {
+                    self.log("paste clipboard restore skipped: pasteboard changed")
+                }
+            }
+        }
+
+        func report(readable: Bool, landed: Bool, restoreAfter: Bool) {
+            let waitMs = (retries + 1) * 700 + settles * 150 + (restoreAfter ? 350 : 0)
+            log(TargetResolver.pasteVerifyLog(
+                readable: readable, landed: landed, retries: retries, seen: seenLive(), waitMs: waitMs))
+        }
+
+        func giveUp() {
+            report(readable: true, landed: false, restoreAfter: false)
+            log("paste verify: gave_up=true")
+            onGiveUp()
+        }
+
+        func check(settled: Bool) {
+            let now = readState()
+            guard let after = now.value else {
+                report(readable: false, landed: false, restoreAfter: true)
+                restoreLater()
+                return
+            }
+            guard now.elementSame && now.appSame else {
+                report(readable: true, landed: false, restoreAfter: true)
+                restoreLater()
+                return
+            }
+
+            let before = first.value!
+            let landed = TargetResolver.pasteVerifyLanded(
+                before: before, after: after, delivered: delivered)
+            if landed {
+                if TargetResolver.pasteVerifyProbesRose(
+                    before: before, after: after, delivered: delivered) {
+                    markSeenLive()
+                }
+                report(readable: true, landed: true, restoreAfter: true)
+                restoreLater()
+                return
+            }
+            if TargetResolver.pasteVerifyAmbiguous(
+                before: before, after: after, delivered: delivered) {
+                report(readable: true, landed: true, restoreAfter: true)
+                log("paste verify: ambiguous=true")
+                restoreLater()
+                return
+            }
+
+            let limit = seenLive()
+                ? TargetResolver.pasteVerifyMaxRetries
+                : TargetResolver.pasteVerifyUnseenLimit()
+            if retries >= limit {
+                giveUp()
+                return
+            }
+            if !settled {
+                settles += 1
+                scheduleAfter(TargetResolver.pasteVerifySettleSeconds) {
+                    check(settled: true)
+                }
+                return
+            }
+            guard canContinue() else {
+                report(readable: true, landed: false, restoreAfter: false)
+                log("paste verify: stopped=true")
+                return
+            }
+            guard postPaste() else {
+                giveUp()
+                return
+            }
+            retries += 1
+            scheduleAfter(TargetResolver.pasteVerifyCheckSeconds) {
+                check(settled: false)
+            }
+        }
+
+        guard postPaste() else { return false }
+        guard first.value != nil, first.elementSame, first.appSame else {
+            log(TargetResolver.pasteVerifyLog(
+                readable: false, landed: false, retries: 0, seen: seenLive(), waitMs: 350))
+            restoreLater()
+            return true
+        }
+        scheduleAfter(TargetResolver.pasteVerifyCheckSeconds) {
+            check(settled: false)
+        }
+        return true
+    }
+}
+
 /// "Confident-or-clipboard" delivery: capture the focused field at press/lock time, validate that exact
 /// destination before a synthesized paste, and fall back durably to the clipboard when it cannot be verified.
 enum TargetResolver {
@@ -174,6 +296,117 @@ enum TargetResolver {
 
     static let refocusAttempts = 5
     static let refocusStepSeconds: TimeInterval = 0.05
+    static let pasteVerifyCheckSeconds: TimeInterval = 0.7
+    static let pasteVerifyRestoreSeconds: TimeInterval = 0.35
+    static let pasteVerifySettleSeconds: TimeInterval = 0.15
+    static let pasteVerifyMaxRetries = 4
+    static let pasteVerifyMaxRetriesUnseen = 1
+    static let pasteVerifyMaxValueChars = 200_000
+    static let pasteVerifyProbeWholeMax = 40
+    static let pasteVerifyProbeEdge = 20
+    static var pasteVerifySeenLive = Set<String>()
+
+    static func pasteVerifyUnseenLimit() -> Int {
+        pasteVerifyMaxRetriesUnseen
+    }
+
+    static func pasteVerifyCollapse(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    static func pasteVerifyProbes(_ delivered: String) -> [String] {
+        let text = pasteVerifyCollapse(delivered)
+        guard !text.isEmpty else { return [] }
+        guard text.count <= pasteVerifyProbeWholeMax else {
+            return [String(text.prefix(pasteVerifyProbeEdge)),
+                    String(text.suffix(pasteVerifyProbeEdge))]
+        }
+        return [text]
+    }
+
+    static func pasteVerifyCount(of probe: String, in text: String) -> Int {
+        guard !probe.isEmpty else { return 0 }
+        return text.components(separatedBy: probe).count - 1
+    }
+
+    static func pasteVerifyProbesRose(before: String, after: String, delivered: String) -> Bool {
+        let probes = pasteVerifyProbes(delivered)
+        guard !probes.isEmpty else { return false }
+        let beforeText = pasteVerifyCollapse(before)
+        let afterText = pasteVerifyCollapse(after)
+        return probes.allSatisfy {
+            pasteVerifyCount(of: $0, in: afterText) > pasteVerifyCount(of: $0, in: beforeText)
+        }
+    }
+
+    static func pasteVerifyLanded(before: String, after: String, delivered: String) -> Bool {
+        let probes = pasteVerifyProbes(delivered)
+        guard !probes.isEmpty else { return true }
+        let rose = pasteVerifyProbesRose(before: before, after: after, delivered: delivered)
+        let needed = max(2, (pasteVerifyCollapse(delivered).count + 1) / 2)
+        let grew = pasteVerifyCollapse(after).count
+            >= pasteVerifyCollapse(before).count + needed
+        return rose || grew
+    }
+
+    static func pasteVerifyAmbiguous(before: String, after: String, delivered: String) -> Bool {
+        let probes = pasteVerifyProbes(delivered)
+        guard !probes.isEmpty else { return false }
+        let beforeText = pasteVerifyCollapse(before)
+        let afterText = pasteVerifyCollapse(after)
+        guard beforeText == afterText else { return false }
+        return probes.allSatisfy { pasteVerifyCount(of: $0, in: beforeText) >= 1 }
+    }
+
+    static func pasteVerifyBound(_ value: String?) -> String? {
+        guard let value = value, value.utf16.count <= pasteVerifyMaxValueChars else { return nil }
+        return value
+    }
+
+    static func pasteVerifyLog(readable: Bool, landed: Bool, retries: Int, seen: Bool, waitMs: Int) -> String {
+        "paste verify: readable=\(readable) landed=\(landed) retries=\(retries) seen=\(seen) wait_ms=\(waitMs)"
+    }
+
+    static func pasteVerifyFocusedElement() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        AXUIElementSetMessagingTimeout(system, 0.25)
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+            let focused = focused else { return nil }
+        return focused as! AXUIElement
+    }
+
+    static func readPasteFieldState(anchor: AXUIElement?, anchorPid: pid_t?) -> PasteFieldState {
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let appSame = anchorPid != nil && frontPid == anchorPid
+        guard let anchor = anchor, let focused = pasteVerifyFocusedElement() else {
+            return PasteFieldState(value: nil, elementSame: false, appSame: appSame)
+        }
+        var valueRef: CFTypeRef?
+        AXUIElementSetMessagingTimeout(focused, 0.25)
+        let result = AXUIElementCopyAttributeValue(focused, kAXValueAttribute as CFString, &valueRef)
+        let value = result == .success ? (valueRef as? String) : nil
+        return PasteFieldState(
+            value: pasteVerifyBound(value),
+            elementSame: CFEqual(focused, anchor),
+            appSame: appSame)
+    }
+
+    private static func postPasteKeystroke() -> Bool {
+        let vKey: CGKeyCode = 9
+        guard let down = SyntheticKeystroke.make(
+            virtualKey: vKey, keyDown: true, flags: .maskCommand),
+              let up = SyntheticKeystroke.make(
+                virtualKey: vKey, keyDown: false, flags: .maskCommand) else {
+            Log.write("paste event dispatch unavailable — output retained on clipboard")
+            return false
+        }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
 
     static func landingStep(
         failure: CapturedTargetLandingOutcome.Failure?,
@@ -418,26 +651,28 @@ enum TargetResolver {
         let previous = PasteboardSnapshot.capture(from: pb)
         SyntheticPasteboard.write(text, to: pb)
         let temporaryChangeCount = pb.changeCount
-
-        let vKey: CGKeyCode = 9 // 'v'
-        let down = SyntheticKeystroke.make(virtualKey: vKey, keyDown: true, flags: .maskCommand)
-        let up = SyntheticKeystroke.make(virtualKey: vKey, keyDown: false, flags: .maskCommand)
-        guard let down = down, let up = up else {
-            Log.write("paste event dispatch unavailable — output retained on clipboard")
-            return false
-        }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            guard pb.changeCount == temporaryChangeCount else {
-                Log.write("paste clipboard restore skipped: pasteboard changed")
-                return
-            }
-            SyntheticPasteboard.restore(previous, to: pb)
-            Log.write("paste clipboard restored")
-        }
-        return true
+        let front = NSWorkspace.shared.frontmostApplication
+        let anchor = pasteVerifyFocusedElement()
+        let anchorPid = front?.processIdentifier
+        let bundleID = front?.bundleIdentifier
+        let driver = PasteVerifyDriver(
+            delivered: text,
+            readState: { readPasteFieldState(anchor: anchor, anchorPid: anchorPid) },
+            postPaste: { postPasteKeystroke() },
+            scheduleAfter: { delay, work in
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            },
+            pasteboardUnchanged: { pb.changeCount == temporaryChangeCount },
+            canContinue: { pb.changeCount == temporaryChangeCount },
+            seenLive: { bundleID.map { pasteVerifySeenLive.contains($0) } ?? false },
+            markSeenLive: { if let bundleID = bundleID { pasteVerifySeenLive.insert(bundleID) } },
+            restore: {
+                SyntheticPasteboard.restore(previous, to: pb)
+                Log.write("paste clipboard restored")
+            },
+            onGiveUp: { },
+            log: { Log.write($0) })
+        return driver.run()
     }
 
     /// Paste into the exact app/field/selection that owned a captured transform. Explicit retry is
