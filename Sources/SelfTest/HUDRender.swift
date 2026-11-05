@@ -25,7 +25,7 @@ enum HUDRender {
 
         // The pill scope interior at scale 1.0: full capsule width, 6pt top/bottom inset (matches
         // layoutPill's `wave.frame`).
-        let pw: CGFloat = HUDPillMetrics.baseWidth, ph: CGFloat = HUDPillMetrics.baseHeight
+        let pw: CGFloat = HUDPillMetrics.scopeWidth, ph: CGFloat = HUDPillMetrics.baseHeight
         let wave = WaveformView(frame: NSRect(x: 0, y: 0, width: pw, height: ph - 12))
 
         // A few cycles of a low-amplitude sine so the trace is clearly visible AND spans the width.

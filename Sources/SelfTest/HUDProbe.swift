@@ -39,6 +39,7 @@ enum HUDProbe {
 
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
+        probeInfoSide(hud, visibleFrame: vf)
         probeLowPowerToast(hud, visibleFrame: vf)
         probeModeAdaptiveRouterToast(hud, visibleFrame: vf)
         probePillAfterToast(hud)
@@ -63,7 +64,7 @@ enum HUDProbe {
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         hud.show()
         var f = hud.frameForTesting
-        check("pill-size", approx(f.width, 300) && approx(f.height, 64), "size=\(f.size) expect≈(300, 64)")
+        check("pill-size", approx(f.width, 112) && approx(f.height, 64), "size=\(f.size) expect≈(112, 64)")
         let pillExpect = HUDPointerPlacement.origin(pointer: point, size: f.size, scale: 1.0,
                                                     screens: screens, fallback: 0)
         check("pill-follows-pointer",
@@ -73,18 +74,18 @@ enum HUDProbe {
         // Item A: the scope spans the FULL pill width (x≈0, width≈pill width).
         var wf = hud.pillWaveFrameForTesting
         check("pill-scope-full-width",
-              approx(wf.origin.x, 0) && approx(wf.width, 300),
-              "waveFrame=\(wf) expect x≈0, width≈300")
+              approx(wf.origin.x, 0) && approx(wf.width, 112),
+              "waveFrame=\(wf) expect x≈0, width≈112")
 
         Settings.hudUIScale = 1.5
         hud.show()
         f = hud.frameForTesting
-        check("pill-scale", approx(f.width, 450) && approx(f.height, 96), "size=\(f.size) expect≈(450, 96)")
+        check("pill-scale", approx(f.width, 168) && approx(f.height, 96), "size=\(f.size) expect≈(168, 96)")
         // The full-width scope tracks the pill scale.
         wf = hud.pillWaveFrameForTesting
         check("pill-scope-full-width-scaled",
-              approx(wf.origin.x, 0) && approx(wf.width, 450),
-              "waveFrame=\(wf) expect x≈0, width≈450")
+              approx(wf.origin.x, 0) && approx(wf.width, 168),
+              "waveFrame=\(wf) expect x≈0, width≈168")
     }
 
     private static func probeInfoPill(_ hud: HUDPanel) {
@@ -107,10 +108,10 @@ enum HUDProbe {
         let infoLocked = hud.infoPillFrameForTesting
         check("scope-invariant-locked", frameEq(hud.frameForTesting, scopeIdle),
               "scope=\(hud.frameForTesting) expect=\(scopeIdle)")
-        check("info-below-scope", infoLocked.maxY <= scopeIdle.minY + 1.5,
-              "infoMaxY=\(infoLocked.maxY) scopeMinY=\(scopeIdle.minY)")
-        check("info-centered-under-scope", approx(infoLocked.midX, scopeIdle.midX),
-              "infoMidX=\(infoLocked.midX) scopeMidX=\(scopeIdle.midX)")
+        check("info-beside-scope-right", infoLocked.minX >= scopeIdle.maxX + 1.5 && infoLocked.minX <= scopeIdle.maxX + 12,
+              "infoMinX=\(infoLocked.minX) scopeMaxX=\(scopeIdle.maxX)")
+        check("info-same-row-as-scope", approx(infoLocked.midY, scopeIdle.midY),
+              "infoMidY=\(infoLocked.midY) scopeMidY=\(scopeIdle.midY)")
 
         // cleanup only -> the info pill appears (keycap + labeled slider); the scope stays put.
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
@@ -191,6 +192,53 @@ enum HUDProbe {
               "stray=\(hud.infoPillStrayVisibleContentForTesting) expect [] (disarmed on a shown pill)")
     }
 
+    private static func probeInfoSide(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        // New: the info pill sits BESIDE the scope on its row — right unless it would pass the screen's
+        // visible right edge, then left. Pin the flip and the no-overlap invariant in both layouts.
+        Settings.hudUIScale = 1.0
+        hud.hide()
+        hud.setBullseyeArmed(false)
+        hud.setCleanup(enabled: false, level: 0)
+        hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
+
+        // Pointer pinned at the right edge: the right-hand layout would overflow, so the info pill flips
+        // to the LEFT of the scope and stays inside the visible frame.
+        hud.pointerProviderForTesting = { NSPoint(x: vf.maxX - 20, y: vf.maxY - 200) }
+        hud.show()
+        let s = hud.frameForTesting
+        let i = hud.infoPillFrameForTesting
+        check("info-flips-left-at-right-edge",
+              i.maxX <= s.minX - 1.5 && i.maxX >= s.minX - 12 && i.minX >= vf.minX,
+              "info=\(i) scope=\(s) expect info left of scope and inside vf=\(vf)")
+
+        // No-overlap in BOTH layouts: pointer at vf.minX + 400 (right-hand layout) and at vf.maxX - 20
+        // (left-hand layout). Each time: show, read both frames, hide before the next.
+        hud.hide()
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.show()
+        let sRight = hud.frameForTesting
+        let iRight = hud.infoPillFrameForTesting
+        let rightOK = !sRight.intersects(iRight) && vf.contains(sRight) && vf.contains(iRight)
+
+        hud.hide()
+        hud.pointerProviderForTesting = { NSPoint(x: vf.maxX - 20, y: vf.maxY - 200) }
+        hud.show()
+        let sLeft = hud.frameForTesting
+        let iLeft = hud.infoPillFrameForTesting
+        let leftOK = !sLeft.intersects(iLeft) && vf.contains(sLeft) && vf.contains(iLeft)
+
+        check("info-never-overlaps-scope", rightOK && leftOK,
+              "right layout info=\(iRight) scope=\(sRight); left layout info=\(iLeft) scope=\(sLeft)")
+
+        // Cleanup: restore the providers `run` installed at its start and the scale.
+        hud.hide()
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        Settings.hudUIScale = 1.0
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
+    }
+
     private static func probeLowPowerToast(_ hud: HUDPanel, visibleFrame vf: NSRect) {
         // 5) In low power, a short `toast()` now renders as a pill-styled capsule grown to fit (NOT the
         //    full box); a LONGER message grows the capsule wider; and `answer()` (paragraph-length web
@@ -238,7 +286,7 @@ enum HUDProbe {
         hud.setCleanup(enabled: false, level: 0)
         hud.show()
         let f = hud.frameForTesting
-        check("pill-after-toast", approx(f.width, 300), "width=\(f.width) expect≈300")
+        check("pill-after-toast", approx(f.width, 112), "width=\(f.width) expect≈112")
 
         // 6b) The toast-cycle half of the stray-visible guard: with lock + cleanup latched, a toast
         // tears the info pill down (its dwell timer fires the pill's hide(), which now resets per-element
@@ -289,7 +337,7 @@ enum HUDProbe {
               approx(scopeBefore.minX, scopeExpected.x) && approx(scopeBefore.minY, scopeExpected.y),
               "origin=\(scopeBefore.origin) expect≈\(scopeExpected) (HUDPointerPlacement.origin(...))")
         check("revert-scope-up-before-toast",
-              hud.panelVisibleForTesting && hud.pillWaveActiveForTesting && approx(scopeBefore.width, 300),
+              hud.panelVisibleForTesting && hud.pillWaveActiveForTesting && approx(scopeBefore.width, 112),
               "visible=\(hud.panelVisibleForTesting) wave=\(hud.pillWaveActiveForTesting) w=\(scopeBefore.width)")
 
         hud.setTakeActive(true)                     // the take is live
@@ -313,8 +361,8 @@ enum HUDProbe {
         check("revert-scope-at-pointer-after-dwell",
               approx(scopeAfter.minX, scopeExpected.x) && approx(scopeAfter.minY, scopeExpected.y),
               "origin=\(scopeAfter.origin) expect≈\(scopeExpected) (back at the pointer)")
-        check("revert-is-scope-pill", approx(scopeAfter.width, 300) && frameEq(scopeAfter, scopeBefore),
-              "after=\(scopeAfter) before=\(scopeBefore) expect the 300x64 scope pill back in place")
+        check("revert-is-scope-pill", approx(scopeAfter.width, 112) && frameEq(scopeAfter, scopeBefore),
+              "after=\(scopeAfter) before=\(scopeBefore) expect the 112x64 scope pill back in place")
 
         // With NO take live, a toast over a scope pill must still re-home the toast and then hide it.
         hud.setTakeActive(false)

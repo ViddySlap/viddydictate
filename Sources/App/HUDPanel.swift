@@ -151,8 +151,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// an armed one-shot mode, plus the compact 3-stop strength slider when Cleanup owns the slot.
     private let keycap = KeycapView()
     private let slider = StrengthSlider()
-    /// The low-power INFO PILL (Item B): a separate content-gated capsule below the scope pill, holding
-    /// the lock glyph + `?` keycap + labeled slider. Its own panel, so the scope pill never moves.
+    /// The low-power INFO PILL (Item B): a separate content-gated capsule beside the scope pill on its
+    /// row, holding the lock glyph + `?` keycap + labeled slider. Its own panel, so the scope pill never moves.
     private let infoPill = InfoPillPanel()
     /// The spinning green-phosphor wheel that replaces the whole HUD during the cleanup wait.
     private let spinner = ThinkingSpinner()
@@ -416,7 +416,7 @@ final class HUDPanel: NSObject, HUDPresenting {
             let target = followOrigin(panelSize: panel.frame.size)
             panel.setFrameOrigin(target)
             origin = target
-            // Re-anchor the info pill under the (moving) scope pill without animating every tick.
+            // Re-anchor the info pill beside the (moving) scope pill without animating every tick.
             if mode == .pillScope { updateInfoPill(animated: false) }
         }
     }
@@ -703,14 +703,15 @@ final class HUDPanel: NSObject, HUDPresenting {
         setRecordingChrome(hidden: true)
     }
 
-    /// The Final-only layout: a small capsule holding ONLY the live oscilloscope — roughly an eighth
-    /// of the full HUD. No REC dot, no status line, no transcript preview, no buttons; the chords
-    /// still drive everything. This surface only says "the mic is hot and hearing you." The scope
-    /// spans the FULL capsule width and `WaveformView` alpha-fades the trace at both rounded ends
-    /// (no hard bounding box).
+    /// The Final-only layout: the narrow (112-pt) scope capsule holding ONLY the live oscilloscope —
+    /// roughly an eighth of the full HUD's width. No REC dot, no status line, no transcript preview,
+    /// no buttons; the chords still drive everything. This surface only says "the mic is hot and
+    /// hearing you." The scope spans the FULL capsule width and `WaveformView` alpha-fades the trace
+    /// at both rounded ends (no hard bounding box). The content-gated info pill sits beside it on the
+    /// same row.
     private func layoutPill() {
         let ps = CGFloat(Settings.hudUIScale)
-        let pw = round(HUDPillMetrics.baseWidth * ps), ph = round(HUDPillMetrics.baseHeight * ps)
+        let pw = round(HUDPillMetrics.scopeWidth * ps), ph = round(HUDPillMetrics.baseHeight * ps)
         presentBox(panelSize: NSSize(width: pw, height: ph), cornerRadius: ph / 2)
         spinner.isHidden = true
         setRecordingChrome(hidden: true)   // the pill is strictly the scope now
@@ -718,7 +719,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         // the left/right ends into the rounded caps.
         wave.isHidden = false
         wave.frame = NSRect(x: 0, y: 6, width: pw, height: ph - 12)
-        updateInfoPill()   // the second, content-gated capsule below the scope
+        updateInfoPill()   // the second, content-gated capsule beside the scope on its row
     }
 
     /// Phosphor-green attributed text for the low-power pill-toast — centered, with the same soft green
@@ -752,7 +753,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// separate, deliberate choice and are unaffected.
     private func layoutPillToast() {
         let ps = CGFloat(Settings.hudUIScale)
-        let baseW = round(HUDPillMetrics.baseWidth * ps)          // scope-pill width — the floor
+        let baseW = round(HUDPillMetrics.baseWidth * ps)          // toast floor width (the old pill width, wider than the scope pill now)
         let baseH = round(HUDPillMetrics.baseHeight * ps)           // scope-pill height — the floor
         let padX = round(26 * ps)
         let padY = round(12 * ps)
@@ -797,16 +798,31 @@ final class HUDPanel: NSObject, HUDPresenting {
         pillToastLabel.isHidden = false
     }
 
-    /// Refresh the low-power info pill (Item B) from the latched live state, anchored under the current
-    /// scope-pill frame. Content-gated inside `InfoPillPanel`: nothing locked and cleanup off ⇒ no pill.
+    /// The visible frame of the screen that contains the panel's middle point, read through the same
+    /// screen seam the follow code reads (so a probe's screen provider governs it). Falls back to the
+    /// main screen's visible frame, then a 1440x900 default.
+    private func infoVisibleFrame() -> NSRect {
+        let screens = followScreens()
+        guard let index = HUDPointerPlacement.screenIndex(
+            for: NSPoint(x: panel.frame.midX, y: panel.frame.midY),
+            in: screens, fallback: followFallbackIndex()) else {
+            return NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        }
+        return screens[index].visible
+    }
+
+    /// Refresh the low-power info pill (Item B) from the latched live state, anchored beside the current
+    /// scope-pill frame on its row. Content-gated inside `InfoPillPanel`: nothing locked and cleanup off
+    /// ⇒ no pill.
     private func updateInfoPill(animated: Bool = true) {
         infoPill.apply(locked: lockedState, cleanupEnabled: cleanupEnabled, level: cleanupLevel,
                        bullseyeArmed: bullseyeArmed, armedModeGlyph: armedModeGlyph,
-                       scope: panel.frame, ps: CGFloat(Settings.hudUIScale), animated: animated)
+                       scope: panel.frame, visible: infoVisibleFrame(), ps: CGFloat(Settings.hudUIScale),
+                       animated: animated)
     }
 
     /// Latch the sticky-note bullseye armed state and refresh the info pill so its bullseye glyph appears /
-    /// disappears (notes-bullseye BT2). Content-gated inside `InfoPillPanel`. Re-anchors under the current
+    /// disappears (notes-bullseye BT2). Content-gated inside `InfoPillPanel`. Re-anchors beside the current
     /// scope only while the low-power pill is up; otherwise just latches for the next take.
     func setBullseyeArmed(_ armed: Bool) {
         bullseyeArmed = armed

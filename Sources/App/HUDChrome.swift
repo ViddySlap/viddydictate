@@ -2,12 +2,13 @@ import Cocoa
 
 // MARK: - shared pill base size
 
-/// The base (scale=1.0) footprint of the Final-only scope/info pill — the floor every scaled pill
-/// size (`round(_ * Settings.hudUIScale)`) derives from. HUDProbe.swift's golden-value pixel
-/// assertions are intentionally left as literal 300/64 (NOT wired to this constant) so they still
-/// catch accidental drift here — do not touch HUDProbe.swift in this change.
+/// The base (scale=1.0) footprints of the Final-only pills. `baseWidth`/`baseHeight` are the in-pill
+/// toast floor (`baseHeight` is also the scope pill's height); `scopeWidth` is the recording scope
+/// pill's width. HUDProbe.swift's golden asserts are literal 112/64 for the scope and 300 for the toast
+/// floor and are not wired to these constants.
 enum HUDPillMetrics {
     static let baseWidth: CGFloat = 300
+    static let scopeWidth: CGFloat = 112
     static let baseHeight: CGFloat = 64
 }
 
