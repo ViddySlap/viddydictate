@@ -372,6 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 },
                 onOpenSettings: { [weak self] in self?.openSettings() },
                 onOpenDictionary: { [weak self] in self?.openDictionarySettings() },
+                onOpenHistory: { [weak self] in self?.openHistorySettings() },
                 onOpenNotes: { [weak self] in self?.openNotes() },
                 notesWindowIsKey: { [weak self] in self?.notesRegistry.isAnyKey == true },
                 onCleanupModeChange: { [weak self] enabled in
@@ -1106,6 +1107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openSettings() { settingsWC.show() }
 
     private func openDictionarySettings() { settingsWC.show(tab: .dictionary) }
+    private func openHistorySettings() { settingsWC.show(tab: .history) }
 
     @objc private func openNotes() { notesRegistry.show() }
 

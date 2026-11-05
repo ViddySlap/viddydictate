@@ -74,7 +74,7 @@ struct KeySpec: Codable, Equatable {
 /// The chord commands (everything tapped while the wakeup is held). The wakeup is NOT in here — it is
 /// the held key, stored separately on the map.
 enum HotkeyCommand: String, CaseIterable, Codable {
-    case lock, cleanupToggle, undo, levelUp, levelDown, cleanupSelection, email, searchLocal, searchGemini, notes, dictionary, bullseyeToggle, bullseyeReveal
+    case lock, cleanupToggle, undo, levelUp, levelDown, cleanupSelection, email, searchLocal, searchGemini, notes, dictionary, bullseyeToggle, bullseyeReveal, history
 
     /// User-facing row label in the Hotkeys table.
     var label: String {
@@ -92,6 +92,7 @@ enum HotkeyCommand: String, CaseIterable, Codable {
         case .dictionary:       return "Dictionary"
         case .bullseyeToggle:   return "Bullseye toggle"
         case .bullseyeReveal:   return "Bullseye reveal"
+        case .history:          return "History"
         }
     }
 
@@ -111,6 +112,7 @@ enum HotkeyCommand: String, CaseIterable, Codable {
         case .dictionary:       return "Open Settings on the Dictionary tab"
         case .bullseyeToggle:   return "Arm/disarm the sticky-note bullseye target"
         case .bullseyeReveal:   return "Show me the bullseye — front its note, scroll to it, arm it"
+        case .history:          return "Open Settings on the History tab"
         }
     }
 
@@ -132,12 +134,13 @@ enum HotkeyCommand: String, CaseIterable, Codable {
         // Option+Shift+N: the SHIFT-QUALIFIED sibling of Option+N. Same keycode, distinct binding — the shift
         // flag is part of KeySpec identity, so `⇧N` (reveal) and `N` (set/arm) coexist without conflicting.
         case .bullseyeReveal:   return .regular(keyCode: 45, label: "⇧N", shift: true)
+        case .history:          return .regular(keyCode: 4,  label: "H")
         }
     }
 
     /// Display order in the Hotkeys table (matches the design table).
     static let displayOrder: [HotkeyCommand] =
-        [.lock, .cleanupToggle, .undo, .levelUp, .levelDown, .cleanupSelection, .email, .searchLocal, .searchGemini, .notes, .dictionary, .bullseyeToggle, .bullseyeReveal]
+        [.lock, .cleanupToggle, .undo, .levelUp, .levelDown, .cleanupSelection, .email, .searchLocal, .searchGemini, .notes, .dictionary, .bullseyeToggle, .bullseyeReveal, .history]
 }
 
 // MARK: - The map

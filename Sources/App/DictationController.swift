@@ -7,6 +7,7 @@ struct DictationControllerCallbacks {
     let onStateChange: (String) -> Void
     let onOpenSettings: () -> Void
     let onOpenDictionary: () -> Void
+    let onOpenHistory: () -> Void
     let onOpenNotes: () -> Void
     let notesWindowIsKey: () -> Bool
     let onCleanupModeChange: (Bool) -> Void
@@ -375,6 +376,7 @@ final class DictationController {
         case .dictionary:       callbacks.onOpenDictionary()
         case .bullseyeToggle:   toggleBullseye()
         case .bullseyeReveal:   revealBullseye()
+        case .history:          callbacks.onOpenHistory()
         }
     }
 

@@ -1478,7 +1478,7 @@ enum TailCheckSelfTest {
         let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
-                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
                 notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
             notesDelivery: notesDelivery,
             tailCheckHook: tailCheckHook,
@@ -1528,7 +1528,7 @@ enum TailCheckSelfTest {
         let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
-                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
                 notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
             notesDelivery: notesDelivery,
             tailCheckHook: tailCheckHook,
@@ -1673,7 +1673,7 @@ enum TailCheckSelfTest {
                 let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
                 let controller = DictationController(
                     callbacks: DictationControllerCallbacks(
-                        onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenNotes: {},
+                        onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
                         notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
                     notesDelivery: notesDelivery,
                     tailCheckHook: hook,
