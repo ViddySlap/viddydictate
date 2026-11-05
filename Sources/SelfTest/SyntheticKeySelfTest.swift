@@ -126,6 +126,29 @@ enum SyntheticKeySelfTest {
         reporter.record("synthetic keys: an own Cmd+V while paste-restore is armed still triggers the paste-restore observer once and passes through",
             retPaste != nil && observed == 1)
 
+        // Rows 10 to 12 (VDHISTHK no-shift): History answers plain right-Option+H only. Shift never falls back to it,
+        // while the existing Shift fallback for another command (Shift+P to Cleanup selection) is unchanged.
+        func chordFires(keyCode: Int64, shift: Bool) -> (HotkeyCommand?, Bool) {
+            var fired: HotkeyCommand?
+            let monitor = HotkeyMonitor()
+            monitor.onCommand = { fired = $0 }
+            holdWakeup(monitor)
+            let ev = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: true)!
+            if shift { ev.flags = .maskShift }
+            let swallowed = monitor.selfTestHandle(type: .keyDown, event: ev) == nil
+            drain()
+            return (fired, swallowed)
+        }
+        let plainH = chordFires(keyCode: 4, shift: false)
+        reporter.record("synthetic keys: plain right-Option+H fires the history command and is swallowed",
+            plainH.0 == .history && plainH.1)
+        let shiftH = chordFires(keyCode: 4, shift: true)
+        reporter.record("synthetic keys: right-Option+Shift+H does not fire the history command and is not swallowed",
+            shiftH.0 == nil && shiftH.1 == false)
+        let shiftP = chordFires(keyCode: 35, shift: true)
+        reporter.record("synthetic keys: right-Option+Shift+P still falls back to Cleanup selection",
+            shiftP.0 == .cleanupSelection && shiftP.1)
+
         print(reporter.summaryLine(prefix: "[synthetic-key-selftest]"))
         return reporter.passed
     }

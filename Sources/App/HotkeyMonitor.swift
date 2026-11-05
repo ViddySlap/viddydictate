@@ -319,7 +319,11 @@ final class HotkeyMonitor {
             if let c = map.command(forKeyCode: keyCode, shift: true) { return .builtIn(c) }
             if let id = customChord(forKeyCode: keyCode, shift: true) { return .custom(id) }
         }
-        if let c = map.command(forKeyCode: keyCode, shift: false) { return .builtIn(c) }
+        if let c = map.command(forKeyCode: keyCode, shift: false) {
+            // History is plain right-Option+H only (Ben, 2026-11-05): a Shift chord never falls back to it.
+            if shiftHeld && c == .history { return nil }
+            return .builtIn(c)
+        }
         if let id = customChord(forKeyCode: keyCode, shift: false) { return .custom(id) }
         return nil
     }
