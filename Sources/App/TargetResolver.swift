@@ -123,6 +123,7 @@ struct PasteVerifyDriver {
     let restore: () -> Void
     let onGiveUp: () -> Void
     let log: (String) -> Void
+    var userActed: () -> Bool = { false }
 
     func run() -> Bool {
         var retries = 0
@@ -180,6 +181,13 @@ struct PasteVerifyDriver {
                 before: before, after: after, delivered: delivered) {
                 report(readable: true, landed: true, restoreAfter: true)
                 log("paste verify: ambiguous=true")
+                restoreLater()
+                return
+            }
+
+            if userActed() {
+                report(readable: true, landed: false, restoreAfter: true)
+                log("paste verify: stopped=true user_acted=true")
                 restoreLater()
                 return
             }
@@ -655,6 +663,7 @@ enum TargetResolver {
         let anchor = pasteVerifyFocusedElement()
         let anchorPid = front?.processIdentifier
         let bundleID = front?.bundleIdentifier
+        let returnsAtPaste = HotkeyMonitor.realReturnCount
         let driver = PasteVerifyDriver(
             delivered: text,
             readState: { readPasteFieldState(anchor: anchor, anchorPid: anchorPid) },
@@ -671,7 +680,8 @@ enum TargetResolver {
                 Log.write("paste clipboard restored")
             },
             onGiveUp: { },
-            log: { Log.write($0) })
+            log: { Log.write($0) },
+            userActed: { HotkeyMonitor.realReturnCount != returnsAtPaste })
         return driver.run()
     }
 

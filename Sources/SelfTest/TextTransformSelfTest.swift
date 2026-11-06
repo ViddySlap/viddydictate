@@ -710,11 +710,13 @@ enum TextTransformSelfTest {
             postResults: [Bool] = [true],
             seen: Bool = false,
             canContinue: [Bool] = [true],
-            pasteboardUnchanged: Bool = true
+            pasteboardUnchanged: Bool = true,
+            userActed: [Bool] = [false]
         ) -> PasteResult {
             var stateIndex = 0
             var postIndex = 0
             var continueIndex = 0
+            var userActedIndex = 0
             var posts = 0
             var reads = 0
             var scheduleCount = 0
@@ -762,6 +764,11 @@ enum TextTransformSelfTest {
                 log: {
                     lines.append($0)
                     events.append("log")
+                },
+                userActed: {
+                    let result = userActed[min(userActedIndex, userActed.count - 1)]
+                    userActedIndex += 1
+                    return result
                 })
             let result = driver.run()
             return (result, posts, reads, delays, lines, events, restores, giveUps, seenApps)
@@ -1072,6 +1079,46 @@ enum TextTransformSelfTest {
             && r26c.lines == ["paste verify: readable=true landed=false retries=0 seen=true wait_ms=1200"]
             && r26d.posts == 1 && r26d.seen.contains("app")
         check("paste verify: a landing that shows up between the check and the settle read is not pasted again", ok26)
+
+        let r27 = drivePaste(states: [S(""), S("")], seen: true, userActed: [true])
+        let ok27 = r27.result && r27.posts == 1 && r27.reads == 2
+            && r27.delays == [0.7, 0.35]
+            && r27.lines == ["paste verify: readable=true landed=false retries=0 seen=true wait_ms=1050",
+                             "paste verify: stopped=true user_acted=true"]
+            && r27.restores == 1 && r27.giveUps == 0
+        check("paste verify: a Return before the first check stops the retries and restores", ok27)
+
+        let r28 = drivePaste(
+            states: [S(""), S(""), S(""), S(""), S("hello world")], seen: true)
+        let ok28 = r28.posts == 2 && r28.reads == 5
+            && r28.delays == [0.7, 0.15, 0.7, 0.15, 0.35]
+            && r28.restores == 1 && r28.giveUps == 0
+            && !r28.lines.contains("paste verify: stopped=true user_acted=true")
+        check("paste verify: an empty field is retried and lands without a Return, as before", ok28)
+
+        let r29 = drivePaste(states: [S("hello"), S("hello world")], seen: true,
+                             userActed: [true])
+        let ok29 = r29.posts == 1
+            && r29.lines == ["paste verify: readable=true landed=true retries=0 seen=true wait_ms=1050"]
+            && !r29.lines.contains("paste verify: stopped=true user_acted=true")
+            && r29.restores == 1 && r29.giveUps == 0
+        check("paste verify: a landing read wins over a Return and reports landed", ok29)
+
+        let r30 = drivePaste(states: Array(repeating: S(""), count: 6), seen: true,
+                             userActed: [false, false, true])
+        let ok30 = r30.posts == 2 && r30.reads == 4
+            && r30.delays == [0.7, 0.15, 0.7, 0.35]
+            && r30.lines.last == "paste verify: stopped=true user_acted=true"
+            && r30.restores == 1 && r30.giveUps == 0
+        check("paste verify: a Return during the retries stops after one retry and restores", ok30)
+
+        let r31a = drivePaste(states: [S("hello"), PasteFieldState(value: nil)], userActed: [true])
+        let r31b = drivePaste(delivered: "hello", states: [S("hello"), S("hello")], userActed: [true])
+        let ok31 = r31a.posts == 1 && r31a.restores == 1 && r31a.giveUps == 0
+            && !r31a.lines.contains("paste verify: stopped=true user_acted=true")
+            && r31b.posts == 1 && r31b.restores == 1 && r31b.giveUps == 0
+            && !r31b.lines.contains("paste verify: stopped=true user_acted=true")
+        check("paste verify: an unreadable or ambiguous read wins over a Return", ok31)
     }
 
     private static func checkCustomAndSearchRequestRoutes(_ check: (String, Bool) -> Void) {

@@ -51,6 +51,8 @@ final class HotkeyMonitor {
     private var pendingShiftMask: Int64?
     /// The device shift bits (left + right), the only modifiers that also act as a chord qualifier.
     private static let shiftMasks: Int64 = 0x04 | 0x02
+    /// Real Return/Enter key-downs from the user (own synthetic events never reach this).
+    static var realReturnCount = 0
 
     /// A/B picker (cleanup-suspect guard) navigation. While `abPickerActive`, the tap swallows the
     /// arrow / Return / Escape keys and routes them here instead of letting them reach the focused
@@ -257,6 +259,7 @@ final class HotkeyMonitor {
         if SyntheticKeystroke.isOwn(event) {
             return Unmanaged.passUnretained(event)
         }
+        if keyCode == returnKeyCode || keyCode == 76 { HotkeyMonitor.realReturnCount += 1 }
 
         // Transient pickers take priority over take-cancel and normal hotkeys. Matching navigation
         // keys are swallowed so they never reach the focused field.
