@@ -72,10 +72,9 @@ extension HUDPresenting {
 /// `panel.isVisible`) that independently drove the layout — the tangle that let a dismissing mid-take
 /// toast order the whole HUD off-screen for the rest of an actively-recording take.
 enum HUDDisplayMode {
-    case fullRecording   // the full CRT box: live scope + transcript (normal-power take)
     case pillScope       // the Final-only scope pill: just the oscilloscope
     case pillToast       // the Final-only in-pill status toast: a capsule grown to fit the message
-    case fullToast       // a full-box toast: Live, or a forced-full / `answer()` toast in Final-only
+    case fullToast       // a full-box toast: a forced-full / `answer()` toast
     case thinking        // the post-release cleanup-wait spinner
 }
 
@@ -130,8 +129,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     private let display = DisplayView()
     private let handle = DragHandle()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let recDot = NSView()
-    private let recLabel = NSTextField(labelWithString: "REC")
     private let settingsButton = NSButton()
     private let wave = WaveformView(frame: .zero)
     private let transcription = NSTextField(wrappingLabelWithString: "")
@@ -175,8 +172,6 @@ final class HUDPanel: NSObject, HUDPresenting {
 
     private var origin = NSPoint.zero
     private var currentText = ""
-    private var caretOn = true
-    private var caretTimer: Timer?
     private var toastTimer: Timer?
     /// The optional action a clickable toast runs. Set by `toast(_:duration:forceFull:action:)` and
     /// cleared on every new toast, dismiss, or hide, so a stale action can never fire.
@@ -184,17 +179,12 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// The panel content view, kept so the click handler can be installed only while a toast carries an
     /// action (and removed again on dismiss), leaving existing toasts untouched.
     private var toastClickView: HUDToastClickView?
-    private var showRec = true
     /// The single source of truth for the current layout (see `HUDDisplayMode`). Every transition sets it;
     /// `relayout()` switches on it. Replaces the old thinking/toasting/toastForceFull booleans.
-    private var mode: HUDDisplayMode = .fullRecording
+    private var mode: HUDDisplayMode = .pillScope
     /// All logical owners share the existing ring. Recovery IDs prevent one completed take from hiding
     /// progress for another take that is still waiting.
     private var thinkingActivity = HUDThinkingActivity()
-    /// Final-only mode captured at show()/toast(): the recording HUD is the small scope pill and a plain
-    /// toast renders in a pill. Feeds `recordingMode` / `toastMode(forceFull:)`, which pick the actual `mode`
-    /// (so the display mode encodes compactness; `relayout()` never re-reads this field).
-    private var finalOnly = false
     /// Whether a take is live. DictationController pushes this at its `State` transitions (recording/locked →
     /// true; idle/finishing → false). `dismissToast()` reads it to decide whether a dismissing toast reverts
     /// to the recording scope (take still live) or hides outright (no take) — the core of the BUG 1 fix.
@@ -212,12 +202,9 @@ final class HUDPanel: NSObject, HUDPresenting {
     private let gap1: CGFloat = 7, gap2: CGFloat = 7
     private let buttonsH: CGFloat = 28, gapDB: CGFloat = 8
 
-    /// The recording layout for the current power mode — the mode `show()` / `dismissToast()` /
-    /// `setThinking(false)` / `update()` revert to. Final-only uses the scope pill; Live uses the full box.
-    private var recordingMode: HUDDisplayMode { finalOnly ? .pillScope : .fullRecording }
-    /// The toast layout for the current power mode: a plain Final-only toast rides in a pill; a forced-full
-    /// toast (`answer()`) or any full-power toast uses the readable full box.
-    private func toastMode(forceFull: Bool) -> HUDDisplayMode { (finalOnly && !forceFull) ? .pillToast : .fullToast }
+    /// The toast layout: a plain toast rides in a pill; a forced-full toast (`answer()`) uses the
+    /// readable full box.
+    private func toastMode(forceFull: Bool) -> HUDDisplayMode { forceFull ? .fullToast : .pillToast }
 
     override init() {
         W = min(1080, (NSScreen.main?.visibleFrame.width ?? 1100) - 80)
@@ -248,13 +235,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         effect.layer?.masksToBounds = true
 
         statusLabel.maximumNumberOfLines = 1
-        recDot.wantsLayer = true
-        recDot.layer?.backgroundColor = NSColor(srgbRed: 1, green: 0.27, blue: 0.27, alpha: 1).cgColor
-        recDot.layer?.cornerRadius = 3.5
-        recDot.layer?.shadowColor = NSColor(srgbRed: 1, green: 0.27, blue: 0.27, alpha: 1).cgColor
-        recDot.layer?.shadowRadius = 4; recDot.layer?.shadowOpacity = 0.8; recDot.layer?.shadowOffset = .zero
-        recDot.layer?.masksToBounds = false
-        recLabel.attributedStringValue = Phosphor.kerned("REC", color: NSColor(srgbRed: 1, green: 0.27, blue: 0.27, alpha: 1), size: 11, kern: 2)
 
         transcription.maximumNumberOfLines = 0
         transcription.lineBreakMode = .byWordWrapping
@@ -308,8 +288,6 @@ final class HUDPanel: NSObject, HUDPresenting {
 
         display.addSubview(handle)
         display.addSubview(statusLabel)
-        display.addSubview(recDot)
-        display.addSubview(recLabel)
         display.addSubview(settingsButton)
         display.addSubview(keycap)
         display.addSubview(slider)
@@ -359,7 +337,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// apply from the next take). Scale drives the full HUD's width, scope height, and body font;
     /// the pill has its own scale applied in `layoutPill`.
     private func refreshDisplaySettings() {
-        finalOnly = Settings.powerMode.usesCompactHUD
         scale = CGFloat(Settings.hudScale)
         W = min(1080 * scale, (NSScreen.main?.visibleFrame.width ?? 1100) - 80)
         waveH = round(72 * scale)
@@ -412,7 +389,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         case .thinking:  infoPill.hide(); layoutThinking(); return
         case .pillToast: infoPill.hide(); layoutPillToast(); return   // in-pill status toast
         case .pillScope: layoutPill(); return                         // layoutPill drives the info pill
-        case .fullRecording, .fullToast: break                        // fall through to the full CRT box below
+        case .fullToast: break                                        // fall through to the full CRT box below
         }
         layoutFullBox()
     }
@@ -440,7 +417,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         transcription.frame = NSRect(x: PADX, y: padBottom, width: innerW, height: textH)
 
         // Right cluster, laid out right-to-left: gear, transform keycap (FIXED spot),
-        // [Cleanup slider when Cleanup owns the slot], REC.
+        // [Cleanup slider when Cleanup owns the slot].
         settingsButton.frame = NSRect(x: W - PADX - gearW, y: rowY - 2, width: gearW, height: statusH + 4)
         var rx = W - PADX - gearW - 10
         let kcW: CGFloat = 14
@@ -456,11 +433,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         } else {
             slider.isHidden = true
         }
-        // Measure "REC" rather than hardcoding a width — the Helvetica Neue + kerning rendering is
-        // wider than the old fixed 32px box and was clipping to "RE".
-        let recW = ceil(recLabel.attributedStringValue.size().width) + 4
-        recLabel.frame = NSRect(x: rx - recW, y: rowY - 1, width: recW, height: statusH + 2)
-        recDot.frame = NSRect(x: rx - recW - 11, y: rowY + (statusH - 7) / 2, width: 7, height: 7)
 
         let lw = lockButton.intrinsicContentSize.width, sw = stopButton.intrinsicContentSize.width
         let total = lw + 12 + sw
@@ -471,15 +443,14 @@ final class HUDPanel: NSObject, HUDPresenting {
         spinner.isHidden = true
         handle.isHidden = false; statusLabel.isHidden = false; settingsButton.isHidden = false
         wave.isHidden = false; transcription.isHidden = false
-        recDot.isHidden = !showRec; recLabel.isHidden = !showRec
         lockButton.isHidden = false; stopButton.isHidden = false
     }
 
     // MARK: public API (unchanged shape for DictationController)
 
     func show() {
-        refreshDisplaySettings()         // re-read Power Mode + scales for this take
-        mode = recordingMode             // a fresh take: Final-only scope pill or Live box
+        refreshDisplaySettings()         // re-read scales for this take
+        mode = .pillScope                // a fresh take is always the scope pill
         userDragged = false              // always spawn at the position-setting home
         presentForCurrentMode()
     }
@@ -496,14 +467,11 @@ final class HUDPanel: NSObject, HUDPresenting {
         switch mode {
         case .pillToast:
             wave.stop()                                  // the pill-toast hides the scope for its dwell
-            caretTimer?.invalidate(); caretTimer = nil
         case .pillScope:
             // The Final-only pill's scope runs at half rate.
             wave.start(fps: 30)
-            caretTimer?.invalidate(); caretTimer = nil   // no visible transcript -> no caret blink
-        case .fullRecording, .fullToast:
+        case .fullToast:
             wave.start(fps: 60)
-            startCaret()
         case .thinking:
             break                                        // setThinking owns the spinner bring-up
         }
@@ -522,11 +490,11 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     func hide() {
-        toastTimer?.invalidate(); caretTimer?.invalidate(); caretTimer = nil
+        toastTimer?.invalidate()
         toastAction = nil
         toastClickView?.onClick = nil
         thinkingActivity.setProcessing(false)
-        mode = .fullRecording            // neutral resting mode; the next show()/toast() re-derives it
+        mode = .pillScope                // neutral resting mode; the next show()/toast() re-derives it
         pillToastLabel.isHidden = true
         wave.stop()
         spinner.stop(); spinner.isHidden = true
@@ -586,7 +554,7 @@ final class HUDPanel: NSObject, HUDPresenting {
             spinner.stop()
             spinner.isHidden = true
             if mode == .thinking {
-                mode = recordingMode
+                mode = .pillScope
                 relayout()
             }
             return
@@ -600,7 +568,6 @@ final class HUDPanel: NSObject, HUDPresenting {
     private func presentThinking() {
         let wasThinking = (mode == .thinking)
         mode = .thinking
-        caretTimer?.invalidate(); caretTimer = nil
         wave.stop()
         badge.hide()
         if panel.isVisible { origin = panel.frame.origin }  // else applyHome positions it
@@ -639,7 +606,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         lockButton.isHidden = hidden; stopButton.isHidden = hidden
         pillToastLabel.isHidden = true   // never part of the recording chrome; the pill-toast shows it explicitly
         slider.isHidden = hidden || !cleanupEnabled
-        recDot.isHidden = hidden || !showRec; recLabel.isHidden = hidden || !showRec
     }
 
     /// The compact "thinking" layout: a small CRT box centered where the HUD was, holding only the
@@ -675,9 +641,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         let pw = round(HUDPillMetrics.baseWidth * ps), ph = round(HUDPillMetrics.baseHeight * ps)
         presentBox(panelSize: NSSize(width: pw, height: ph), cornerRadius: ph / 2)
         spinner.isHidden = true
-        setRecordingChrome(hidden: true)   // hides the REC dot/label too — the pill is strictly the scope now
-        recDot.isHidden = true
-        recLabel.isHidden = true
+        setRecordingChrome(hidden: true)   // the pill is strictly the scope now
         // The scope fills the whole capsule interior; the trace's alpha fade (WaveformView) softens
         // the left/right ends into the rounded caps.
         wave.isHidden = false
@@ -754,8 +718,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         presentBox(panelSize: NSSize(width: capW, height: capH), cornerRadius: capH / 2)
         display.borderColor = nil                        // same borderless CRT look as the scope pill
         spinner.isHidden = true
-        setRecordingChrome(hidden: true)                 // scope + REC + buttons hidden for the dwell
-        recDot.isHidden = true; recLabel.isHidden = true
+        setRecordingChrome(hidden: true)                 // scope + buttons hidden for the dwell
 
         pillToastLabel.attributedStringValue = attr
         pillToastLabel.frame = NSRect(x: (capW - textW) / 2, y: (capH - textH) / 2, width: textW, height: textH)
@@ -780,22 +743,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     func update(state: String, target: String?, text: String, locked: Bool) {
-        toastTimer?.invalidate()
-        // A real dictation state supersedes any lingering toast layout; the cleanup-wait spinner (thinking)
-        // is not a toast and stays until setThinking(false) tears it down.
-        if mode != .thinking { mode = recordingMode }
         lockedState = locked   // latch so the pill's info capsule can gate its lock glyph
-        let up = state.uppercased()
-        showRec = !(up.contains("TRANSCRIB") || up.contains("CLEAN"))
-        let line = NSMutableAttributedString(attributedString:
-            Phosphor.kerned(state.uppercased(), color: Phosphor.green.withAlphaComponent(0.5), size: 11, kern: 3))
-        if let target = target {
-            line.append(Phosphor.kerned("    \(target)", color: Phosphor.green.withAlphaComponent(0.28), size: 11, kern: 1))
-        }
-        statusLabel.attributedStringValue = line
-        lockButton.set(title: locked ? "Unlock" : "Lock", symbol: locked ? "lock.open.fill" : "lock.fill")
-        currentText = text
-        renderText()
         relayout()
     }
 
@@ -807,13 +755,11 @@ final class HUDPanel: NSObject, HUDPresenting {
         toastTimer?.invalidate()
         toastAction = action
         toastClickView?.onClick = action == nil ? nil : { [weak self] in self?.toastClicked() }
-        caretTimer?.invalidate(); caretTimer = nil
-        refreshDisplaySettings()          // re-read Power Mode so the pill/full pick is current
+        refreshDisplaySettings()          // re-read scales so the pill sizing is current
         mode = toastMode(forceFull: forceFull)
         // A toast over a live take is transient, so preserve the origin chosen through the drag handle.
         // Standalone toasts keep the historical behavior of re-homing to the position setting.
         if !takeActive { userDragged = false }
-        showRec = false
         statusLabel.attributedStringValue = NSAttributedString(string: "")
         currentText = message
         transcription.attributedStringValue = transcriptionAttr(message)   // full-box path (forceFull / full mode)
@@ -838,10 +784,9 @@ final class HUDPanel: NSObject, HUDPresenting {
             return
         }
         guard takeActive else { hide(); return }
-        refreshDisplaySettings()          // re-read Power Mode so the revert target matches the take
-        mode = recordingMode
-        showRec = true                    // recording shows the REC dot again (the toast hid it; the scope pill hides it regardless)
-        presentForCurrentMode()           // re-orderFrontRegardless + restart the wave/caret for the recording scope
+        refreshDisplaySettings()          // re-read scales so the revert target matches the take
+        mode = .pillScope
+        presentForCurrentMode()           // re-orderFrontRegardless + restart the wave for the recording scope
     }
 
     /// Land a web-search answer (Option+L / Option+G) in the read-only CRT box. Reuses the proven toast
@@ -852,18 +797,17 @@ final class HUDPanel: NSObject, HUDPresenting {
         // ~0.06s per character on top of a 12s floor, capped at 45s — a one-liner gets ~12s, a full
         // paragraph ~30-40s.
         let dwell = min(45.0, max(12.0, 12.0 + Double(text.count) * 0.06))
-        toast(text, duration: dwell, forceFull: true)   // a paragraph stays in the full box in either mode
+        toast(text, duration: dwell, forceFull: true)   // a paragraph stays in the full box
     }
 
-    /// Offscreen render seam for `--hud-render`: lay out a Final-only `toast()` (in-pill capsule) or a
+    /// Offscreen render seam for `--hud-render`: lay out a plain `toast()` (in-pill capsule) or a
     /// forced-full toast / `answer()` (full box) for `message` WITHOUT ordering the panel on screen, and
     /// return a bitmap of the CRT `display` composite (capsule/box + text). In-process — no screen
-    /// capture. The caller sets Power Mode and display scales via Settings before calling.
+    /// capture. The caller sets the display scales via Settings before calling.
     func renderToastForSeam(message: String, forceFull: Bool) -> CGImage? {
         refreshDisplaySettings()
         mode = toastMode(forceFull: forceFull)
         userDragged = false
-        showRec = false
         statusLabel.attributedStringValue = NSAttributedString(string: "")
         currentText = message
         transcription.attributedStringValue = transcriptionAttr(message)
@@ -887,9 +831,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     }
 
     /// Test seams for the Item-A scope pill: the scope's frame (to assert it now spans the full pill
-    /// width) and whether the REC dot is hidden (it must be, in pill mode).
+    /// width).
     var pillWaveFrameForTesting: NSRect { wave.frame }
-    var pillRecDotHiddenForTesting: Bool { recDot.isHidden }
 
     /// Test seams for the BUG 1 revert pin: whether the panel is on screen, and whether the scope
     /// oscilloscope is animating. After a mid-take toast dwell reverts to the recording scope, BOTH must
@@ -931,20 +874,4 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// the capsule). Empty = healthy. Symmetric to `infoPillInvisibleContentForTesting`; guards the
     /// stranded-content class (item 1a bleed / item 2 jumble). See HUDProbe.
     var infoPillStrayVisibleContentForTesting: [String] { infoPill.strayVisibleContentForTesting }
-
-    // MARK: caret + text
-
-    private func renderText() {
-        let shown = currentText + (caretOn ? " ▋" : "")
-        transcription.attributedStringValue = transcriptionAttr(shown.isEmpty ? "…" : shown)
-    }
-    private func startCaret() {
-        caretTimer?.invalidate()
-        caretOn = true
-        caretTimer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.caretOn.toggle()
-            self.renderText()
-        }
-    }
 }

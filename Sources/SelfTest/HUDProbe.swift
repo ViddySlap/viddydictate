@@ -1,11 +1,10 @@
 import Cocoa
 
-/// Headless-ish HUD layout probe (`--hud-probe`): drive the real `HUDPanel` through the display
-/// settings matrix — Final-only pill vs Live HUD, all nine `HUDPosition` anchors, both size scales —
+/// Headless-ish HUD layout probe (`--hud-probe`): drive the real `HUDPanel` through the scope-pill and
+/// toast display settings — anchors, both size scales —
 /// and assert the resulting panel frames numerically. Needs a GUI session (panels flash briefly on
-/// screen) but no mic, no key tap, no LM Studio. The dictation-side Final-only behavior (the skipped
-/// partial-preview loop) is a one-line guard exercised in live use; this probe covers the layout
-/// math, which is where regressions would hide.
+/// screen) but no mic, no key tap, no LM Studio. It covers the layout math, which is where regressions
+/// would hide.
 enum HUDProbe {
     private static var failures = 0
 
@@ -33,9 +32,6 @@ enum HUDProbe {
         print("[hud-probe] screen visibleFrame=\(vf)")
         let hud = HUDPanel()
 
-        probeFullHUDDefault(hud, visibleFrame: vf)
-        probeFullHUDAnchors(hud, visibleFrame: vf)
-        probeFullHUDScale(hud, visibleFrame: vf)
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
         probeLowPowerToast(hud, visibleFrame: vf)
@@ -48,46 +44,8 @@ enum HUDProbe {
         return failures == 0
     }
 
-    private static func probeFullHUDDefault(_ hud: HUDPanel, visibleFrame vf: NSRect) {
-        // 1) Full HUD at scale 1.0, default position: today's layout (width min(1080, screen-80),
-        //    bottom-centered 80pt up).
-        Settings.powerMode = .live
-        Settings.hudScale = 1.0
-        Settings.hudPosition = .bottomCenter
-        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
-        hud.show()
-        let f = hud.frameForTesting
-        let expectW = min(1080, vf.width - 80)
-        check("full-width", approx(f.width, expectW), "width=\(f.width) expect≈\(expectW)")
-        check("full-bottom-center-x", approx(f.midX, vf.midX), "midX=\(f.midX) expect≈\(vf.midX)")
-        check("full-bottom-center-y", approx(f.minY, vf.minY + 80), "minY=\(f.minY) expect≈\(vf.minY + 80)")
-    }
-
-    private static func probeFullHUDAnchors(_ hud: HUDPanel, visibleFrame vf: NSRect) {
-        // 2) Every anchor position homes the panel to the right corner/edge (full HUD).
-        for pos in HUDPosition.allCases {
-            Settings.hudPosition = pos
-            hud.show()
-            let f = hud.frameForTesting
-            let expect = pos.origin(for: f.size, in: vf)
-            check("anchor-\(pos.rawValue)",
-                  approx(f.origin.x, expect.x) && approx(f.origin.y, expect.y),
-                  "origin=\(f.origin) expect≈\(expect)")
-        }
-    }
-
-    private static func probeFullHUDScale(_ hud: HUDPanel, visibleFrame vf: NSRect) {
-        // 3) HUD scale shrinks the full layout.
-        Settings.hudPosition = .bottomCenter
-        Settings.hudScale = 0.6
-        hud.show()
-        let f = hud.frameForTesting
-        check("full-scaled-width", approx(f.width, 1080 * 0.6), "width=\(f.width) expect≈\(1080 * 0.6)")
-    }
-
     private static func probeLowPowerPill(_ hud: HUDPanel, visibleFrame vf: NSRect) {
         // 4) Low-power pill: compact capsule, scaled, honoring the anchor.
-        Settings.powerMode = .finalOnly
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .topRight
@@ -100,13 +58,11 @@ enum HUDProbe {
               approx(f.origin.x, pillExpect.x) && approx(f.origin.y, pillExpect.y),
               "origin=\(f.origin) expect≈\(pillExpect)")
 
-        // Item A: the scope spans the FULL pill width (x≈0, width≈pill width), and the REC dot is
-        // gone in pill mode (the pill is strictly the oscilloscope now).
+        // Item A: the scope spans the FULL pill width (x≈0, width≈pill width).
         var wf = hud.pillWaveFrameForTesting
         check("pill-scope-full-width",
               approx(wf.origin.x, 0) && approx(wf.width, 300),
               "waveFrame=\(wf) expect x≈0, width≈300")
-        check("pill-no-rec-dot", hud.pillRecDotHiddenForTesting, "recDot hidden=\(hud.pillRecDotHiddenForTesting) expect true")
 
         Settings.hudPillScale = 1.5
         hud.show()
@@ -252,21 +208,14 @@ enum HUDProbe {
     }
 
     private static func probeModeAdaptiveRouterToast(_ hud: HUDPanel, visibleFrame vf: NSRect) {
-        // Router status toasts use the default non-forced path. Pin that exact path against BOTH Power
-        // Modes so a current-mode refresh cannot silently collapse back to an always-full presentation.
+        // Router status toasts use the default non-forced path. Pin that exact path renders in the pill
+        // so a current-mode refresh cannot silently collapse back to an always-full presentation.
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .bottomCenter
         let fullBoxW = min(1080, vf.width - 80)
         let message = "🔒 Private vault files are refused."
 
-        Settings.powerMode = .live
-        hud.toast(message, duration: 0.2)
-        let liveToast = hud.frameForTesting
-        check("router-toast-live-uses-full-box", approx(liveToast.width, fullBoxW),
-              "width=\(liveToast.width) expect~\(fullBoxW)")
-
-        Settings.powerMode = .finalOnly
         hud.toast(message, duration: 0.2)
         let finalOnlyToast = hud.frameForTesting
         check("router-toast-final-only-uses-pill",
@@ -313,7 +262,6 @@ enum HUDProbe {
         //    pre-fix code the dwell called hide(), so the whole HUD vanished for the rest of the take while
         //    audio kept capturing — the exact BUG 1 symptom. This pin fails there and passes only with the
         //    take-aware dismissToast(). It is the pin the last conductor recommended but never added.
-        Settings.powerMode = .finalOnly
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .topRight            // 300x64 topRight needs no clamp — a stable scope home

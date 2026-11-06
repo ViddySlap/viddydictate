@@ -213,6 +213,11 @@ final class ModelsPowerSettingsView: NSView {
 
     // MARK: build
 
+    /// Models-tab intro: routing is explicit per route, and the cloud routes move the work off this laptop.
+    private static let modelsIntro =
+        "Every LLM route keeps its own explicit provider, model, effort, and prompt choices. "
+        + "Cloud providers move the work off this laptop."
+
     private func rebuild() {
         freshnessCache = ModelFreshnessProbe.loadCache()
         codexCatalogCache = codexCatalogLoader()
@@ -222,7 +227,7 @@ final class ModelsPowerSettingsView: NSView {
         addSubview(text("Models", x: L, y: y, width: W - 2 * L,
                         size: 19, weight: .semibold, color: .labelColor))
         y += 28
-        let intro = wrap(PowerSettingsCopy.modelsIntro,
+        let intro = wrap(Self.modelsIntro,
                          x: L, y: y, width: W - 2 * L, height: 42)
         addSubview(intro)
         y += 50

@@ -1022,7 +1022,7 @@ extension NotesProbe {
                                to: "private func notes() {")
         let beginRecordingBody = sourceSlice(controllerSrc,
                                        from: "private func beginRecording() {",
-                                       to: "private func tickPartial() {")
+                                       to: "private func finishNothingHeard(")
         let micStartErrorBody = sourceSlice(beginRecordingBody,
                                       from: "} catch {",
                                       to: "state = .recording")

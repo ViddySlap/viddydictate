@@ -65,7 +65,6 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case stickyCloudService = "--sticky-cloud-service"
     case webSearchTransportSelftest = "--websearch-transport-selftest"
     case webSearchSelftest = "--websearch-selftest"
-    case lowPowerSelftest = "--lowpower-selftest"
     case hudPolishSelftest = "--hud-polish-selftest"
     case residencySelftest = "--residency-selftest"
     case historySelftest = "--history-selftest"

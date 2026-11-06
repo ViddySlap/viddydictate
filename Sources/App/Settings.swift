@@ -120,15 +120,9 @@ enum Settings {
         // macOS system default. Name is display-only, so the picker can label a pinned-but-absent mic.
         static let inputDeviceUID  = "inputDeviceUID"
         static let inputDeviceName = "inputDeviceName"
-        // Power behavior: the canonical enum is manual/sticky. `lowPowerMode` is read once only to migrate
-        // the pre-A3 Bool without changing the user's chosen presentation/transcription behavior.
-        static let powerMode       = "powerMode"
-        static let legacyLowPowerMode = "lowPowerMode"
         // The pre-A3 Low Power policy's per-route Claude bundles remain readable for A1 migration
         // compatibility, but A3 makes this blob inert: Power Mode never selects a provider or model.
         static let lowPowerPolicy  = "lowPowerPolicy"
-        // Material battery state for which the one-shot advisory has already been shown/dismissed.
-        static let batteryAdvisoryDismissal = "batteryAdvisoryDismissal"
         static let cloudUpdateAutoCheck = "cloudUpdateAutoCheck"
         static let hudPosition     = "hudPosition"        // HUDPosition rawValue
         static let hudScale        = "hudScale"           // regular-HUD scale factor
@@ -202,7 +196,6 @@ enum Settings {
         static let stickyNotesCheatSheetButton = true   // the "i" cheat-sheet button exists by default
         static let inputDeviceUID = ""     // default: follow the macOS system default input device
         static let inputDeviceName = ""
-        static let powerMode = PowerMode.live
         static let cloudUpdateAutoCheck = Settings.cloudUpdateAutoCheckDefault
         static let hudPosition = HUDPosition.bottomCenter
         static let hudScale = 1.0
@@ -223,7 +216,7 @@ enum Settings {
     static var isDictationActive = false
 
     static func registerDefaults() {
-        migrateLegacyPowerModeIfNeeded()
+        removeOrphanedLiveViewKeys()
         d.register(defaults: [
             K.sensitivity: Defaults.sensitivity,
             K.gain: Defaults.gain,
@@ -273,7 +266,6 @@ enum Settings {
             K.stickyNotesCheatSheetButton: Defaults.stickyNotesCheatSheetButton,
             K.inputDeviceUID: Defaults.inputDeviceUID,
             K.inputDeviceName: Defaults.inputDeviceName,
-            K.powerMode: Defaults.powerMode.rawValue,
             K.cloudUpdateAutoCheck: Defaults.cloudUpdateAutoCheck,
             K.hudPosition: Defaults.hudPosition.rawValue,
             K.hudScale: Defaults.hudScale,
@@ -284,7 +276,7 @@ enum Settings {
         ])
     }
 
-    // MARK: power behavior, battery advisory, and HUD position + size
+    // MARK: HUD position + size
 
     /// Allowed range for the regular-HUD scale factor (1.0 = today's full-width HUD).
     static let hudScaleRange = 0.6...1.25
@@ -292,15 +284,6 @@ enum Settings {
     static let hudPillScaleRange = 0.5...2.0
     /// Allowed range for the cleanup-wait spinner scale factor (1.0 = the default ring).
     static let hudSpinnerScaleRange = 0.5...2.0
-
-    /// Manual/sticky Power Mode. Provider/model routing is deliberately absent from this accessor.
-    static var powerMode: PowerMode {
-        get {
-            let raw = d.string(forKey: K.powerMode) ?? Defaults.powerMode.rawValue
-            return PowerMode(rawValue: raw) ?? Defaults.powerMode
-        }
-        set { d.set(newValue.rawValue, forKey: K.powerMode); notify() }
-    }
 
     /// On restart, wait for the app to settle and then check cloud provider health and preset freshness.
     /// The launch scheduler still defers the live calls until dictation is idle.
@@ -318,25 +301,12 @@ enum Settings {
         }
     }
 
-    /// Migrate the old Bool once. A valid canonical value always wins; invalid canonical data safely
-    /// falls back to Live. The legacy key is removed after conversion so there is only one authority.
-    static func migrateLegacyPowerModeIfNeeded() {
-        let domain = Bundle.main.bundleIdentifier ?? AppIdentity.bundleID
-        let persisted = d.persistentDomain(forName: domain) ?? [:]
-        if let raw = persisted[K.powerMode] as? String, PowerMode(rawValue: raw) != nil {
-            if persisted[K.legacyLowPowerMode] != nil { d.removeObject(forKey: K.legacyLowPowerMode) }
-            return
-        }
-
-        let legacy: Bool?
-        if let value = persisted[K.legacyLowPowerMode] as? Bool { legacy = value }
-        else if let value = persisted[K.legacyLowPowerMode] as? NSNumber { legacy = value.boolValue }
-        else { legacy = nil }
-
-        if legacy != nil || persisted[K.powerMode] != nil {
-            d.set((legacy == true ? PowerMode.finalOnly : .live).rawValue, forKey: K.powerMode)
-        }
-        if persisted[K.legacyLowPowerMode] != nil { d.removeObject(forKey: K.legacyLowPowerMode) }
+    /// Remove the orphaned Live view keys once. Final-only is the only behaviour now, so the old
+    /// manual mode, its pre-A3 Bool, and the battery-advisory dismissal have no reader left.
+    static func removeOrphanedLiveViewKeys(_ defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: "power" + "Mode")
+        defaults.removeObject(forKey: "low" + "Power" + "Mode")
+        defaults.removeObject(forKey: "battery" + "Advisory" + "Dismissal")
     }
 
     /// Copy the former bundle-id preferences into the new domain exactly once. Existing values in
@@ -362,22 +332,6 @@ enum Settings {
         for (key, value) in current { migrated[key] = value }
         migrated[legacyDefaultsMigrationMarker] = true
         defaults.setPersistentDomain(migrated, forName: currentDomain)
-    }
-
-    static var batteryAdvisoryDismissedState: BatteryAdvisoryMaterialState? {
-        get {
-            guard let data = d.data(forKey: K.batteryAdvisoryDismissal) else { return nil }
-            return try? JSONDecoder().decode(BatteryAdvisoryMaterialState.self, from: data)
-        }
-        set {
-            guard let newValue = newValue else {
-                d.removeObject(forKey: K.batteryAdvisoryDismissal)
-                return
-            }
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            if let data = try? encoder.encode(newValue) { d.set(data, forKey: K.batteryAdvisoryDismissal) }
-        }
     }
 
     // MARK: one-time legacy Low Power provider-bundle migration (inert after A3)

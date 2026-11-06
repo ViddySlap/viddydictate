@@ -288,9 +288,6 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .webSearchSelftest: .init(tier: .services) { _ in
         WebSearchSelfTest.run() ? 0 : 1
     },
-    .lowPowerSelftest: .init(tier: .deterministic) { _ in
-        LowPowerSelfTest.run() ? 0 : 1
-    },
     .hudPolishSelftest: .init(tier: .deterministic) { _ in
         HUDPolishSelfTest.run() ? 0 : 1
     },

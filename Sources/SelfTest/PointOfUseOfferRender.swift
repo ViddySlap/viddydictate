@@ -428,7 +428,6 @@ enum PointOfUseOfferRender {
     private static func renderPriorToast(outDir: String) {
         let snapshot = HUDDefaultsSnapshot()
         defer { snapshot.restore() }
-        Settings.powerMode = .finalOnly
         Settings.hudScale = 1.0
         Settings.hudPillScale = 1.0
         Settings.hudPosition = .bottomCenter
