@@ -73,6 +73,7 @@ final class DictationController {
     /// this controller. `AppDelegate` wires its callbacks (formerly wired onto the controller directly).
     let notesDelivery: NotesDeliveryCoordinator
     private let callbacks: DictationControllerCallbacks
+    private var recentDictationsPanel: RecentDictationsPanel?
     private var target: DictationTarget?
     private var targetWasNotesWindow = false
     /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
@@ -375,7 +376,20 @@ final class DictationController {
         case .bullseyeToggle:   toggleBullseye()
         case .bullseyeReveal:   revealBullseye()
         case .history:          callbacks.onOpenHistory()
+        case .recentDictations: showRecentDictations()
         }
+    }
+
+    /// Right-Option+Shift+H toggles the recent-dictations pop-up: a second press closes it.
+    private func showRecentDictations() {
+        if let panel = recentDictationsPanel, panel.isVisible {
+            panel.dismiss()
+            return
+        }
+        if recentDictationsPanel == nil {
+            recentDictationsPanel = RecentDictationsPanel(onOpenHistory: callbacks.onOpenHistory)
+        }
+        recentDictationsPanel?.show()
     }
 
     /// Route a matched custom-mode chord (by id) through the shared one-shot engine. Resolves the id to

@@ -97,10 +97,11 @@ enum FeatureTour {
                 "While you hold {wakeup}: tap {lock} to latch hands-free, hold Option and tap Esc to cancel the take, "
                     + "and {undo} to undo the last result.",
                 "Past dictations are on the History tab; hold {wakeup} and tap {history} to open it. Recent takes' audio stays on this Mac (Audio tab).",
+                "Hold {wakeup} and tap {recentDictations} to see your last three takes.",
             ],
             nonObvious: "The Dictionary teaches Whisper how to spell your names and terms. "
                 + "Hold {wakeup} and tap {dictionary} to open it.",
-            commands: [.wakeup, .command(.lock), .command(.undo), .command(.dictionary), .command(.history)],
+            commands: [.wakeup, .command(.lock), .command(.undo), .command(.dictionary), .command(.history), .command(.recentDictations)],
             settingsLink: .dictionary,
             liveStatus: .practice),
         FeatureTourPage(
