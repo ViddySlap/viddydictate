@@ -1,95 +1,31 @@
 import Cocoa
 
-// MARK: - HUD home position
-
-/// Where the HUD (full or Final-only pill) anchors itself each time it appears. Persisted as the
-/// rawValue in Settings; `origin(for:in:)` turns the anchor into a concrete bottom-left origin for
-/// the current panel size, so the same setting drives both HUD shapes.
-enum HUDPosition: String, CaseIterable {
-    case topLeft, topCenter, topRight
-    case centerLeft, center, centerRight
-    case bottomLeft, bottomCenter, bottomRight
-
-    var label: String {
-        switch self {
-        case .topLeft:      return "Top Left"
-        case .topCenter:    return "Top Middle"
-        case .topRight:     return "Top Right"
-        case .centerLeft:   return "Left Middle"
-        case .center:       return "Center"
-        case .centerRight:  return "Right Middle"
-        case .bottomLeft:   return "Bottom Left"
-        case .bottomCenter: return "Bottom Middle"
-        case .bottomRight:  return "Bottom Right"
-        }
-    }
-
-    /// Bottom-left origin for a panel of `size` inside the visible frame `vf`. The bottom margin
-    /// keeps the historical bottom-center home (80pt above the dock line); sides and top sit a
-    /// little tighter.
-    func origin(for size: NSSize, in vf: NSRect) -> NSPoint {
-        let mx: CGFloat = 48, mTop: CGFloat = 48, mBottom: CGFloat = 80
-        let x: CGFloat
-        switch self {
-        case .topLeft, .centerLeft, .bottomLeft:    x = vf.minX + mx
-        case .topCenter, .center, .bottomCenter:    x = vf.midX - size.width / 2
-        case .topRight, .centerRight, .bottomRight: x = vf.maxX - mx - size.width
-        }
-        let y: CGFloat
-        switch self {
-        case .topLeft, .topCenter, .topRight:          y = vf.maxY - mTop - size.height
-        case .centerLeft, .center, .centerRight:       y = vf.midY - size.height / 2
-        case .bottomLeft, .bottomCenter, .bottomRight: y = vf.minY + mBottom
-        }
-        return NSPoint(x: x, y: y)
-    }
-}
-
 // MARK: - shared pill base size
 
-/// The base (scale=1.0) footprint of the Final-only scope/info pill — the floor every scaled pill
-/// size (`round(_ * Settings.hudPillScale)`) derives from. HUDProbe.swift's golden-value pixel
-/// assertions are intentionally left as literal 300/64 (NOT wired to this constant) so they still
-/// catch accidental drift here — do not touch HUDProbe.swift in this change.
+/// The base (scale=1.0) footprints of the Final-only pills. `baseWidth`/`baseHeight` are the in-pill
+/// toast floor (`baseHeight` is also the scope pill's height); `scopeWidth` is the recording scope
+/// pill's width. HUDProbe.swift's golden asserts are literal 112/64 for the scope and 300 for the toast
+/// floor and are not wired to these constants.
 enum HUDPillMetrics {
     static let baseWidth: CGFloat = 300
+    static let scopeWidth: CGFloat = 112
     static let baseHeight: CGFloat = 64
 }
 
-// MARK: - Drag handle (grip dots; moves the panel, persists position)
+// MARK: - Appearance size preview metrics
 
-final class DragHandle: NSView {
-    var onMoved: ((NSPoint) -> Void)?
-    private var startMouse = NSPoint.zero
-    private var startOrigin = NSPoint.zero
-
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let c = Phosphor.green.withAlphaComponent(0.4)
-        c.setFill()
-        let r: CGFloat = 1.4
-        for col in 0..<2 {
-            for row in 0..<3 {
-                let x = bounds.midX - 3 + CGFloat(col) * 6
-                let y = bounds.midY - 5 + CGFloat(row) * 5
-                NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: r * 2, height: r * 2)).fill()
-            }
-        }
+/// The Appearance size preview's base (scale=1.0) footprint: a quarter-size stand-in for the
+/// scope pill (150 by 32 points) plus the pointer arrow beside it. Every size the preview draws is
+/// derived from these times the live `Settings.hudUIScale`.
+enum HUDSizePreviewMetrics {
+    static let baseWidth: CGFloat = 150
+    static let baseHeight: CGFloat = 32
+    static let arrowHeight: CGFloat = 18
+    static func capsuleSize(forScale scale: Double) -> NSSize {
+        NSSize(width: round(baseWidth * CGFloat(scale)), height: round(baseHeight * CGFloat(scale)))
     }
-
-    override func mouseDown(with event: NSEvent) {
-        startMouse = NSEvent.mouseLocation
-        startOrigin = window?.frame.origin ?? .zero
-    }
-    override func mouseDragged(with event: NSEvent) {
-        guard let win = window else { return }
-        let now = NSEvent.mouseLocation
-        win.setFrameOrigin(NSPoint(x: startOrigin.x + (now.x - startMouse.x),
-                                   y: startOrigin.y + (now.y - startMouse.y)))
-    }
-    override func mouseUp(with event: NSEvent) {
-        if let o = window?.frame.origin { onMoved?(o) }
+    static func arrowHeight(forScale scale: Double) -> CGFloat {
+        round(arrowHeight * CGFloat(scale))
     }
 }
 

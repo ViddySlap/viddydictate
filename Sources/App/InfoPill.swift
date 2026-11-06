@@ -1,14 +1,15 @@
 import Cocoa
 import QuartzCore
 
-/// The low-power INFO PILL (Item B): a second, smaller phosphor capsule that floats just below the
-/// scope pill and surfaces the passive transform/lock indicators that the full HUD would otherwise show
-/// in its status row. It is CONTENT-GATED: it only exists while hands-free is locked, Cleanup is on, or
-/// a one-shot mode is armed; when none is true it is not shown at all, leaving the scope pill alone.
+/// The low-power INFO PILL (Item B): a second, smaller phosphor capsule that floats beside the scope
+/// pill on its row and surfaces the passive transform/lock indicators that the full HUD would otherwise
+/// show in its status row. It is CONTENT-GATED: it only exists while hands-free is locked, Cleanup is
+/// on, or a one-shot mode is armed; when none is true it is not shown at all, leaving the scope pill
+/// alone.
 ///
 /// Its own NSPanel (like the pop-up mode badge), so the scope pill's panel is never resized or moved
 /// when the info pill appears/disappears — the scope's on-screen position is invariant by construction,
-/// and the scope pill's `--hud-probe` `pill-size`/`pill-scale` assertions stay untouched.
+/// and the probe's golden size asserts are rewritten for the 112 point scope.
 ///
 /// Contents, laid out left→right, each conditional:
 ///   - a passive `lock.fill` glyph (only when locked),
@@ -17,8 +18,8 @@ import QuartzCore
 ///
 /// WIDTH is content-driven and ANIMATES: turning an element on widens the capsule first, THEN the new
 /// element fades in; turning one off fades it out first, THEN the capsule shrinks. The panel itself is
-/// a fixed transparent max-width band centered under the scope; only the inner capsule (`display`)
-/// grows/shrinks and re-centers, so the animation never disturbs the scope above it.
+/// a fixed transparent max-width band beside the scope on its row; only the inner capsule (`display`)
+/// grows/shrinks anchored to the near edge, so the animation never disturbs the scope beside it.
 final class InfoPillPanel: NSObject {
     private let panel: NSPanel
     private let container = NSView()
@@ -48,6 +49,8 @@ final class InfoPillPanel: NSObject {
     private var curSet: Set<String> = []
     private var applyGen = 0
     private var ps: CGFloat = 1
+    private enum Side { case right, left }
+    private var side: Side = .right
 
     /// The info pill has a FIXED MINIMUM size, independent of the scope pill's size setting. The scope
     /// pill can shrink freely, but the info pill floors here so its content (the `?` keycap and the
@@ -127,7 +130,7 @@ final class InfoPillPanel: NSObject {
     private func infoH(_ ps: CGFloat) -> CGFloat { round(34 * ps) }
     private func padX(_ ps: CGFloat) -> CGFloat { round(12 * ps) }
     private func gapEl(_ ps: CGFloat) -> CGFloat { round(9 * ps) }
-    private func gapBelow(_ ps: CGFloat) -> CGFloat { round(7 * ps) }
+    private func gapSide(_ ps: CGFloat) -> CGFloat { round(7 * ps) }
     private func bullseyeSize(_ ps: CGFloat) -> NSSize { NSSize(width: round(15 * ps), height: round(15 * ps)) }
     private func lockSize(_ ps: CGFloat) -> NSSize { NSSize(width: round(13 * ps), height: round(15 * ps)) }
     /// Square keycap box. The glyph size is NOT set here: `KeycapView` derives it from this box through
@@ -176,10 +179,12 @@ final class InfoPillPanel: NSObject {
         return padX(ps) * 2 + content + gapEl(ps) * CGFloat(present.count - 1)
     }
 
-    /// The capsule (`display`) frame WITHIN the panel for a given set, centered in the max-width band.
+    /// The capsule (`display`) frame WITHIN the panel for a given set, anchored to the near edge (the
+    /// edge beside the scope) of the max-width band.
     private func capsuleLocalFrame(_ set: Set<String>, _ ps: CGFloat) -> NSRect {
         let wMax = maxCapsuleWidth(ps), wc = capsuleWidth(set, ps), h = infoH(ps)
-        return NSRect(x: (wMax - wc) / 2, y: 0, width: wc, height: h)
+        let x = side == .right ? 0 : wMax - wc
+        return NSRect(x: x, y: 0, width: wc, height: h)
     }
 
     /// An element's frame WITHIN `display`'s bounds for a given set (nil if absent from the set).
@@ -204,20 +209,21 @@ final class InfoPillPanel: NSObject {
         return nil
     }
 
-    private func panelFrame(_ ps: CGFloat, under scope: NSRect) -> NSRect {
+    private func panelFrame(_ ps: CGFloat, beside scope: NSRect, side: Side) -> NSRect {
         let wMax = maxCapsuleWidth(ps), h = infoH(ps)
-        let x = scope.midX - wMax / 2
-        let y = scope.minY - gapBelow(ps) - h
+        let y = scope.midY - h / 2
+        let x = side == .right ? scope.maxX + gapSide(ps) : scope.minX - gapSide(ps) - wMax
         return NSRect(x: x, y: y, width: wMax, height: h)
     }
 
     // MARK: apply
 
-    /// Recompute + re-render the info pill for the live state, positioned under `scope`. `animated`
+    /// Recompute + re-render the info pill for the live state, positioned beside `scope` on its row. `animated`
     /// choreographs the widen-then-fade / fade-then-shrink transition; `false` snaps to the final
     /// layout synchronously (used by the offscreen render seam and any headless probe).
     func apply(locked: Bool, cleanupEnabled: Bool, level: Int, bullseyeArmed: Bool = false,
-               armedModeGlyph: String? = nil, scope: NSRect, ps rawPs: CGFloat, animated: Bool) {
+               armedModeGlyph: String? = nil, scope: NSRect, visible: NSRect, ps rawPs: CGFloat,
+               animated: Bool) {
         // Floor the pill's own scale so it never shrinks below its legible minimum, no matter how small
         // the scope pill's size setting is. Above the floor it tracks the setting (so 150% grows it too).
         let ps = max(rawPs, InfoPillPanel.minScale)
@@ -248,7 +254,8 @@ final class InfoPillPanel: NSObject {
             locked: locked,
             cleanup: cleanupEnabled,
             oneShotArmed: armedModeGlyph != nil)
-        let pf = panelFrame(ps, under: scope)
+        side = (scope.maxX + gapSide(ps) + maxCapsuleWidth(ps) <= visible.maxX) ? .right : .left
+        let pf = panelFrame(ps, beside: scope, side: side)
         let capLocal = capsuleLocalFrame(newSet, ps)
 
         applyGen += 1; let gen = applyGen
@@ -335,7 +342,8 @@ final class InfoPillPanel: NSObject {
         if appearing {
             // Seed a narrow empty capsule, then grow it — "the pill expands, then the element appears."
             let seedW = padX(ps) * 2
-            display.frame = NSRect(x: (pf.width - seedW) / 2, y: 0, width: seedW, height: infoH(ps))
+            let seedX = side == .right ? 0 : pf.width - seedW
+            display.frame = NSRect(x: seedX, y: 0, width: seedW, height: infoH(ps))
             display.alphaValue = 1
         }
         panel.orderFrontRegardless()
@@ -403,11 +411,12 @@ final class InfoPillPanel: NSObject {
     func renderCapsule(locked: Bool, cleanupEnabled: Bool, level: Int, bullseyeArmed: Bool = false,
                        armedModeGlyph: String? = nil, ps: CGFloat) -> CGImage? {
         // A fixed scope frame so the panel has somewhere to live; only the capsule bitmap is returned.
-        let scope = NSRect(x: 200, y: 400, width: round(HUDPillMetrics.baseWidth * ps),
+        let scope = NSRect(x: 200, y: 400, width: round(HUDPillMetrics.scopeWidth * ps),
                            height: round(HUDPillMetrics.baseHeight * ps))
         apply(locked: locked, cleanupEnabled: cleanupEnabled, level: level,
               bullseyeArmed: bullseyeArmed, armedModeGlyph: armedModeGlyph,
-              scope: scope, ps: ps, animated: false)
+              scope: scope, visible: NSRect(x: 0, y: 0, width: 4000, height: 3000),
+              ps: ps, animated: false)
         guard isShown else { return nil }
         display.layoutSubtreeIfNeeded()
         let b = display.bounds

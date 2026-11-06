@@ -25,7 +25,7 @@ enum HUDRender {
 
         // The pill scope interior at scale 1.0: full capsule width, 6pt top/bottom inset (matches
         // layoutPill's `wave.frame`).
-        let pw: CGFloat = HUDPillMetrics.baseWidth, ph: CGFloat = HUDPillMetrics.baseHeight
+        let pw: CGFloat = HUDPillMetrics.scopeWidth, ph: CGFloat = HUDPillMetrics.baseHeight
         let wave = WaveformView(frame: NSRect(x: 0, y: 0, width: pw, height: ph - 12))
 
         // A few cycles of a low-amplitude sine so the trace is clearly visible AND spans the width.
@@ -260,9 +260,7 @@ enum HUDRender {
         let snapshot = HUDDefaultsSnapshot()
         defer { snapshot.restore() }
 
-        Settings.hudScale = 1.0
-        Settings.hudPillScale = 1.0
-        Settings.hudPosition = .bottomCenter
+        Settings.hudUIScale = 1.0
 
         let hud = HUDPanel()
         var widths: [String: CGFloat] = [:]
@@ -296,7 +294,7 @@ enum HUDRender {
         chk("toast-short-legible", (centers["toast-short"] ?? 0) > 20, "center-green=\(fmt(centers["toast-short"] ?? 0))")
         chk("toast-long-legible", (centers["toast-long"] ?? 0) > 20, "center-green=\(fmt(centers["toast-long"] ?? 0))")
 
-        // `snapshot` restores hudLowPowerScale, so the contract pass may move the pill size freely.
+        // `snapshot` restores hudUIScale, so the contract pass may move the pill size freely.
         if !renderFailureToastContract(hud: hud, outDir: outDir, chk: chk) { pass = false }
         return pass
     }
@@ -350,11 +348,11 @@ enum HUDRender {
             + " \u{2014} pasted raw. Retry under Models on the Hotkeys tab."
 
         var ok = true
-        // 0.5 is the REAL low end of `Settings.hudPillScaleRange` and the only scale where the pre-LD3
+        // 0.7 is the REAL low end of `Settings.hudUIScaleRange` and the only scale where the pre-LD3
         // pill actually truncated. Note 0.9 is `InfoPillPanel.minScale`, which floors the sibling INFO
-        // pill, not this one — the toast pill has no such floor, which is why 0.5 has to be tested.
-        for scale in [0.5, Double(InfoPillPanel.minScale), 1.0] {
-            Settings.hudPillScale = scale
+        // pill, not this one — the toast pill has no such floor, which is why 0.7 has to be tested.
+        for scale in [Settings.hudUIScaleRange.lowerBound, Double(InfoPillPanel.minScale), 1.0] {
+            Settings.hudUIScale = scale
             var clipped: [String] = []
             var widest: (String, String, CGFloat) = ("", "", 0)
             for (key, message) in messages {

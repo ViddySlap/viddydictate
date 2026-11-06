@@ -413,8 +413,7 @@ enum FeatureTourRenderCases {
     private static func renderLargest(outDir: String, defaults: [Int: FeatureTourPageView]) {
         let snapshot = HUDDefaultsSnapshot()
         defer { snapshot.restore() }
-        Settings.hudScale = Settings.hudScaleRange.upperBound
-        Settings.hudPillScale = Settings.hudPillScaleRange.upperBound
+        Settings.hudUIScale = Settings.hudUIScaleRange.upperBound
         let tour = controller()
         for index in [0, 5] {
             let view = hosted(tour.makePageView(index))

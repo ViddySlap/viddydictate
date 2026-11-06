@@ -124,10 +124,7 @@ enum Settings {
         // compatibility, but A3 makes this blob inert: Power Mode never selects a provider or model.
         static let lowPowerPolicy  = "lowPowerPolicy"
         static let cloudUpdateAutoCheck = "cloudUpdateAutoCheck"
-        static let hudPosition     = "hudPosition"        // HUDPosition rawValue
-        static let hudScale        = "hudScale"           // regular-HUD scale factor
-        static let hudPillScale    = "hudLowPowerScale"   // low-power pill scale factor
-        static let hudSpinnerScale = "hudSpinnerScale"    // cleanup-wait spinner (ring) scale factor
+        static let hudUIScale = "hudUIScale"
         // Appearance: the one monochromatic theme accent ("#rrggbb"). Phosphor derives the whole palette
         // (native panels + the sticky-notes web island) from it; default = the phosphor green.
         static let themeColor      = "themeColorHex"
@@ -197,10 +194,7 @@ enum Settings {
         static let inputDeviceUID = ""     // default: follow the macOS system default input device
         static let inputDeviceName = ""
         static let cloudUpdateAutoCheck = Settings.cloudUpdateAutoCheckDefault
-        static let hudPosition = HUDPosition.bottomCenter
-        static let hudScale = 1.0
-        static let hudPillScale = 1.0
-        static let hudSpinnerScale = 1.0
+        static let hudUIScale = 1.0
         static let themeColor = Phosphor.defaultAccentHex   // "#00ff41" — the untouched phosphor green
         // Default stays Large V3 Turbo on the simple install (never silently changed).
         static let whisperModelRepo = WhisperModelCatalog.default.repo
@@ -216,6 +210,7 @@ enum Settings {
     static var isDictationActive = false
 
     static func registerDefaults() {
+        migrateHUDSizeKeys()
         removeOrphanedLiveViewKeys()
         d.register(defaults: [
             K.sensitivity: Defaults.sensitivity,
@@ -267,23 +262,46 @@ enum Settings {
             K.inputDeviceUID: Defaults.inputDeviceUID,
             K.inputDeviceName: Defaults.inputDeviceName,
             K.cloudUpdateAutoCheck: Defaults.cloudUpdateAutoCheck,
-            K.hudPosition: Defaults.hudPosition.rawValue,
-            K.hudScale: Defaults.hudScale,
-            K.hudPillScale: Defaults.hudPillScale,
-            K.hudSpinnerScale: Defaults.hudSpinnerScale,
+            K.hudUIScale: Defaults.hudUIScale,
             K.themeColor: Defaults.themeColor,
             K.whisperModelRepo: Defaults.whisperModelRepo,
         ])
     }
 
-    // MARK: HUD position + size
+    /// One-time migration from the retired HUD size keys to the single `hudUIScale`. The new value is the
+    /// old pill scale if one was stored (and positive), else the old HUD scale if one was stored (and
+    /// positive), else nothing is stored and the registered default 1.0 applies. It never overwrites an
+    /// existing `hudUIScale`, then removes the four retired keys. Idempotent. `domain` names the persistent
+    /// domain of `defaults` (the app's bundle domain for the standard defaults, a suite's own name for a suite).
+    static func migrateHUDSizeKeys(_ defaults: UserDefaults = .standard,
+                                   domain: String = Bundle.main.bundleIdentifier ?? AppIdentity.bundleID) {
+        let persisted = defaults.persistentDomain(forName: domain) ?? [:]
+        if defaults.object(forKey: K.hudUIScale) == nil || persisted[K.hudUIScale] == nil {
+            let pill = defaults.double(forKey: "hudLowPowerScale")
+            let hud = defaults.double(forKey: "hudScale")
+            let pick: Double?
+            if pill > 0 {
+                pick = pill
+            } else if hud > 0 {
+                pick = hud
+            } else {
+                pick = nil
+            }
+            if let pick = pick {
+                defaults.set(min(hudUIScaleRange.upperBound, max(hudUIScaleRange.lowerBound, pick)),
+                             forKey: K.hudUIScale)
+            }
+        }
+        defaults.removeObject(forKey: "hudLowPowerScale")
+        defaults.removeObject(forKey: "hudScale")
+        defaults.removeObject(forKey: "hudSpinnerScale")
+        defaults.removeObject(forKey: "hudPosition")
+    }
 
-    /// Allowed range for the regular-HUD scale factor (1.0 = today's full-width HUD).
-    static let hudScaleRange = 0.6...1.25
-    /// Allowed range for the Final-only pill scale factor (1.0 = the compact default pill).
-    static let hudPillScaleRange = 0.5...2.0
-    /// Allowed range for the cleanup-wait spinner scale factor (1.0 = the default ring).
-    static let hudSpinnerScaleRange = 0.5...2.0
+    // MARK: HUD size
+
+    /// Allowed range for the HUD UI size factor (1.0 = today's size).
+    static let hudUIScaleRange = 0.7...1.6
 
     /// On restart, wait for the app to settle and then check cloud provider health and preset freshness.
     /// The launch scheduler still defers the live calls until dictation is idle.
@@ -477,32 +495,10 @@ enum Settings {
         legacy.rememberedBundles[route] = row
     }
 
-    /// Where the HUD (full or pill) homes itself each time it appears. Dragging still moves it for
-    /// the current take; the next show returns to this anchor.
-    static var hudPosition: HUDPosition {
-        get {
-            let raw = d.string(forKey: K.hudPosition) ?? Defaults.hudPosition.rawValue
-            return HUDPosition(rawValue: raw) ?? Defaults.hudPosition
-        }
-        set { d.set(newValue.rawValue, forKey: K.hudPosition); notify() }
-    }
-
-    /// Regular-HUD scale factor, clamped to `hudScaleRange`.
-    static var hudScale: Double {
-        get { clampScale(d.double(forKey: K.hudScale), to: hudScaleRange, fallback: Defaults.hudScale) }
-        set { d.set(clampScale(newValue, to: hudScaleRange, fallback: Defaults.hudScale), forKey: K.hudScale); notify() }
-    }
-
-    /// Final-only pill scale factor, clamped to `hudPillScaleRange`.
-    static var hudPillScale: Double {
-        get { clampScale(d.double(forKey: K.hudPillScale), to: hudPillScaleRange, fallback: Defaults.hudPillScale) }
-        set { d.set(clampScale(newValue, to: hudPillScaleRange, fallback: Defaults.hudPillScale), forKey: K.hudPillScale); notify() }
-    }
-
-    /// Cleanup-wait spinner (ring) scale factor, clamped to `hudSpinnerScaleRange`.
-    static var hudSpinnerScale: Double {
-        get { clampScale(d.double(forKey: K.hudSpinnerScale), to: hudSpinnerScaleRange, fallback: Defaults.hudSpinnerScale) }
-        set { d.set(clampScale(newValue, to: hudSpinnerScaleRange, fallback: Defaults.hudSpinnerScale), forKey: K.hudSpinnerScale); notify() }
+    /// HUD UI size factor (1.0 = today's size), clamped to `hudUIScaleRange`.
+    static var hudUIScale: Double {
+        get { clampScale(d.double(forKey: K.hudUIScale), to: hudUIScaleRange, fallback: Defaults.hudUIScale) }
+        set { d.set(clampScale(newValue, to: hudUIScaleRange, fallback: Defaults.hudUIScale), forKey: K.hudUIScale); notify() }
     }
 
     private static func clampScale(_ v: Double, to range: ClosedRange<Double>, fallback: Double) -> Double {

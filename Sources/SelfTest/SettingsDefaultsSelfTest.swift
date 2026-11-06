@@ -32,7 +32,10 @@ enum SettingsDefaultsSelfTest {
         checkLocalModelSettings(reporter)
         checkBundleIdentifierMigration(reporter)
         checkLiveViewCleanup(reporter)
+        checkHUDSizeSetting(reporter)
         checkLaunchAgentIdentity(reporter)
+        HUDPointerPlacementSelfTest.run(reporter)
+        PasteTargetPlacementSelfTest.run(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "Settings defaults"))
@@ -189,6 +192,137 @@ enum SettingsDefaultsSelfTest {
                             && defaults.double(forKey: "hudScale") == 1.25
                             && defaults.double(forKey: "hudLowPowerScale") == 1.5
                             && defaults.double(forKey: "hudSpinnerScale") == 1.75)
+    }
+
+    private static func checkHUDSizeSetting(_ reporter: SelfTestReporter) {
+        print("--- hud size setting and migration ---")
+        reporter.record("hud size: the range is 70 to 160 percent",
+                        Settings.hudUIScaleRange.lowerBound == 0.7
+                            && Settings.hudUIScaleRange.upperBound == 1.6)
+
+        let defaults = UserDefaults.standard
+        let domain = Bundle.main.bundleIdentifier ?? AppIdentity.bundleID
+        let hudKeys = ["hudUIScale", "hudLowPowerScale", "hudScale", "hudSpinnerScale", "hudPosition"]
+        let saved = (defaults.persistentDomain(forName: domain) ?? [:]).filter { hudKeys.contains($0.key) }
+        defer {
+            for key in hudKeys { defaults.removeObject(forKey: key) }
+            for (key, value) in saved { defaults.set(value, forKey: key) }
+        }
+        func clearHUDKeys() { for key in hudKeys { defaults.removeObject(forKey: key) } }
+        func persistedHUDValue(_ key: String) -> Any? {
+            (defaults.persistentDomain(forName: domain) ?? [:])[key]
+        }
+
+        clearHUDKeys()
+        defaults.set(1.5, forKey: "hudLowPowerScale")
+        defaults.set(1.25, forKey: "hudScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: the migration takes the old pill scale first",
+                        defaults.double(forKey: "hudUIScale") == 1.5)
+
+        clearHUDKeys()
+        defaults.set(1.25, forKey: "hudScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: the migration falls back to the old HUD scale",
+                        defaults.double(forKey: "hudUIScale") == 1.25)
+
+        clearHUDKeys()
+        defaults.set(0.0, forKey: "hudLowPowerScale")
+        defaults.set(1.2, forKey: "hudScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: a zero pill scale falls through to the HUD scale",
+                        defaults.double(forKey: "hudUIScale") == 1.2)
+
+        clearHUDKeys()
+        defaults.set(1.75, forKey: "hudSpinnerScale")
+        defaults.set("bottomCenter", forKey: "hudPosition")
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: with no old size nothing is stored",
+                        persistedHUDValue("hudUIScale") == nil)
+
+        clearHUDKeys()
+        defaults.set(2.0, forKey: "hudLowPowerScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        let clampHigh = defaults.double(forKey: "hudUIScale") == 1.6
+        clearHUDKeys()
+        defaults.set(0.5, forKey: "hudLowPowerScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        let clampLow = defaults.double(forKey: "hudUIScale") == 0.7
+        reporter.record("hud size: the migration clamps to the new range",
+                        clampHigh && clampLow)
+
+        clearHUDKeys()
+        defaults.set(1.3, forKey: "hudUIScale")
+        defaults.set(1.5, forKey: "hudLowPowerScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: the migration never overwrites an existing value",
+                        defaults.double(forKey: "hudUIScale") == 1.3)
+
+        clearHUDKeys()
+        defaults.set(1.5, forKey: "hudLowPowerScale")
+        defaults.set(1.25, forKey: "hudScale")
+        defaults.set(1.75, forKey: "hudSpinnerScale")
+        defaults.set("bottomCenter", forKey: "hudPosition")
+        Settings.migrateHUDSizeKeys(defaults)
+        let removesWithPick = defaults.double(forKey: "hudUIScale") == 1.5
+            && persistedHUDValue("hudLowPowerScale") == nil
+            && persistedHUDValue("hudScale") == nil
+            && persistedHUDValue("hudSpinnerScale") == nil
+            && persistedHUDValue("hudPosition") == nil
+        clearHUDKeys()
+        defaults.set(0.0, forKey: "hudLowPowerScale")
+        defaults.set(0.0, forKey: "hudScale")
+        defaults.set(1.75, forKey: "hudSpinnerScale")
+        defaults.set("bottomCenter", forKey: "hudPosition")
+        Settings.migrateHUDSizeKeys(defaults)
+        let removesWithoutPick = persistedHUDValue("hudLowPowerScale") == nil
+            && persistedHUDValue("hudScale") == nil
+            && persistedHUDValue("hudSpinnerScale") == nil
+            && persistedHUDValue("hudPosition") == nil
+        reporter.record("hud size: the migration removes all four old keys",
+                        removesWithPick && removesWithoutPick)
+
+        clearHUDKeys()
+        defaults.set(1.5, forKey: "hudLowPowerScale")
+        Settings.migrateHUDSizeKeys(defaults)
+        Settings.migrateHUDSizeKeys(defaults)
+        reporter.record("hud size: the migration is idempotent",
+                        defaults.double(forKey: "hudUIScale") == 1.5
+                            && persistedHUDValue("hudLowPowerScale") == nil
+                            && persistedHUDValue("hudScale") == nil
+                            && persistedHUDValue("hudSpinnerScale") == nil
+                            && persistedHUDValue("hudPosition") == nil)
+
+        clearHUDKeys()
+        let suiteName = "com.viddydictate.app.tests.hudsize-migration"
+        var suiteKeepsExisting = false
+        if let suite = UserDefaults(suiteName: suiteName) {
+            suite.removePersistentDomain(forName: suiteName)
+            suite.set(1.3, forKey: "hudUIScale")
+            suite.set(1.5, forKey: "hudLowPowerScale")
+            Settings.migrateHUDSizeKeys(suite, domain: suiteName)
+            let suiteDomain = suite.persistentDomain(forName: suiteName) ?? [:]
+            let keptValue = suiteDomain["hudUIScale"] as? Double
+            suiteKeepsExisting = keptValue == 1.3 && suiteDomain["hudLowPowerScale"] == nil
+            suite.removePersistentDomain(forName: suiteName)
+        }
+        reporter.record("hud size: the migration keeps an existing value in the given defaults",
+                        suiteKeepsExisting)
+
+        clearHUDKeys()
+        Settings.hudUIScale = 3.0
+        let storedHigh = persistedHUDValue("hudUIScale") as? Double
+        let setterClampsHigh = storedHigh == 1.6 && Settings.hudUIScale == 1.6
+        Settings.hudUIScale = 0.1
+        let storedLow = persistedHUDValue("hudUIScale") as? Double
+        let setterClampsLow = storedLow == 0.7 && Settings.hudUIScale == 0.7
+        reporter.record("hud size: the setter clamps to the range",
+                        setterClampsHigh && setterClampsLow)
+
+        reporter.record("hud size: the preview capsule scales with the setting",
+                        HUDSizePreviewMetrics.capsuleSize(forScale: 1.0) == NSSize(width: 150, height: 32)
+                            && HUDSizePreviewMetrics.capsuleSize(forScale: 1.6) == NSSize(width: 240, height: 51)
+                            && HUDSizePreviewMetrics.capsuleSize(forScale: 0.7) == NSSize(width: 105, height: 22))
     }
 
     private static func checkLaunchAgentIdentity(_ reporter: SelfTestReporter) {
