@@ -14,10 +14,11 @@ struct DictationTarget {
     /// when the target exposes AXSelectedTextRange; dictation retry replacement validates the field only
     /// because the first raw landing necessarily moved this range.
     let selectedTextRange: CFRange?
+    let bundleID: String?
 
     init(element: AXUIElement, pid: pid_t, label: String, isTextLike: Bool,
          role: String = "", capturedAt: Date = Date(),
-         selectedTextRange: CFRange? = nil) {
+         selectedTextRange: CFRange? = nil, bundleID: String? = nil) {
         self.element = element
         self.pid = pid
         self.label = label
@@ -25,6 +26,7 @@ struct DictationTarget {
         self.role = role
         self.capturedAt = capturedAt
         self.selectedTextRange = selectedTextRange
+        self.bundleID = bundleID
     }
 }
 
@@ -239,6 +241,38 @@ struct PasteVerifyDriver {
 /// destination before a synthesized paste, and fall back durably to the clipboard when it cannot be verified.
 enum TargetResolver {
     private static let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    private static let ctrlPasteBundleIDs: Set<String> = ["com.carriez.rustdesk"]
+
+    /// RustDesk (and only RustDesk) pastes with Control; every other app and nil paste with Command.
+    static func pasteModifierFlags(forBundleID id: String?) -> CGEventFlags {
+        if let id = id, ctrlPasteBundleIDs.contains(id.lowercased()) { return .maskControl }
+        return .maskCommand
+    }
+
+    /// Content-free facts for one AX element: bundle id, pid, role, subrole, and a CFHash.
+    static func focusFactsLog(bundleID: String?, pid: pid_t, role: String, subrole: String, hash: UInt) -> String {
+        let app = bundleID ?? "?"
+        let roleText = role.isEmpty ? "?" : role
+        let subroleText = subrole.isEmpty ? "-" : subrole
+        return "app=\(app) pid=\(pid) role=\(roleText) sub=\(subroleText) hash=\(String(hash, radix: 16))"
+    }
+
+    /// Content-free mismatch line. `selection` is one of match/moved/unreadable/skipped.
+    static func landingMismatchLog(prefix: String, failureToken: String, elapsedSeconds: Double, target: String, now: String, appRunning: Bool, targetIsFrontmost: Bool, front: String, focusedReadable: Bool, sameElement: Bool, selection: String) -> String {
+        func yn(_ b: Bool) -> String { b ? "yes" : "no" }
+        return "\(prefix) mismatch failure=\(failureToken) elapsed_s=\(String(format: "%.1f", elapsedSeconds)) target[\(target)] now[\(now)] running=\(yn(appRunning)) frontmost=\(yn(targetIsFrontmost)) front=\(front) focused=\(yn(focusedReadable)) same=\(yn(sameElement)) selection=\(selection)"
+    }
+
+    /// Reads only role/subrole/CFHash of one element and renders them through focusFactsLog.
+    private static func elementFacts(bundleID: String?, pid: pid_t, element: AXUIElement) -> String {
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = (roleRef as? String) ?? ""
+        var subroleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+        let subrole = (subroleRef as? String) ?? ""
+        return focusFactsLog(bundleID: bundleID, pid: pid, role: role, subrole: subrole, hash: CFHash(element))
+    }
 
     /// A captured foreign-app landing never calls clipboard recovery a landing. The reason tokens and
     /// messages are fixed classifications: they contain no field labels, selection text, or provider output.
@@ -402,12 +436,16 @@ enum TargetResolver {
             appSame: appSame)
     }
 
-    private static func postPasteKeystroke() -> Bool {
+    private static func postPasteKeystroke(bundleID: String?) -> Bool {
         let vKey: CGKeyCode = 9
+        let flags = pasteModifierFlags(forBundleID: bundleID)
+        if flags == .maskControl {
+            Log.write("paste modifier=control for \(bundleID ?? "?")")
+        }
         guard let down = SyntheticKeystroke.make(
-            virtualKey: vKey, keyDown: true, flags: .maskCommand),
+            virtualKey: vKey, keyDown: true, flags: flags),
               let up = SyntheticKeystroke.make(
-                virtualKey: vKey, keyDown: false, flags: .maskCommand) else {
+                virtualKey: vKey, keyDown: false, flags: flags) else {
             Log.write("paste event dispatch unavailable — output retained on clipboard")
             return false
         }
@@ -612,17 +650,24 @@ enum TargetResolver {
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
         let role = (roleRef as? String) ?? ""
 
+        var subroleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+        let subrole = (subroleRef as? String) ?? ""
+
         var settable: DarwinBoolean = false
         AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable)
         let isTextLike = textRoles.contains(role) || settable.boolValue
 
+        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
         let appName = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "app"
         let roleDesc = role.hasPrefix("AX") ? String(role.dropFirst(2)) : role
         let label = "\(appName) — \(roleDesc.isEmpty ? "field" : roleDesc)"
         Log.write("AX capture OK role=\(role.isEmpty ? "?" : role) textLike=\(isTextLike) app=\(appName)")
+        Log.write("AX capture detail " + TargetResolver.focusFactsLog(bundleID: bundleID, pid: pid, role: role, subrole: subrole, hash: CFHash(element)))
         return DictationTarget(element: element, pid: pid, label: label, isTextLike: isTextLike,
                                role: role, capturedAt: Date(),
-                               selectedTextRange: selectedTextRange(in: element))
+                               selectedTextRange: selectedTextRange(in: element),
+                               bundleID: bundleID)
     }
 
     /// PRE-DISCOVERY / UNUSED: legacy AX-only insertion retained for regression evidence. An AX `.success`
@@ -667,7 +712,7 @@ enum TargetResolver {
         let driver = PasteVerifyDriver(
             delivered: text,
             readState: { readPasteFieldState(anchor: anchor, anchorPid: anchorPid) },
-            postPaste: { postPasteKeystroke() },
+            postPaste: { postPasteKeystroke(bundleID: bundleID) },
             scheduleAfter: { delay, work in
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
             },
@@ -717,6 +762,20 @@ enum TargetResolver {
         }
 
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated else {
+            let targetFacts = elementFacts(bundleID: target.bundleID, pid: target.pid, element: target.element)
+            let frontApp = NSWorkspace.shared.frontmostApplication
+            Log.write(landingMismatchLog(
+                prefix: "late captured-target landing",
+                failureToken: CapturedTargetLandingOutcome.Failure.targetAppUnavailable.rawValue,
+                elapsedSeconds: Date().timeIntervalSince(target.capturedAt),
+                target: targetFacts,
+                now: "app=? pid=0 role=? sub=- hash=0",
+                appRunning: false,
+                targetIsFrontmost: frontApp?.processIdentifier == target.pid,
+                front: frontApp?.bundleIdentifier ?? "?",
+                focusedReadable: false,
+                sameElement: false,
+                selection: "skipped"))
             clipboardFallback(.targetAppUnavailable)
             return
         }
@@ -741,6 +800,25 @@ enum TargetResolver {
             selectionIdentityAvailable: currentRange != nil,
             selectionMatches: selectionMatches
         ) {
+            let targetFacts = elementFacts(bundleID: target.bundleID, pid: target.pid, element: target.element)
+            let nowFacts = focused.map { elementFacts(bundleID: NSRunningApplication(processIdentifier: target.pid)?.bundleIdentifier, pid: target.pid, element: $0) } ?? "app=? pid=0 role=? sub=- hash=0"
+            let selectionToken: String
+            if expectedRange == nil { selectionToken = "skipped" }
+            else if currentRange == nil { selectionToken = "unreadable" }
+            else if selectionMatches { selectionToken = "match" }
+            else { selectionToken = "moved" }
+            Log.write(landingMismatchLog(
+                prefix: "late captured-target landing",
+                failureToken: failure.rawValue,
+                elapsedSeconds: Date().timeIntervalSince(target.capturedAt),
+                target: targetFacts,
+                now: nowFacts,
+                appRunning: true,
+                targetIsFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+                front: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?",
+                focusedReadable: focused != nil,
+                sameElement: sameElement,
+                selection: selectionToken))
             clipboardFallback(failure)
             return
         }
@@ -760,8 +838,13 @@ enum TargetResolver {
         let temporaryChangeCount = pb.changeCount
 
         let vKey: CGKeyCode = 9
-        guard let down = SyntheticKeystroke.make(virtualKey: vKey, keyDown: true, flags: .maskCommand),
-              let up = SyntheticKeystroke.make(virtualKey: vKey, keyDown: false, flags: .maskCommand) else {
+        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        let flags = pasteModifierFlags(forBundleID: bundleID)
+        if flags == .maskControl {
+            Log.write("paste modifier=control for \(bundleID ?? "?")")
+        }
+        guard let down = SyntheticKeystroke.make(virtualKey: vKey, keyDown: true, flags: flags),
+              let up = SyntheticKeystroke.make(virtualKey: vKey, keyDown: false, flags: flags) else {
             Log.write("late paste event dispatch unavailable - output retained on clipboard")
             return false
         }
@@ -828,6 +911,20 @@ enum TargetResolver {
         }
 
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated else {
+            let targetFacts = elementFacts(bundleID: target.bundleID, pid: target.pid, element: target.element)
+            let frontApp = NSWorkspace.shared.frontmostApplication
+            Log.write(landingMismatchLog(
+                prefix: "captured-target landing",
+                failureToken: CapturedTargetLandingOutcome.Failure.targetAppUnavailable.rawValue,
+                elapsedSeconds: Date().timeIntervalSince(target.capturedAt),
+                target: targetFacts,
+                now: "app=? pid=0 role=? sub=- hash=0",
+                appRunning: false,
+                targetIsFrontmost: frontApp?.processIdentifier == target.pid,
+                front: frontApp?.bundleIdentifier ?? "?",
+                focusedReadable: false,
+                sameElement: false,
+                selection: "skipped"))
             clipboardFallback(.targetAppUnavailable)
             return
         }
