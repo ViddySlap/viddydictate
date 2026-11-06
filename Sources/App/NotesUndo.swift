@@ -1,7 +1,7 @@
 import Foundation
 
 /// Pure decision + modelling logic for the BT5 take controls (notes-bullseye BT5):
-///   - Esc CANCELS the in-progress dictation take (abort record/processing; nothing lands; the target
+///   - Option+Esc CANCELS the in-progress dictation take (abort record/processing; nothing lands; the target
 ///     selection + any BT4 replace highlight left untouched/cleared);
 ///   - Option+Z NOTES cross-focus undo: revert the last ViddyDictate-delivered edit IN A NOTE even when focus
 ///     has moved away. A note is a controlled surface, so the bridge can reach back in by note id and undo it,
@@ -45,10 +45,13 @@ enum NotesUndoLogic {
         return .foreign
     }
 
-    /// Whether Esc should ABORT the current take. Esc cancels only while a take is actually in flight (recording,
-    /// hands-free locked, or the final transcribe/cleanup processing) — otherwise Esc is a normal key and passes
-    /// through to the focused app. Nothing lands on an abort. Mirrors the `takeActive` gate the tap swallows on.
-    static func escapeAborts(isTakeActive: Bool) -> Bool { isTakeActive }
+    /// Whether Option+Esc should ABORT the current take. It cancels only while a take is actually in flight
+    /// (recording, hands-free locked, or the final transcribe/cleanup processing) AND Option is held AND the
+    /// key is Esc — otherwise Esc is a normal key and passes through to the focused app. Nothing lands on an
+    /// abort. Mirrors the `takeActive` gate the tap swallows on.
+    static func escapeAborts(keyCode: Int64, optionHeld: Bool, isTakeActive: Bool) -> Bool {
+        isTakeActive && keyCode == 53 && optionHeld
+    }
 
     /// Splice: replace `doc[from, to)` (clamped) with `insert`, character-wise. A pure model of the CodeMirror
     /// `insertAtRange` dispatch the island runs (CodeMirror offsets are UTF-16 units; the probe drives ASCII,
