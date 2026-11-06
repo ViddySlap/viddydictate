@@ -214,7 +214,6 @@ enum NotesUndoLifetimeProbe {
             (function() {
               const wrap = document.querySelector('.vd-md-table-wrap');
               if (!wrap) return 'no wrap';
-              if (!(wrap.scrollWidth > wrap.clientWidth)) return 'wrap not scrollable ' + wrap.scrollWidth + '/' + wrap.clientWidth;
               const scroller = document.querySelector('.cm-scroller');
               if (scroller && scroller.scrollWidth > scroller.clientWidth) return 'scroller overflows ' + scroller.scrollWidth + '/' + scroller.clientWidth;
               const main = document.getElementById('main');
@@ -224,6 +223,50 @@ enum NotesUndoLifetimeProbe {
             """#
             let dResult = tableJS(d)
             guard dResult == "ok" else { return tableFail("d", dResult ?? "unknown") }
+
+            guard tableJS(#"window.__tbl.create('fit-note', "intro\n" + ["| Part | What | Time |", "|---|---|---|", "| 1 | Try the app you already run | about 20 minutes |"].join("\n"))"#) == "ok" else {
+                return tableFail("d", "create fit note")
+            }
+            webView?.setFrameSize(NSSize(width: 600, height: 400))
+            pause(0.4)
+            let fit600 = #"""
+            (function() {
+              const wrap = document.querySelector('.vd-md-table-wrap');
+              const table = document.querySelector('table.vd-md-table');
+              if (!wrap || !table) return 'no wrap or table';
+              if (table.offsetWidth > wrap.clientWidth + 1) return 'table wider than wrap ' + table.offsetWidth + '/' + wrap.clientWidth;
+              if (wrap.scrollWidth > wrap.clientWidth + 1) return 'wrap overflows ' + wrap.scrollWidth + '/' + wrap.clientWidth;
+              const cells = document.querySelectorAll('table.vd-md-table th, table.vd-md-table td');
+              for (const c of cells) {
+                if (c.scrollWidth > c.clientWidth + 1) return 'cell clipped ' + c.textContent.slice(0, 20) + ' ' + c.scrollWidth + '/' + c.clientWidth;
+              }
+              return 'ok';
+            })()
+            """#
+            let fit600Result = tableJS(fit600)
+            guard fit600Result == "ok" else { return tableFail("d", "fit 600 " + (fit600Result ?? "unknown")) }
+
+            webView?.setFrameSize(NSSize(width: 330, height: 400))
+            pause(0.4)
+            let fit330 = #"""
+            (function() {
+              const wrap = document.querySelector('.vd-md-table-wrap');
+              const table = document.querySelector('table.vd-md-table');
+              if (!wrap || !table) return 'no wrap or table';
+              if (table.offsetWidth > wrap.clientWidth + 1) return 'table wider than wrap ' + table.offsetWidth + '/' + wrap.clientWidth;
+              if (wrap.scrollWidth > wrap.clientWidth + 1) return 'wrap overflows ' + wrap.scrollWidth + '/' + wrap.clientWidth;
+              const cells = document.querySelectorAll('table.vd-md-table th, table.vd-md-table td');
+              for (const c of cells) {
+                if (c.scrollWidth > c.clientWidth + 1) return 'cell clipped ' + c.textContent.slice(0, 20) + ' ' + c.scrollWidth + '/' + c.clientWidth;
+              }
+              return 'ok';
+            })()
+            """#
+            let fit330Result = tableJS(fit330)
+            guard fit330Result == "ok" else { return tableFail("d", "fit 330 " + (fit330Result ?? "unknown")) }
+
+            webView?.setFrameSize(NSSize(width: 400, height: 400))
+            pause(0.4)
 
             guard tableJS(#"window.__tbl.create('html-note', "intro\n" + ["| HTML |", "|---|", "| <b>x</b> |"].join("\n"))"#) == "ok" else {
                 return tableFail("e", "create html note")

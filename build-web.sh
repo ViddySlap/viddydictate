@@ -15,6 +15,7 @@ node --no-warnings Web/StickyNotes/scripts/check-insertion-index-fixtures.mjs
 # that a note swap cannot leave the previous note's edits on a shared undo stack, and pins src/editor.js to
 # the pattern that proof covers.
 node --no-warnings Web/StickyNotes/scripts/check-undo-isolation.mjs
+node --no-warnings Web/StickyNotes/scripts/check-table-css.mjs
 # refine2 BUG 2 real-path DOM harness: drives the real actions.js/dictation-target.js bridge through the exact
 # Option+P-over-a-note-selection interleaving (asserts REPLACE + tint + generation guard + restore-on-teardown).
 node --no-warnings --import ./Web/StickyNotes/scripts/notes-bridge-harness/register.mjs Web/StickyNotes/scripts/notes-bridge-harness/run.mjs
