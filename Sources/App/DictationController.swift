@@ -42,6 +42,7 @@ final class DictationController {
             // that phase, and every terminal toast there should hide, not revert). `hud` is initialized at
             // declaration, so this observer (which never fires for the .idle default) always has it available.
             hud.setTakeActive(state == .recording || state == .locked)
+            if !(state == .recording || state == .locked) { pasteMarker.stop() }
         }
     }
 
@@ -79,6 +80,7 @@ final class DictationController {
     /// still sets it exactly as before.
     var wasLocked = false
     private var recordingStartedAt: Date?
+    private lazy var pasteMarker = PasteTargetMarker()
 
     /// The persistent Cleanup toggle state captured at the moment of release — "state-at-release
     /// wins": the dictation being held is processed according to the toggle when right-Option is let
@@ -1028,6 +1030,7 @@ final class DictationController {
         refreshBullseyeIndicator()
         hud.update(state: "Listening…", target: target?.label, text: "", locked: false)
         hud.show()
+        if hud is HUDPanel && !targetWasNotesWindow { pasteMarker.start(captured: target) }
         hud.setCleanup(enabled: CleanupState.shared.cleanupEnabled, level: CleanupState.shared.cleanupLevel.rawValue)
         hud.setArmedMode(glyph: TransformArmState.shared.armedOneShot?.glyph)
         note("recording")

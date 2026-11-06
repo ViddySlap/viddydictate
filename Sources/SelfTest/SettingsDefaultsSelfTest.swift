@@ -35,6 +35,7 @@ enum SettingsDefaultsSelfTest {
         checkHUDSizeSetting(reporter)
         checkLaunchAgentIdentity(reporter)
         HUDPointerPlacementSelfTest.run(reporter)
+        PasteTargetPlacementSelfTest.run(reporter)
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "Settings defaults"))
