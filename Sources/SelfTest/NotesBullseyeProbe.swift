@@ -652,8 +652,8 @@ extension NotesProbe {
               defs.command(forKeyCode: 45, shift: true) == .bullseyeReveal
               && defs.command(forKeyCode: 45, shift: false) == .notes
               && defs.command(forKeyCode: 45) == .notes)
-        check("bullseye reveal: no OTHER chord claims a shift qualifier, so every existing chord is unchanged",
-              HotkeyCommand.allCases.filter { defs.key(for: $0).shift } == [.bullseyeReveal])
+        check("bullseye reveal: no OTHER chord claims a shift qualifier except the recent-dictations pop-up (Shift+H), so every existing chord is unchanged",
+              HotkeyCommand.allCases.filter { defs.key(for: $0).shift } == [.bullseyeReveal, .recentDictations])
         check("bullseye reveal: an unclaimed shifted key still falls back to its plain chord (⇧P is still Cleanup selection)",
               defs.command(forKeyCode: 35, shift: true) == nil
               && defs.command(forKeyCode: 35, shift: false) == .cleanupSelection)

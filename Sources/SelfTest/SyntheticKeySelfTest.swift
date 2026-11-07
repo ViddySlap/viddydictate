@@ -143,8 +143,8 @@ enum SyntheticKeySelfTest {
         reporter.record("synthetic keys: plain right-Option+H fires the history command and is swallowed",
             plainH.0 == .history && plainH.1)
         let shiftH = chordFires(keyCode: 4, shift: true)
-        reporter.record("synthetic keys: right-Option+Shift+H does not fire the history command and is not swallowed",
-            shiftH.0 == nil && shiftH.1 == false)
+        reporter.record("synthetic keys: right-Option+Shift+H does not fire the history command; it fires the recent-dictations pop-up and is swallowed",
+            shiftH.0 == .recentDictations && shiftH.1)
         let shiftP = chordFires(keyCode: 35, shift: true)
         reporter.record("synthetic keys: right-Option+Shift+P still falls back to Cleanup selection",
             shiftP.0 == .cleanupSelection && shiftP.1)
