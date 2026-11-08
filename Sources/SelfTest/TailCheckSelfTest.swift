@@ -1488,6 +1488,7 @@ enum TailCheckSelfTest {
             // `HUDPanel.init` itself, reached via `finalize()`'s real landDelivery construction path).
             hud: NullHUDPresenter())
         controller.wasLocked = true
+        controller.takeLandAtStart = true
         return controller
     }
 
@@ -1678,6 +1679,7 @@ enum TailCheckSelfTest {
                     notesDelivery: notesDelivery,
                     tailCheckHook: hook,
                     hud: NullHUDPresenter())
+                controller.takeAnchor = bullseyeState.current
                 let t0 = DispatchTime.now()
                 _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
                                         historyID: UUID(), segments: c.segments)

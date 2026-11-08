@@ -34,6 +34,10 @@ struct NotesDeliveryCallbacks {
     let onReplaceNoteDelivery: (String, String) -> Bool
     /// BT5: resolve the key notes window's active note id for the plain key-window insertion path.
     let onCurrentNoteId: () -> String?
+    /// VDLAND1: deliver a take to the FROZEN bullseye note id the take started with (text, note id), reaching
+    /// the note by id rather than through the live pin. Optional and defaulted so the fixtures that exercise
+    /// only the legacy live-pin seam below keep compiling and behaving unchanged.
+    var onDeliverToBullseyeNote: ((String, String) -> NoteInsertOutcome)? = nil
 }
 
 /// The Family-3 notes-delivery collaborator (ADR 0012).
@@ -240,14 +244,26 @@ final class NotesDeliveryCoordinator {
     /// call this method with their landing kind and input source. The pure rule decides bullseye versus snapshot
     /// versus the requested destination; this stateful shell performs the chosen bridge delivery and gone-note
     /// recovery. The controller still owns the HUD application of the returned landing.
+    ///
+    /// `bullseyeView` is the per-take freeze (VDLAND1): `.live` (the default, used by the one-shot transform
+    /// paths) reads the live note state; `.frozen` is the anchor captured at take START.
     func routeNotesDelivery(delivered: String, mode: HistoryMode,
                             landingKind: NotesBullseyeLogic.LandingKind,
                             inputSource: NotesBullseyeLogic.InputSource,
                             noteTarget: NotesDictationTarget?,
                             shouldInsertIntoNotes: Bool,
-                            startedInNotes: Bool, currentlyKey: Bool) -> NotesLanding {
+                            startedInNotes: Bool, currentlyKey: Bool,
+                            bullseyeView: LandingRoute.BullseyeView = .live) -> NotesLanding {
+        let seenBullseye: NotesBullseye?
+        switch bullseyeView {
+        case .live: seenBullseye = bullseyeState.current
+        case .frozen(let frozen): seenBullseye = frozen
+        }
+        func byId(_ text: String, _ noteId: String) -> NoteInsertOutcome {
+            callbacks.onDeliverToBullseyeNote?(text, noteId) ?? callbacks.onDeliverToBullseye(delivered)
+        }
         let route = NotesBullseyeLogic.delivery(
-            bullseye: bullseyeState.current,
+            bullseye: seenBullseye,
             snapshotNoteId: noteTarget?.noteId,
             landingKind: landingKind,
             inputSource: inputSource)
@@ -256,14 +272,20 @@ final class NotesDeliveryCoordinator {
         case .bullseye(let bullseyeNoteId):
             // The target vanished between the precedence decision and the bridge delivery. Drop the persistent
             // target and park the output so the fresh dictation is never lost.
-            switch callbacks.onDeliverToBullseye(delivered) {
+            // The insertion goes to the FROZEN note id, never the live pin.
+            let bullseyeOutcome = byId(delivered, bullseyeNoteId)
+            switch bullseyeOutcome {
             case .delivered, .queued:
                 Log.write("deliver: landed at armed bullseye (\(delivered.count) chars, mode=\(mode))")
                 return .landed(noteUndo: bullseyeNoteId)
             case .noWindow:
                 Log.write("deliver: bullseye note gone at delivery, auto-disarm + clipboard park (\(delivered.count) chars, mode=\(mode))")
-                bullseyeState.drop()
-                callbacks.onBullseyeStateChanged()   // BT3: clear the inline marker (the bullseye just dropped)
+                // Only the note this take froze at may drop the LIVE pin: a frozen note A that disappeared while
+                // the user pinned another still-open note B leaves B pinned for the next take.
+                if LandingRoute.shouldDropLiveAnchor(frozenNoteId: bullseyeNoteId, liveNoteId: bullseyeState.noteId) {
+                    bullseyeState.drop()
+                    callbacks.onBullseyeStateChanged()   // BT3: clear the inline marker (the bullseye just dropped)
+                }
                 copyToClipboard(delivered)
                 return .parked(toast: "📋 " + NotesBullseyeLogic.deliverGoneToast, refreshBullseye: true)
             }

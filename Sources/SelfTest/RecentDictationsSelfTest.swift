@@ -104,11 +104,15 @@ enum RecentDictationsSelfTest {
     }
 
     private static func defaultKey(_ r: SelfTestReporter) {
+        // VDLAND1: Ben reversed the two H chords — plain right-Option+H pops the recent dictations, and History
+        // moved to right-Option+Shift+H. This row pins the Recent half of that default table.
         let key = HotkeyCommand.recentDictations.defaultKey
         let others = HotkeyCommand.allCases.filter { $0 != .recentDictations }
-        let usesShiftH = others.filter { !$0.defaultKey.isModifier && $0.defaultKey.code == 4 && $0.defaultKey.shift }
-        r.record("recent: default key is right-Option+Shift+H (Shift+H, plain H stays History) and unbound at the base",
-                 !key.isModifier && key.code == 4 && key.label == "\u{21E7}H" && key.shift && usesShiftH.isEmpty)
+        let othersOnPlainH = others.filter {
+            !$0.defaultKey.isModifier && $0.defaultKey.code == 4 && !$0.defaultKey.shift
+        }
+        r.record("recent: default key is right-Option+H (plain H, Shift+H is History) and no other command claims plain H",
+                 !key.isModifier && key.code == 4 && key.label == "H" && !key.shift && othersOnPlainH.isEmpty)
     }
 
     private static func retainedTakesOrder(_ r: SelfTestReporter) {

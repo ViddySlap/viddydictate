@@ -765,6 +765,13 @@ final class NotesWindowController: NSObject, NSWindowDelegate, WKNavigationDeleg
             call(.insertText, payload: [BridgeKey.text: text])
         }
 
+        // VDLAND1: replay the frozen bullseye insertions that were queued while the page was not ready, each
+        // through the note id it froze at, so the text, the receipt and the undo agree on the note even if
+        // another tab is active by the time the page comes back.
+        for item in outboundQueue.drainFrozenInsertions() {
+            performFrozenInsert(id: item.id, text: item.text)
+        }
+
         for item in outboundQueue.drainSearchResults() {
             call(.openSearchResult, payload: [BridgeKey.id: StickyNotesStore.newNoteId(),
                                                BridgeKey.body: "# \(item.question)\n\n\(item.answer)"])

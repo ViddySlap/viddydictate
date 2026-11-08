@@ -362,7 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onReplaceNoteDelivery: { [weak self] id, text in
                 self?.notesRegistry.replaceNoteDelivery(noteId: id, text: text) ?? false
             },
-            onCurrentNoteId: { [weak self] in self?.notesRegistry.currentActiveNoteId() }
+            onCurrentNoteId: { [weak self] in self?.notesRegistry.currentActiveNoteId() },
+            // VDLAND1: a take lands in the note id it froze at take START, not in the live pin.
+            onDeliverToBullseyeNote: { [weak self] text, noteId in
+                self?.notesRegistry.deliverToBullseye(text: text, noteId: noteId) ?? .noWindow
+            }
         ))
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(

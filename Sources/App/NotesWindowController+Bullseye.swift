@@ -63,6 +63,36 @@ extension NotesWindowController {
         return .queued
     }
 
+    // MARK: - Frozen bullseye delivery (VDLAND1)
+
+    /// Land a take at note `id`'s pinned bullseye anchor for a FROZEN route. The id is the destination the take
+    /// captured at its START, so this never consults the live pin and an Option+N elsewhere mid-take cannot
+    /// redirect it. Returns `.delivered` when the page was ready, `.queued` when it was not (the item keeps the
+    /// note id, so the receipt and the undo still agree on the note after a reload), and `.noWindow` when the
+    /// window is already torn down. Main thread.
+    @discardableResult
+    func insertAtFrozenBullseye(id: String, text: String) -> NoteInsertOutcome {
+        guard window != nil else {
+            Log.write("sticky notes frozen bullseye insert requested but window is nil")
+            return .noWindow
+        }
+        if pageReady {
+            performFrozenInsert(id: id, text: text)
+            return .delivered
+        }
+        Log.write("sticky notes frozen bullseye insert queued until page ready (\(text.count) chars, note \(id))")
+        outboundQueue.enqueueFrozenInsertion(id: id, text: text)
+        return .queued
+    }
+
+    /// The one frozen-delivery bridge call (VDLAND1): insert at note `id`'s pin, then push the LIVE bullseye back
+    /// so the island's single pin and inline marker match Swift again after it moved its pin to the frozen note.
+    /// Main thread.
+    func performFrozenInsert(id: String, text: String) {
+        call(.insertAtBullseye, payload: [BridgeKey.id: id, BridgeKey.text: text])
+        pushBullseyeArmed(NotesBullseyeState.shared.current)
+    }
+
     // MARK: - Bullseye reveal (notes-bullseye BT6)
 
     /// Scroll note `id`'s pinned bullseye anchor into view in this window's island (Option+Shift+N). The

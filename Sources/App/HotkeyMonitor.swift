@@ -324,8 +324,9 @@ final class HotkeyMonitor {
             if let id = customChord(forKeyCode: keyCode, shift: true) { return .custom(id) }
         }
         if let c = map.command(forKeyCode: keyCode, shift: false) {
-            // History is plain right-Option+H only (Ben, 2026-11-05): a Shift chord never falls back to it.
-            if shiftHeld && c == .history { return nil }
+            // Recent dictations is plain right-Option+H only (Ben, 2026-11-07): a Shift chord never falls back
+            // to it, so right-Option+Shift+H reaches History instead of firing the plain-H pop-up.
+            if shiftHeld && c == .recentDictations { return nil }
             return .builtIn(c)
         }
         if let id = customChord(forKeyCode: keyCode, shift: false) { return .custom(id) }

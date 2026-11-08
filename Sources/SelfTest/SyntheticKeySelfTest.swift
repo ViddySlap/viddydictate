@@ -126,8 +126,10 @@ enum SyntheticKeySelfTest {
         reporter.record("synthetic keys: an own Cmd+V while paste-restore is armed still triggers the paste-restore observer once and passes through",
             retPaste != nil && observed == 1)
 
-        // Rows 10 to 12 (VDHISTHK no-shift): History answers plain right-Option+H only. Shift never falls back to it,
-        // while the existing Shift fallback for another command (Shift+P to Cleanup selection) is unchanged.
+        // Rows 10 to 12 (VDHISTHK no-shift, reversed by VDLAND1): plain right-Option+H pops the Recent
+        // dictations, right-Option+Shift+H opens Settings on the History tab, and Shift never falls back to the
+        // plain-H chord. The existing Shift fallback for another command (Shift+P to Cleanup selection) is
+        // unchanged.
         func chordFires(keyCode: Int64, shift: Bool) -> (HotkeyCommand?, Bool) {
             var fired: HotkeyCommand?
             let monitor = HotkeyMonitor()
@@ -140,14 +142,40 @@ enum SyntheticKeySelfTest {
             return (fired, swallowed)
         }
         let plainH = chordFires(keyCode: 4, shift: false)
-        reporter.record("synthetic keys: plain right-Option+H fires the history command and is swallowed",
-            plainH.0 == .history && plainH.1)
+        reporter.record("synthetic keys: plain right-Option+H fires the recent-dictations command and is swallowed",
+            plainH.0 == .recentDictations && plainH.1)
         let shiftH = chordFires(keyCode: 4, shift: true)
-        reporter.record("synthetic keys: right-Option+Shift+H does not fire the history command; it fires the recent-dictations pop-up and is swallowed",
-            shiftH.0 == .recentDictations && shiftH.1)
+        reporter.record("synthetic keys: right-Option+Shift+H opens Settings on the History tab and is swallowed",
+            shiftH.0 == .history && shiftH.1)
         let shiftP = chordFires(keyCode: 35, shift: true)
         reporter.record("synthetic keys: right-Option+Shift+P still falls back to Cleanup selection",
             shiftP.0 == .cleanupSelection && shiftP.1)
+
+        // VDLAND1 rows: the two H chords resolve through the monitor's real `resolveChord`, and a Shift chord
+        // that nobody claims NEVER falls back onto the plain-H chord it would otherwise hit.
+        let hRecent = chordFires(keyCode: 4, shift: false)
+        reporter.record("land-hotkey-h-is-recent: plain right-Option+H resolves to the Recent dictations pop-up",
+            hRecent.0 == .recentDictations && hRecent.1)
+        let hHistory = chordFires(keyCode: 4, shift: true)
+        reporter.record("land-hotkey-shift-h-is-history: right-Option+Shift+H resolves to History",
+            hHistory.0 == .history && hHistory.1)
+        var fallbackFired: HotkeyCommand?
+        let monitorFallback = HotkeyMonitor()
+        monitorFallback.map.bindings[HotkeyCommand.history.rawValue] = .regular(keyCode: 100, label: "F8")
+        monitorFallback.onCommand = { fallbackFired = $0 }
+        holdWakeup(monitorFallback)
+        let shiftHFallbackEvent = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: true)!
+        shiftHFallbackEvent.flags = .maskShift
+        let shiftHFallbackRet = monitorFallback.selfTestHandle(type: .keyDown, event: shiftHFallbackEvent)
+        drain()
+        let monitorSource = (try? String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent("Sources/App/HotkeyMonitor.swift", isDirectory: false),
+            encoding: .utf8)) ?? ""
+        reporter.record("land-shift-h-no-fallback-to-recent: with History off Shift, right-Option+Shift+H does not fall back to the plain-H Recent chord",
+            fallbackFired == nil && shiftHFallbackRet != nil
+                && monitorSource.contains("if shiftHeld && c == .recentDictations { return nil }")
+                && !monitorSource.contains("c == .history"))
 
         // Row 13 (option-esc, was row 10): a plain Esc (keyCode 53, no modifiers) with a take active does NOT cancel and passes through.
         var plainCancel = 0

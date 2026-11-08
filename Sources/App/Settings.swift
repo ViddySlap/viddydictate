@@ -116,6 +116,10 @@ enum Settings {
         // Whether the sticky-notes floating "i" markdown-cheat-sheet button exists at all (L5).
         // Toggled from the hamburger settings strip; OFF removes the button + cheat-sheet access.
         static let stickyNotesCheatSheetButton = "stickyNotesCheatSheetButton"  // Bool, default true
+        // The BULLSEYE landing rule (VDLAND1). ON: a take lands in the field that was focused when the take
+        // STARTED (or in the pinned note, when one is armed). OFF: it lands at live focus when the take ENDS.
+        // The single switch; the spacebar lock no longer decides where text lands.
+        static let bullseyeLandAtStart = "bullseyeLandAtStart"  // Bool, default false
         // Input-device pin. UID is the binding key (stable across unplug/reconnect); "" = follow the
         // macOS system default. Name is display-only, so the picker can label a pinned-but-absent mic.
         static let inputDeviceUID  = "inputDeviceUID"
@@ -191,6 +195,7 @@ enum Settings {
         static let featureTourLaunchClassified = false   // nor has any launch classified it yet
         static let stickyNotesRetention = StickyNotesRetention.oneDay
         static let stickyNotesCheatSheetButton = true   // the "i" cheat-sheet button exists by default
+        static let bullseyeLandAtStart = false          // fresh routes land at live focus at take END
         static let inputDeviceUID = ""     // default: follow the macOS system default input device
         static let inputDeviceName = ""
         static let cloudUpdateAutoCheck = Settings.cloudUpdateAutoCheckDefault
@@ -259,6 +264,7 @@ enum Settings {
             K.stickyNotesSaveDirectory: defaultStickyNotesSaveDirectory.path,
             K.stickyNotesRetention: Defaults.stickyNotesRetention.rawValue,
             K.stickyNotesCheatSheetButton: Defaults.stickyNotesCheatSheetButton,
+            K.bullseyeLandAtStart: Defaults.bullseyeLandAtStart,
             K.inputDeviceUID: Defaults.inputDeviceUID,
             K.inputDeviceName: Defaults.inputDeviceName,
             K.cloudUpdateAutoCheck: Defaults.cloudUpdateAutoCheck,
@@ -605,6 +611,16 @@ enum Settings {
     static var stickyNotesCheatSheetButton: Bool {
         get { d.bool(forKey: K.stickyNotesCheatSheetButton) }
         set { d.set(newValue, forKey: K.stickyNotesCheatSheetButton); notify() }
+    }
+
+    // MARK: bullseye landing
+
+    /// Where a dictation lands (VDLAND1). ON = the field focused at take START (or the armed note anchor);
+    /// OFF = live focus at take END. Persisted, so B stays where the user left it across restarts. The
+    /// controller copies this once per take into `takeLandAtStart`, so a mid-take change affects the next take.
+    static var bullseyeLandAtStart: Bool {
+        get { d.bool(forKey: K.bullseyeLandAtStart) }
+        set { d.set(newValue, forKey: K.bullseyeLandAtStart); notify() }
     }
 
     // MARK: input device pin

@@ -652,8 +652,8 @@ extension NotesProbe {
               defs.command(forKeyCode: 45, shift: true) == .bullseyeReveal
               && defs.command(forKeyCode: 45, shift: false) == .notes
               && defs.command(forKeyCode: 45) == .notes)
-        check("bullseye reveal: no OTHER chord claims a shift qualifier except the recent-dictations pop-up (Shift+H), so every existing chord is unchanged",
-              HotkeyCommand.allCases.filter { defs.key(for: $0).shift } == [.bullseyeReveal, .recentDictations])
+        check("bullseye reveal: no OTHER chord claims a shift qualifier except the History chord (Shift+H, VDLAND1), so every existing chord is unchanged",
+              HotkeyCommand.allCases.filter { defs.key(for: $0).shift } == [.bullseyeReveal, .history])
         check("bullseye reveal: an unclaimed shifted key still falls back to its plain chord (⇧P is still Cleanup selection)",
               defs.command(forKeyCode: 35, shift: true) == nil
               && defs.command(forKeyCode: 35, shift: false) == .cleanupSelection)
@@ -1146,6 +1146,442 @@ extension NotesProbe {
         check("space lock: armed mode SURVIVES locked wakeup release for the real take end",
               !lockedReleaseEndsTake
               && lockedArmState.armedOneShot?.id == OneShotMode.email.id)
+
+        probeLandingRoute(check: check)
+    }
+
+    /// --- 13g. VDLAND1: the bullseye landing rule -----------------------------------------------
+    /// ONE setting decides where a take lands: `Settings.bullseyeLandAtStart`, copied at take START into
+    /// `takeLandAtStart` (plus the frozen note anchor `takeAnchor`). ON lands in the field focused at take start
+    /// (or the pinned note); OFF lands at live focus when the take ends. The spacebar lock decides nothing. Every
+    /// row below either exercises the pure model or reads a real function body out of the tree.
+    static func probeLandingRoute(check: Check) {
+        let dictSource = landStripped(landSource("Sources/App/DictationController.swift"))
+        let lockStripped = landStripped(landSource("Sources/App/LockTransition.swift"))
+        let coordinatorSource = landStripped(landSource("Sources/App/NotesDeliveryCoordinator.swift"))
+        let registrySource = landStripped(landSource("Sources/App/NotesWindowRegistry.swift"))
+        let appSource = landStripped(landSource("Sources/App/AppDelegate.swift"))
+        let bullseyeSource = landStripped(landSource("Sources/App/NotesWindowController+Bullseye.swift"))
+        let windowSource = landStripped(landSource("Sources/App/NotesWindowController.swift"))
+        let queueSource = landStripped(landSource("Sources/App/NotesOutboundQueue.swift"))
+        let tailSource = landStripped(landSource("Sources/SelfTest/TailCheckSelfTest.swift"))
+
+        let finalizeBody = landBody(dictSource, "func finalize(")
+        let beginBody = landBody(dictSource, "private func beginRecording()")
+        let toggleBody = landBody(dictSource, "private func toggleBullseye()")
+        let notesBody = landBody(dictSource, "private func notes()")
+        let revealBody = landBody(dictSource, "private func revealBullseye()")
+        let migrateBody = landBody(dictSource, "private func migrateBullseyeOnce()")
+        let autoDisarmBody = landBody(dictSource, "func handleBullseyeAutoDisarmed()")
+        let refreshBody = landBody(dictSource, "private func refreshBullseyeIndicator()")
+        let routerBody = landBody(coordinatorSource, "func routeNotesDelivery(")
+        let registryBody = landBody(registrySource,
+                                    "func deliverToBullseye(text: String, noteId: String) -> NoteInsertOutcome")
+        let frozenInsertBody = landBody(bullseyeSource,
+                                        "func insertAtFrozenBullseye(id: String, text: String) -> NoteInsertOutcome")
+        let performFrozenBody = landBody(bullseyeSource, "func performFrozenInsert(id: String, text: String)")
+        let flushBody = landBody(windowSource, "private func flushQueues()")
+
+        // 13g-i. the route table: OFF always lands live, ON lands pinned (with a captured field) or pinned with
+        // no target to land in.
+        check("land-route-off-is-live: with the setting OFF a take lands at live focus, with a target or without",
+              LandingRoute.route(bullseyeOn: false, hasTarget: true) == .live
+              && LandingRoute.route(bullseyeOn: false, hasTarget: false) == .live)
+        check("land-route-on-target-pinned: with the setting ON and a captured start field the take lands pinned there",
+              LandingRoute.route(bullseyeOn: true, hasTarget: true) == .pinned)
+        check("land-route-on-no-target: with the setting ON and no captured start field the take lands pinned-no-target",
+              LandingRoute.route(bullseyeOn: true, hasTarget: false) == .pinnedNoTarget)
+
+        // 13g-ii. the lock is not an input: the pure route takes exactly the setting and a target, and the real
+        // `finalize` body never mentions the lock latch.
+        let routeParams = NotesProbe.sourceSlice(lockStripped, from: "static func route(",
+                                                 to: ") -> Route")
+        check("land-lock-not-an-input: LandingRoute.route takes only (bullseyeOn, hasTarget) and finalize never reads wasLocked",
+              lockStripped.contains("static func route(bullseyeOn: Bool, hasTarget: Bool) -> Route")
+              && routeParams.components(separatedBy: ":").count - 1 == 2
+              && !finalizeBody.isEmpty
+              && !finalizeBody.contains("wasLocked"))
+
+        // 13g-iii. the paste-target marker: live focus when the setting is OFF, the captured field when it is ON.
+        check("land-marker-follows-live-off: with the setting OFF the marker follows live focus",
+              LandingRoute.markerFollowsLive(bullseyeOn: false) == true)
+        check("land-marker-pinned-on: with the setting ON the marker does NOT follow live focus",
+              LandingRoute.markerFollowsLive(bullseyeOn: true) == false)
+
+        // 13g-iv. Option+B flips the one state through the pure transition.
+        check("land-b-flips-setting: Option+B writes the pure next state's setting and reads it back for the toast",
+              NotesProbe.countOccurrences(of: "Settings.bullseyeLandAtStart = after.setting", in: toggleBody) == 1
+              && toggleBody.contains("LandingRoute.next(.toggle, from: before)"))
+
+        // 13g-v. arming a note turns the setting ON.
+        check("land-n-sets-setting-on: Option+N in a note turns the landing setting ON",
+              notesBody.contains("Settings.bullseyeLandAtStart = true"))
+
+        // 13g-vi. the info-pill glyph shows exactly when the setting is ON.
+        check("land-glyph-follows-setting: the info-pill bullseye glyph reads Settings.bullseyeLandAtStart",
+              refreshBody.contains("hud.setBullseyeArmed(Settings.bullseyeLandAtStart)"))
+
+        // 13g-vii. finalize routes on the frozen value and calls each delivery branch once.
+        check("land-finalize-uses-route: finalize routes through LandingRoute.route once and calls each deliver arm once",
+              NotesProbe.countOccurrences(of: "LandingRoute.route(", in: finalizeBody) == 1
+              && NotesProbe.countOccurrences(of: "deliverPushToTalk(", in: finalizeBody) == 1
+              && NotesProbe.countOccurrences(of: "deliverLocked(", in: finalizeBody) == 1
+              && NotesProbe.countOccurrences(of: "deliverLockedNoTarget(", in: finalizeBody) == 1)
+
+        // 13g-viii. the per-take freeze: the setting is copied once at take START (the method and the capture),
+        // and finalize reads only the copy.
+        check("land-take-freezes-b: beginRecording copies the setting into takeLandAtStart exactly once and finalize routes on the copy",
+              NotesProbe.countOccurrences(of: "takeLandAtStart = Settings.bullseyeLandAtStart", in: beginBody) == 1
+              && !finalizeBody.contains("Settings.bullseyeLandAtStart")
+              && finalizeBody.contains("LandingRoute.route(bullseyeOn: takeLandAtStart"))
+
+        // 13g-ix. the marker call uses the frozen value and runs after the freeze.
+        check("land-marker-uses-frozen: the marker start uses the frozen setting and runs after takeLandAtStart is set",
+              beginBody.contains("pasteMarker.start(captured: target, followsLive: LandingRoute.markerFollowsLive(bullseyeOn: takeLandAtStart))")
+              && NotesProbe.orderedBefore("takeLandAtStart = Settings.bullseyeLandAtStart",
+                                          "pasteMarker.start(", in: beginBody))
+
+        // 13g-x. the toggle toast: bare copy outside a take, plus the next-dictation suffix inside one.
+        check("land-toggle-toast-next-dictation: the B toast is bare outside a take and says \"for the next dictation\" inside one",
+              LandingRoute.toggleToast(on: true, takeInFlight: false) == NotesBullseyeLogic.armedToast
+              && LandingRoute.toggleToast(on: false, takeInFlight: false) == NotesBullseyeLogic.disarmedToast
+              && LandingRoute.toggleToast(on: true, takeInFlight: true)
+                  == NotesBullseyeLogic.armedToast + " for the next dictation"
+              && LandingRoute.toggleToast(on: false, takeInFlight: true)
+                  == NotesBullseyeLogic.disarmedToast + " for the next dictation"
+              && toggleBody.contains("LandingRoute.toggleToast(on: Settings.bullseyeLandAtStart, takeInFlight: state != .idle)")
+              && !toggleBody.contains("noneSetToast"))
+
+        // 13g-xi. the note-closed copy says only that the note anchor closed.
+        check("land-note-closed-toast-copy: the note-closed toast is \"Bullseye note closed\" and handleBullseyeAutoDisarmed toasts it",
+              LandingRoute.noteClosedToast == "Bullseye note closed"
+              && !LandingRoute.noteClosedToast.contains("disarmed")
+              && autoDisarmBody.contains("hud.toast(LandingRoute.noteClosedToast)"))
+
+        // 13g-xii. the frozen note anchor: set once through the pure helper, handed to the router as `.frozen`,
+        // never as the live view.
+        check("land-take-freezes-anchor: beginRecording freezes the anchor once and finalize hands the router .frozen(takeAnchor)",
+              NotesProbe.countOccurrences(
+                  of: "takeAnchor = LandingRoute.frozenAnchor(bullseyeOn: takeLandAtStart, current: NotesBullseyeState.shared.current)",
+                  in: beginBody) == 1
+              && finalizeBody.contains("bullseyeView: .frozen(takeAnchor)")
+              && !finalizeBody.contains("bullseyeView: .live"))
+
+        // 13g-xiii. OFF never delivers to a note anchor, whatever the stored armed flag says.
+        let disarmedNote = NotesBullseye(noteId: "note-A", anchor: 7, armed: false)
+        let armedNote = NotesBullseye(noteId: "note-A", anchor: 7, armed: true)
+        let frozenFromDisarmed = LandingRoute.frozenAnchor(bullseyeOn: true, current: disarmedNote)
+        check("land-off-never-delivers-to-anchor: with the setting OFF no anchor is frozen; with it ON the frozen anchor is armed",
+              LandingRoute.frozenAnchor(bullseyeOn: false, current: armedNote) == nil
+              && LandingRoute.frozenAnchor(bullseyeOn: false, current: disarmedNote) == nil
+              && LandingRoute.frozenAnchor(bullseyeOn: true, current: nil) == nil
+              && frozenFromDisarmed?.noteId == "note-A"
+              && frozenFromDisarmed?.armed == true)
+
+        // 13g-xiv. a frozen note anchor hides the foreign-field marker.
+        check("land-marker-hidden-for-note-anchor: a note anchor suppresses the marker, and beginRecording states that condition",
+              LandingRoute.markerShown(hasNoteAnchor: true) == false
+              && LandingRoute.markerShown(hasNoteAnchor: false) == true
+              && beginBody.contains("LandingRoute.markerShown(hasNoteAnchor: takeAnchor != nil)"))
+
+        // 13g-xv. the one-time upgrade: a restored armed note turns the setting ON once.
+        check("land-restore-armed-note-turns-b-on: an armed note restored before the migration turns the setting ON once",
+              LandingRoute.settingAfterRestore(noteArmed: true, setting: false, migrated: false) == true
+              && LandingRoute.settingAfterRestore(noteArmed: true, setting: false, migrated: true) == false
+              && LandingRoute.settingAfterRestore(noteArmed: false, setting: false, migrated: false) == false
+              && LandingRoute.settingAfterRestore(noteArmed: nil, setting: false, migrated: false) == false
+              && LandingRoute.settingAfterRestore(noteArmed: nil, setting: true, migrated: false) == true
+              && beginBody.contains("migrateBullseyeOnce()")
+              && toggleBody.contains("migrateBullseyeOnce()")
+              && migrateBody.contains("LandingRoute.settingAfterRestore(")
+              && migrateBody.contains("LandingRoute.migratedKey"))
+
+        // 13g-xvi. the unified-state invariant: every transition of a consistent state stays consistent, so an
+        // OFF-with-armed-note state can never exist and therefore can never deliver.
+        let consistentStates: [LandingRoute.BullseyeState] = [
+            LandingRoute.BullseyeState(setting: false, noteArmed: nil),
+            LandingRoute.BullseyeState(setting: true, noteArmed: nil),
+            LandingRoute.BullseyeState(setting: false, noteArmed: false),
+            LandingRoute.BullseyeState(setting: true, noteArmed: true),
+        ]
+        let events: [LandingRoute.BullseyeEvent] = [.toggle, .setAnchor, .reveal, .noteGone]
+        var everyTransitionConsistent = true
+        for state in consistentStates {
+            for event in events {
+                everyTransitionConsistent = everyTransitionConsistent
+                    && LandingRoute.next(event, from: state).consistent
+            }
+        }
+        let frozenOnlyWhenOn = consistentStates.allSatisfy { state in
+            let noteExists = state.noteArmed != nil
+            let frozen = LandingRoute.frozenAnchor(bullseyeOn: state.setting,
+                                                  current: noteExists ? armedNote : nil)
+            return (frozen != nil) == (state.setting && noteExists)
+        }
+        check("land-unified-state-invariant: every transition keeps one state consistent and frozenAnchor is non-nil exactly when ON with a note",
+              everyTransitionConsistent
+              && frozenOnlyWhenOn
+              && LandingRoute.next(.toggle,
+                                   from: LandingRoute.BullseyeState(setting: false, noteArmed: false))
+                  == LandingRoute.BullseyeState(setting: true, noteArmed: true)
+              && LandingRoute.next(.setAnchor,
+                                   from: LandingRoute.BullseyeState(setting: false, noteArmed: nil))
+                  == LandingRoute.BullseyeState(setting: true, noteArmed: true))
+
+        // 13g-xvii. the reveal turns the setting ON.
+        check("land-reveal-turns-b-on: Option+Shift+N reveal turns the landing setting ON",
+              revealBody.contains("Settings.bullseyeLandAtStart = true"))
+
+        // 13g-xviii. the router takes the frozen view.
+        check("land-router-takes-frozen-view: routeNotesDelivery takes a BullseyeView and feeds the frozen anchor to the pure rule",
+              routerBody.contains("bullseyeView: LandingRoute.BullseyeView = .live")
+              && coordinatorSource.contains("case .frozen(let frozen): seenBullseye = frozen")
+              && routerBody.contains("bullseye: seenBullseye,")
+              && !routerBody.contains("bullseye: bullseyeState.current"))
+
+        // 13g-xix. the delivery seam writes to the FROZEN note id, and the legacy single-argument callback still
+        // exists exactly once as the fallback.
+        check("land-delivery-uses-frozen-note-id: the coordinator inserts by the frozen note id and keeps one legacy fallback call",
+              coordinatorSource.contains("var onDeliverToBullseyeNote: ((String, String) -> NoteInsertOutcome)? = nil")
+              && routerBody.contains("case .bullseye(let bullseyeNoteId):")
+              && NotesProbe.countOccurrences(of: "byId(delivered, bullseyeNoteId)", in: routerBody) == 1
+              && !routerBody.contains("byId(delivered, bullseyeState")
+              && NotesProbe.countOccurrences(of: "callbacks.onDeliverToBullseye(delivered)", in: routerBody) == 1)
+
+        // 13g-xx. the registry resolves the note by the frozen id and AppDelegate wires that seam.
+        check("land-registry-delivers-by-id: the registry delivers by note id through insertAtFrozenBullseye and AppDelegate wires it",
+              registryBody.contains("controller(holding: noteId)")
+              && registryBody.contains("insertAtFrozenBullseye(id: noteId, text: text)")
+              && !registryBody.contains("insertAtBullseye(")
+              && !registryBody.contains("NotesBullseyeState.shared")
+              && appSource.contains("onDeliverToBullseyeNote: { [weak self] text, noteId in")
+              && appSource.contains("deliverToBullseye(text: text, noteId: noteId)"))
+
+        // 13g-xxi. the inline note marker is the LIVE next-take cue: the B press always rebroadcasts it, and a
+        // take never does.
+        check("land-note-marker-is-next-take-flag: Option+B always rebroadcasts the inline marker and beginRecording never does",
+              toggleBody.contains("notesDelivery.broadcastBullseyeState()")
+              && !toggleBody.contains("state == .idle")
+              && !beginBody.contains("broadcastBullseyeState"))
+
+        // 13g-xxii. the frozen-delivery chain: the insert at the frozen note restores the LIVE pin afterwards.
+        check("land-frozen-delivery-restores-live-pin: performFrozenInsert inserts at the frozen note then re-pushes the live pin",
+              performFrozenBody.contains("call(.insertAtBullseye, payload: [BridgeKey.id: id, BridgeKey.text: text])")
+              && NotesProbe.orderedBefore(
+                  "call(.insertAtBullseye, payload: [BridgeKey.id: id, BridgeKey.text: text])",
+                  "pushBullseyeArmed(NotesBullseyeState.shared.current)",
+                  in: performFrozenBody))
+
+        // 13g-xxiii. the queue keeps the note id, so a flush after a reload still lands in the frozen note.
+        check("land-frozen-queue-keeps-id: the frozen insert queues with its note id and flushQueues replays it through performFrozenInsert",
+              queueSource.contains("func enqueueFrozenInsertion(id: String, text: String)")
+              && queueSource.contains("func drainFrozenInsertions()")
+              && frozenInsertBody.contains("outboundQueue.enqueueFrozenInsertion(id: id, text: text)")
+              && !frozenInsertBody.contains("enqueueInsertion(")
+              && flushBody.contains("performFrozenInsert(id: item.id, text: item.text)"))
+
+        // 13g-xxiv. a frozen note that is gone may drop the LIVE pin only when the live pin IS that note.
+        check("land-gone-frozen-keeps-other-live-pin: only the frozen note itself may drop the live anchor at a gone-note park",
+              LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: "B") == false
+              && LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: nil) == false
+              && LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: "A") == true
+              && NotesProbe.countOccurrences(of: "bullseyeState.drop()", in: routerBody) == 1
+              && NotesProbe.orderedBefore(
+                  "if LandingRoute.shouldDropLiveAnchor(frozenNoteId: bullseyeNoteId, liveNoteId: bullseyeState.noteId) {",
+                  "bullseyeState.drop()", in: routerBody))
+
+        // 13g-xxv. note precedence is unchanged: an armed anchor wins over the take-start snapshot, and a
+        // snapshot wins when nothing is armed.
+        check("land-note-armed-wins: an armed note anchor wins over a snapshot note id for an in-place dictation",
+              NotesBullseyeLogic.delivery(bullseye: armedNote, snapshotNoteId: "note-snapshot",
+                                          landingKind: .inPlace, inputSource: .dictation)
+                  == .bullseye(noteId: "note-A"))
+        check("land-note-snapshot-wins: with no note anchor the take-start snapshot receives the text",
+              NotesBullseyeLogic.delivery(bullseye: nil, snapshotNoteId: "note-snapshot",
+                                          landingKind: .inPlace, inputSource: .dictation)
+                  == .snapshot(noteId: "note-snapshot"))
+        check("land-note-routes-before-landing: finalize asks the notes router before it consults the landing route",
+              NotesProbe.orderedBefore("notesDelivery.routeNotesDelivery(", "LandingRoute.route(",
+                                       in: finalizeBody))
+
+        // 13g-xxvii. the one-time H swap: the old pair is swapped once, and a deliberate re-save is respected.
+        let plainHKey = KeySpec.regular(keyCode: 4, label: "H")
+        let shiftHKey = KeySpec.regular(keyCode: 4, label: "⇧H", shift: true)
+        let swapSuiteName = "test.viddydictate.selftest.land-swap-once"
+        if let swapDefaults = UserDefaults(suiteName: swapSuiteName) {
+            swapDefaults.removePersistentDomain(forName: swapSuiteName)
+            defer { swapDefaults.removePersistentDomain(forName: swapSuiteName) }
+            var oldPair = HotkeyMap.defaults()
+            oldPair.bindings[HotkeyCommand.history.rawValue] = plainHKey
+            oldPair.bindings[HotkeyCommand.recentDictations.rawValue] = shiftHKey
+            oldPair.save(swapDefaults)
+            let firstLoad = HotkeyMap.load(swapDefaults)
+            // The swap already ran; the user now re-saves the old pair ON PURPOSE and must keep it.
+            var keptPair = HotkeyMap.defaults()
+            keptPair.bindings[HotkeyCommand.history.rawValue] = plainHKey
+            keptPair.bindings[HotkeyCommand.recentDictations.rawValue] = shiftHKey
+            keptPair.save(swapDefaults)
+            let secondLoad = HotkeyMap.load(swapDefaults)
+            check("land-swap-once-old-defaults: a saved old pair is swapped once, then a deliberate re-save survives the next load",
+                  firstLoad.key(for: .history) == shiftHKey
+                  && firstLoad.key(for: .recentDictations) == plainHKey
+                  && secondLoad.key(for: .history) == plainHKey
+                  && secondLoad.key(for: .recentDictations) == shiftHKey)
+        } else {
+            check("land swap: probe defaults suite is creatable", false)
+        }
+
+        // 13g-xxviii. a custom H binding is a real choice and is never swapped.
+        let customSuiteName = "test.viddydictate.selftest.land-swap-custom"
+        if let customDefaults = UserDefaults(suiteName: customSuiteName) {
+            customDefaults.removePersistentDomain(forName: customSuiteName)
+            defer { customDefaults.removePersistentDomain(forName: customSuiteName) }
+            var customHistory = HotkeyMap.defaults()
+            customHistory.bindings[HotkeyCommand.history.rawValue] = KeySpec.regular(keyCode: 100, label: "F8")
+            customHistory.bindings[HotkeyCommand.recentDictations.rawValue] = plainHKey
+            customHistory.save(customDefaults)
+            let loadedCustomHistory = HotkeyMap.load(customDefaults)
+            var customRecent = HotkeyMap.defaults()
+            customRecent.bindings[HotkeyCommand.recentDictations.rawValue] = KeySpec.regular(keyCode: 20, label: "T")
+            customRecent.save(customDefaults)
+            let loadedCustomRecent = HotkeyMap.load(customDefaults)
+            check("land-swap-leaves-custom: a saved map with a custom History or Recent binding is returned unchanged",
+                  loadedCustomHistory.key(for: .history) == KeySpec.regular(keyCode: 100, label: "F8")
+                  && loadedCustomHistory.key(for: .recentDictations) == plainHKey
+                  && loadedCustomRecent.key(for: .history) == shiftHKey
+                  && loadedCustomRecent.key(for: .recentDictations) == KeySpec.regular(keyCode: 20, label: "T"))
+        } else {
+            check("land swap: probe custom defaults suite is creatable", false)
+        }
+
+        // 13g-xxix. a legacy saved map with no Recent entry at all is treated as the old default pair.
+        let legacySuiteName = "test.viddydictate.selftest.land-swap-legacy"
+        if let legacyDefaults = UserDefaults(suiteName: legacySuiteName) {
+            legacyDefaults.removePersistentDomain(forName: legacySuiteName)
+            defer { legacyDefaults.removePersistentDomain(forName: legacySuiteName) }
+            var legacyMap = HotkeyMap.defaults()
+            legacyMap.bindings[HotkeyCommand.history.rawValue] = plainHKey
+            legacyMap.bindings.removeValue(forKey: HotkeyCommand.recentDictations.rawValue)
+            legacyMap.save(legacyDefaults)
+            let loadedLegacy = HotkeyMap.load(legacyDefaults)
+            let code4Commands = HotkeyCommand.allCases.filter {
+                let key = loadedLegacy.key(for: $0)
+                return !key.isModifier && key.code == 4
+            }
+            check("land-swap-legacy-missing-recent: a legacy map with plain H and no Recent loads swapped, with exactly two commands on code 4",
+                  loadedLegacy.key(for: .history) == shiftHKey
+                  && loadedLegacy.key(for: .recentDictations) == plainHKey
+                  && code4Commands.count == 2)
+        } else {
+            check("land swap: probe legacy defaults suite is creatable", false)
+        }
+
+        // 13g-xxx. the back-fill never puts two commands on one chord: an older map that moved Dictionary onto
+        // plain H gets Recent on Shift+H, not on plain H.
+        let collisionSuiteName = "test.viddydictate.selftest.land-backfill-collision"
+        if let collisionDefaults = UserDefaults(suiteName: collisionSuiteName) {
+            collisionDefaults.removePersistentDomain(forName: collisionSuiteName)
+            defer { collisionDefaults.removePersistentDomain(forName: collisionSuiteName) }
+            var collisionMap = HotkeyMap.defaults()
+            collisionMap.bindings[HotkeyCommand.history.rawValue] = KeySpec.regular(keyCode: 100, label: "F8")
+            collisionMap.bindings[HotkeyCommand.dictionary.rawValue] = plainHKey
+            collisionMap.bindings.removeValue(forKey: HotkeyCommand.recentDictations.rawValue)
+            collisionMap.save(collisionDefaults)
+            let loadedCollision = HotkeyMap.load(collisionDefaults)
+            let plainHCommands = HotkeyCommand.allCases.filter { loadedCollision.key(for: $0) == plainHKey }
+            check("land-swap-no-backfill-collision: a back-filled Recent avoids plain H when another command already holds it",
+                  loadedCollision.key(for: .recentDictations) == shiftHKey
+                  && loadedCollision.key(for: .history) == KeySpec.regular(keyCode: 100, label: "F8")
+                  && plainHCommands == [.dictionary])
+        } else {
+            check("land swap: probe collision defaults suite is creatable", false)
+        }
+
+        // 13g-xxvi. the tail-check fixtures: the locked-no-target case pins the frozen setting, and the notes case
+        // freezes its armed anchor so the injected callback is reached.
+        let hookFixtureSlice = NotesProbe.sourceSlice(tailSource, from: "controller.wasLocked = true",
+                                                      to: "\n        return controller")
+        check("land-tailcheck-fixture-pinned: the hook fixture sets takeLandAtStart after wasLocked and reaches the no-target arm",
+              hookFixtureSlice == "\n        controller.takeLandAtStart = true"
+              && LandingRoute.route(bullseyeOn: true, hasTarget: false) == .pinnedNoTarget)
+        let tailParts = tailSource.components(separatedBy: "case .notesBullseye:")
+        let notesCaseSource = tailParts.count == 2 ? tailParts[1] : ""
+        check("land-hook-after-paste-reaches-note: the notes hook fixture freezes its armed anchor before finalize",
+              NotesProbe.orderedBefore("let controller = DictationController(",
+                                       "controller.takeAnchor = bullseyeState.current", in: notesCaseSource)
+              && NotesProbe.orderedBefore("controller.takeAnchor = bullseyeState.current",
+                                          "_ = controller.finalize(", in: notesCaseSource))
+    }
+
+    /// Read a source file from the tree root (the self-test must run with the repository as its CWD).
+    private static func landSource(_ path: String) -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        return (try? String(contentsOf: root.appendingPathComponent(path, isDirectory: false),
+                            encoding: .utf8)) ?? ""
+    }
+
+    /// Strip `//` and `/* */` comments, leaving string literals intact, so a body check cannot be satisfied by
+    /// or defeated by prose (the `//` inside a URL in a string literal survives).
+    private static func landStripped(_ text: String) -> String {
+        var out = ""
+        var index = text.startIndex
+        var inBlock = false
+        var inLine = false
+        var inString = false
+        while index < text.endIndex {
+            let ch = text[index]
+            let next = text.index(after: index)
+            if inLine {
+                if ch == "\n" { inLine = false; out.append(ch) }
+                index = next
+                continue
+            }
+            if inBlock {
+                if ch == "*" && next < text.endIndex && text[next] == "/" {
+                    inBlock = false
+                    index = text.index(after: next)
+                    continue
+                }
+                if ch == "\n" { out.append(ch) }
+                index = next
+                continue
+            }
+            if inString {
+                out.append(ch)
+                if ch == "\\", next < text.endIndex {
+                    out.append(text[next])
+                    index = text.index(after: next)
+                    continue
+                }
+                if ch == "\"" { inString = false }
+                index = next
+                continue
+            }
+            if ch == "/", next < text.endIndex, text[next] == "/" {
+                inLine = true
+                index = text.index(after: next)
+                continue
+            }
+            if ch == "/", next < text.endIndex, text[next] == "*" {
+                inBlock = true
+                index = text.index(after: next)
+                continue
+            }
+            if ch == "\"" { inString = true }
+            out.append(ch)
+            index = next
+        }
+        return out
+    }
+
+    /// The text of the declaration starting at `signature` through its closing brace at the type-member
+    /// indentation (4 spaces), which is how every function these rows inspect is laid out.
+    private static func landBody(_ source: String, _ signature: String) -> String {
+        guard let start = source.range(of: signature) else { return "" }
+        guard let end = source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex) else {
+            return String(source[start.lowerBound...])
+        }
+        return String(source[start.lowerBound..<end.upperBound])
     }
 
 }

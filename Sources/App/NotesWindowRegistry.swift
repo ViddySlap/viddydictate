@@ -302,6 +302,18 @@ final class NotesWindowRegistry {
         return controller.insertAtBullseye(id: noteId, text: text)
     }
 
+    /// Deliver a completed take to the FROZEN bullseye note id the take started with (VDLAND1). The id comes
+    /// from the take, never from the live pin, so an Option+N in another note mid-take cannot redirect the text.
+    /// Reaches the note in whatever live window holds it and lands at that note's own pin; `.noWindow` means no
+    /// live window holds the note (the caller parks the take on the clipboard). Main thread.
+    @discardableResult
+    func deliverToBullseye(text: String, noteId: String) -> NoteInsertOutcome {
+        guard let controller = controller(holding: noteId) else {
+            return .noWindow
+        }
+        return controller.insertAtFrozenBullseye(id: noteId, text: text)
+    }
+
     /// After any store-changing membership event, auto-disarm the bullseye if its note was closed/deleted (no
     /// longer open in the store), firing the one-shot notice exactly once. Uses `store.openNotes()` — the
     /// persisted truth — so a note open in the store but not yet materialized in a live window is NOT treated

@@ -44,10 +44,16 @@ final class PasteTargetMarker {
     private var latestSnapshot: PasteTargetPlacement.Focus?
     private var startedAt = Date()
     private var captured: DictationTarget?
+    /// Whether the marker follows LIVE focus (the landing setting is OFF) or sits on the field captured at take
+    /// START (the setting is ON). Frozen for the whole run, exactly like the take's landing route (VDLAND1).
+    private var followsLive = true
 
-    /// Main thread only; idempotent (a start while running restarts cleanly).
-    func start(captured: DictationTarget?) {
+    /// Main thread only; idempotent (a start while running restarts cleanly). `followsLive` is the take's frozen
+    /// route: true reads live focus as before, false pins the marker to the captured element's own frame/caret so
+    /// it cannot drift away from the field the text will land in.
+    func start(captured: DictationTarget?, followsLive: Bool) {
         self.captured = captured
+        self.followsLive = followsLive
         timer?.invalidate()
         runGeneration += 1
         inFlightGeneration = nil
@@ -105,8 +111,9 @@ final class PasteTargetMarker {
             let g = runGeneration
             let q = focusQueue
             let captured = self.captured
+            let followsLive = self.followsLive
             q?.async { [weak self] in
-                let result = PasteTargetMarker.readFocus(captured: captured)
+                let result = PasteTargetMarker.readFocus(captured: captured, followsLive: followsLive)
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     // COMPLETION: a stale or stopped completion touches NOTHING.
@@ -140,9 +147,20 @@ final class PasteTargetMarker {
         tickCount += 1
     }
 
-    /// The focus read, run OFF the main thread on this run's serial queue. Returns nil when no
-    /// focused element could be read (or the app is not trusted for Accessibility).
-    private static func readFocus(captured: DictationTarget?) -> PasteTargetPlacement.Focus? {
+    /// The focus read, run OFF the main thread on this run's serial queue. Returns nil when no focused element
+    /// could be read (or the app is not trusted for Accessibility). With `followsLive == false` it reads the
+    /// CAPTURED element instead of live focus and returns nil when that element cannot be read, so a pinned
+    /// take's marker never falls back to whatever the user has since clicked.
+    private static func readFocus(captured: DictationTarget?, followsLive: Bool) -> PasteTargetPlacement.Focus? {
+        if !followsLive {
+            guard let captured = captured else { return nil }
+            let element = captured.element
+            AXUIElementSetMessagingTimeout(element, 0.25)
+            let pinnedElementRect = readFrame(of: element)
+            let pinnedCaretRect = readCaret(of: element)
+            guard pinnedElementRect != nil || pinnedCaretRect != nil else { return nil }
+            return PasteTargetPlacement.Focus(caret: pinnedCaretRect, element: pinnedElementRect, isTarget: true)
+        }
         // (i) Resolve the focused element: system-wide first, then the frontmost app's own focused
         // element (the same two strategies the target resolver uses, but without calling its
         // capture function, which writes log lines on every call). Set the 0.25s messaging timeout

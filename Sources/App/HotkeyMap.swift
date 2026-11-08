@@ -136,8 +136,8 @@ enum HotkeyCommand: String, CaseIterable, Codable {
         // Option+Shift+N: the SHIFT-QUALIFIED sibling of Option+N. Same keycode, distinct binding — the shift
         // flag is part of KeySpec identity, so `⇧N` (reveal) and `N` (set/arm) coexist without conflicting.
         case .bullseyeReveal:   return .regular(keyCode: 45, label: "⇧N", shift: true)
-        case .history:          return .regular(keyCode: 4,  label: "H")
-        case .recentDictations: return .regular(keyCode: 4, label: "⇧H", shift: true)
+        case .history:          return .regular(keyCode: 4,  label: "⇧H", shift: true)
+        case .recentDictations: return .regular(keyCode: 4, label: "H")
         }
     }
 
@@ -239,18 +239,67 @@ struct HotkeyMap: Codable, Equatable {
     // MARK: persistence (UserDefaults, parallel to the rest of Settings)
 
     private static let storeKey = "hotkeyMap"
+    /// One-time marker for the H swap below (a plain bool, not a registered default).
+    static let hSwapDoneKey = "hotkeyHSwapDone"
 
     /// Load the saved map, falling back to defaults (and back-filling any command missing from an
     /// older saved map so a newly-added command always has a key).
     static func load(_ d: UserDefaults = .standard) -> HotkeyMap {
         guard let data = d.data(forKey: storeKey),
               var map = try? JSONDecoder().decode(HotkeyMap.self, from: data) else {
+            // A fresh install has no map to swap; the marker is set so a later decode of a map written by an
+            // older build is judged on its own merits rather than on this MAC's install state.
+            d.set(true, forKey: hSwapDoneKey)
             return defaults()
         }
+        // One-time swap FIRST, then back-fill: a pre-slice map that lacks Recent must be swapped (or left alone)
+        // before the back-fill decides which chord the missing command gets.
+        migrateHSwap(&map, d)
         for c in HotkeyCommand.allCases where map.bindings[c.rawValue] == nil {
-            map.bindings[c.rawValue] = c.defaultKey
+            map.bindings[c.rawValue] = backfillKey(for: c, in: map)
         }
         return map
+    }
+
+    /// VDLAND1: Ben reversed the two H chords — right-Option+H now opens the Recent dictations pop-up and
+    /// right-Option+Shift+H opens Settings on the History tab. A saved map that still holds exactly the two OLD
+    /// defaults (History = plain H, Recent = Shift+H) or lacks one of the two (an older build never wrote it) is
+    /// swapped ONCE. Any other saved binding is a real choice and is left alone. `hotkeyHSwapDone` makes the
+    /// swap one-shot, so a user who re-saves the old pair on purpose keeps it.
+    static func migrateHSwap(_ map: inout HotkeyMap, _ d: UserDefaults) {
+        guard !d.bool(forKey: hSwapDoneKey) else { return }
+        let plainH = KeySpec.regular(keyCode: 4, label: "H")
+        let shiftH = KeySpec.regular(keyCode: 4, label: "⇧H", shift: true)
+        let history = map.bindings[HotkeyCommand.history.rawValue]
+        let recent = map.bindings[HotkeyCommand.recentDictations.rawValue]
+        let historyIsOld = history == nil || history == plainH
+        let recentIsOld = recent == nil || recent == shiftH
+        // Another command squatting on either H chord means the user arranged something by hand; never swap.
+        let othersHoldH = HotkeyCommand.allCases.contains { c in
+            guard c != .history, c != .recentDictations else { return false }
+            let key = map.key(for: c)
+            return key == plainH || key == shiftH
+        }
+        if historyIsOld && recentIsOld && !othersHoldH {
+            map.bindings[HotkeyCommand.history.rawValue] = shiftH
+            map.bindings[HotkeyCommand.recentDictations.rawValue] = plainH
+            map.save(d)
+        }
+        d.set(true, forKey: hSwapDoneKey)
+    }
+
+    /// VDLAND1: the key a command missing from a saved map is back-filled with. Its built-in default is used
+    /// when no other command already holds that chord. History and Recent fall back to their PRE-slice defaults
+    /// (plain H / Shift+H) when the new default is taken, so an older map never ends up with two commands
+    /// fighting over one chord; every other command keeps its default.
+    static func backfillKey(for c: HotkeyCommand, in map: HotkeyMap) -> KeySpec {
+        let key = c.defaultKey
+        guard map.conflict(of: key, assigningTo: .command(c)) != nil else { return key }
+        switch c {
+        case .history:          return .regular(keyCode: 4, label: "H")
+        case .recentDictations: return .regular(keyCode: 4, label: "⇧H", shift: true)
+        default:                return key
+        }
     }
 
     func save(_ d: UserDefaults = .standard) {
