@@ -320,6 +320,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
     .lockedDeliverySelftest: .init(tier: .deterministic) { _ in
         LockedDeliverySelfTest.run() ? 0 : 1
     },
+    .secureInputWarningSelftest: .init(tier: .deterministic) { _ in
+        SecureInputWarningSelfTest.run() ? 0 : 1
+    },
     .pathClassifierProbe: .init(tier: .deterministic) { _ in
         PathClassifierProbe.run() ? 0 : 1
     },

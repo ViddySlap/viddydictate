@@ -520,9 +520,21 @@ final class DictationController {
         }
     }
 
+    private var secureInputGate = SecureInputWarningGate()
+
     private func rightOptionDown() {
         Log.write("ctrl.rightOptionDown state=\(state)")
+        let holder = SecureInput.currentHolder()
+        let warning = secureInputGate.check(
+            holder: holder, ownPid: ProcessInfo.processInfo.processIdentifier,
+            now: ProcessInfo.processInfo.systemUptime)
+        if let holder, holder.pid != ProcessInfo.processInfo.processIdentifier {
+            Log.write("secure input held by \(holder.appName) pid=\(holder.pid): chords are blocked\(warning == nil ? "" : ", warned")")
+        }
         if state == .idle { beginRecording() }
+        // After beginRecording so its HUD presentation does not cover the toast; the toast's dwell
+        // returns the HUD to the recording scope.
+        if let warning { hud.toast(warning, duration: 7) }
         // In .locked, holding right-Option just arms the unlock chord; nothing else to do.
     }
 
