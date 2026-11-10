@@ -521,6 +521,10 @@ final class DictationController {
     }
 
     private var secureInputGate = SecureInputWarningGate()
+    /// The warning shown at this take's wakeup press. It is shown again at release, because a quick
+    /// right-Option tap (the usual failed-lock gesture) ends the take at once and its "Nothing heard" toast
+    /// would replace the warning after well under a second.
+    private var secureWarningThisTake: String?
 
     private func rightOptionDown() {
         Log.write("ctrl.rightOptionDown state=\(state)")
@@ -534,6 +538,7 @@ final class DictationController {
         if state == .idle { beginRecording() }
         // After beginRecording so its HUD presentation does not cover the toast; the toast's dwell
         // returns the HUD to the recording scope.
+        secureWarningThisTake = warning
         if let warning { hud.toast(warning, duration: 7) }
         // In .locked, holding right-Option just arms the unlock chord; nothing else to do.
     }
@@ -545,6 +550,10 @@ final class DictationController {
             phase: lockPhase(),
             hasArmedOneShot: TransformArmState.shared.armedOneShot != nil
         ) { finish() }
+        if let warning = secureWarningThisTake {
+            secureWarningThisTake = nil
+            hud.toast(warning, duration: 7)
+        }
     }
 
     /// The lock-relevant view of `state`, so `toggleLock` / `rightOptionUp` drive the pure `LockTransition`
