@@ -70,6 +70,7 @@ enum SelfTestManifestFlag: String, CaseIterable {
     case historySelftest = "--history-selftest"
     case hangWatchdogSelftest = "--hang-watchdog-selftest"
     case lockedDeliverySelftest = "--locked-delivery-selftest"
+    case secureInputWarningSelftest = "--secure-input-warning-selftest"
     case pathClassifierProbe = "--path-classifier-probe"
     case filesProbe = "--files-probe"
     case clobberProbe = "--clobber-probe"
