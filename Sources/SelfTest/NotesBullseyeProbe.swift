@@ -129,201 +129,18 @@ extension NotesProbe {
     }
 
     static func probeBullseye(freshRoot: () -> URL, check: Check) {
-        // --- 13b. bullseye set/arm/toggle/persist/auto-disarm (notes-bullseye BT2) --------------------
-        // The PINNED, persistent target: Option+N in a note sets/moves + arms it; Option+B pure-toggles the
-        // armed state preserving location; armed precedence applies only to fresh in-place dictation; persisted
-        // as {note id, anchor, armed} and restored armed iff the note still exists; auto-disarmed when its note
-        // is closed/deleted. The live arm/set/toggle/deliver flow +
-        // the info-pill glyph are GUI/live (covered by live GUI verification); here the PURE decision + persistence model is
-        // locked, plus a bundled-island shipping check that the JS half actually ships.
-
-        // 13b-i. Option+B toggle: no bullseye -> noneSet ("No bullseye set"); an existing bullseye flips ONLY
-        // armed, preserving note id + anchor.
-        check("bullseye toggle: no bullseye set -> noneSet (drives the 'No bullseye set' toast)",
-              NotesBullseyeLogic.toggled(nil) == .noneSet
-              && NotesBullseyeLogic.noneSetToast == "No bullseye set")
-        let disarmed = NotesBullseye(noteId: "note-x", anchor: 12, armed: false)
-        check("bullseye toggle: disarmed -> armed, location preserved",
-              NotesBullseyeLogic.toggled(disarmed) == .toggled(NotesBullseye(noteId: "note-x", anchor: 12, armed: true)))
-        let armed = NotesBullseye(noteId: "note-x", anchor: 12, armed: true)
-        check("bullseye toggle: armed -> disarmed, location preserved",
-              NotesBullseyeLogic.toggled(armed) == .toggled(NotesBullseye(noteId: "note-x", anchor: 12, armed: false)))
-
-        // 13b-ii. armed gate: drives the info-pill glyph + the delivery precedence.
-        check("bullseye armed: true only for a set + armed bullseye",
-              NotesBullseyeLogic.isArmed(armed)
-              && !NotesBullseyeLogic.isArmed(disarmed)
-              && !NotesBullseyeLogic.isArmed(nil))
-
-        // 13b-iii. restart restore: kept (with its armed flag) iff its note is still open; else dropped (the
-        // safe "else disarmed" outcome — a bullseye on a gone note reads as no-bullseye).
-        check("bullseye restore: kept with its armed flag when the note still exists",
-              NotesBullseyeLogic.restored(armed, openNoteIds: ["note-x", "note-y"]) == armed)
-        check("bullseye restore: a disarmed bullseye restores disarmed (armed flag respected)",
-              NotesBullseyeLogic.restored(disarmed, openNoteIds: ["note-x"]) == disarmed)
-        check("bullseye restore: dropped when the note is gone (deleted between sessions)",
-              NotesBullseyeLogic.restored(armed, openNoteIds: ["note-y"]) == nil)
-        check("bullseye restore: nil in, nil out",
-              NotesBullseyeLogic.restored(nil, openNoteIds: ["note-x"]) == nil)
-
-        // 13b-iv. runtime auto-disarm survival: survives while its note is open; must disarm once its note is
-        // closed/deleted; no bullseye trivially survives.
-        check("bullseye survival: survives while its note is open",
-              NotesBullseyeLogic.survives(armed, openNoteIds: ["note-x", "note-y"]))
-        check("bullseye survival: does NOT survive once its note is closed/deleted (auto-disarm)",
-              !NotesBullseyeLogic.survives(armed, openNoteIds: ["note-y"]))
-        check("bullseye survival: no bullseye trivially survives (nothing to disarm)",
-              NotesBullseyeLogic.survives(nil, openNoteIds: []))
-
-        // 13b-v / C1: landing-kind x input-source x armed truth table. Only fresh dictation with an in-place
-        // landing honors the bullseye. Selection transforms keep their selection, and non-destructive modes keep
-        // the mode-owned landing. A disarmed bullseye always yields to the requested in-place route.
-        check("bullseye precedence: armed + in-place + dictation wins over a transient snapshot",
-              NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: "note-snap",
-                landingKind: .inPlace, inputSource: .dictation) == .bullseye(noteId: "note-x"))
-        check("bullseye precedence: armed + in-place + dictation wins with no snapshot too",
-              NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: nil,
-                landingKind: .inPlace, inputSource: .dictation) == .bullseye(noteId: "note-x"))
-        check("bullseye precedence: a DISARMED bullseye yields to the transient snapshot",
-              NotesBullseyeLogic.delivery(
-                bullseye: disarmed, snapshotNoteId: "note-snap",
-                landingKind: .inPlace, inputSource: .dictation) == .snapshot(noteId: "note-snap"))
-        check("bullseye precedence: no bullseye + a snapshot -> snapshot",
-              NotesBullseyeLogic.delivery(
-                bullseye: nil, snapshotNoteId: "note-snap",
-                landingKind: .inPlace, inputSource: .dictation) == .snapshot(noteId: "note-snap"))
-        check("bullseye precedence: nothing armed and no snapshot -> requested in-place delivery",
-              NotesBullseyeLogic.delivery(
-                bullseye: nil, snapshotNoteId: nil,
-                landingKind: .inPlace, inputSource: .dictation) == .requested
-              && NotesBullseyeLogic.delivery(
-                bullseye: disarmed, snapshotNoteId: nil,
-                landingKind: .inPlace, inputSource: .dictation) == .requested
-              && NotesBullseyeLogic.delivery(
-                bullseye: disarmed, snapshotNoteId: "",
-                landingKind: .inPlace, inputSource: .dictation) == .requested)
-        check("bullseye precedence: armed + in-place + selection keeps the selection snapshot",
-              NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: "note-snap",
-                landingKind: .inPlace, inputSource: .selection) == .snapshot(noteId: "note-snap"))
-        check("bullseye precedence: armed + in-place + foreign selection keeps its requested destination",
-              NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: nil,
-                landingKind: .inPlace, inputSource: .selection) == .requested)
-        check("bullseye precedence: armed + non-destructive keeps mode landing for either input source",
-              NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: "note-snap",
-                landingKind: .nonDestructive, inputSource: .dictation) == .requested
-              && NotesBullseyeLogic.delivery(
-                bullseye: armed, snapshotNoteId: "note-snap",
-                landingKind: .nonDestructive, inputSource: .selection) == .requested)
-
-        let c1TruthTable: [(NotesBullseyeLogic.LandingKind, NotesBullseyeLogic.InputSource,
-                            NotesBullseye?, NotesBullseyeLogic.Delivery)] = [
-            (.inPlace, .dictation, armed, .bullseye(noteId: "note-x")),
-            (.inPlace, .selection, armed, .requested),
-            (.nonDestructive, .dictation, armed, .requested),
-            (.nonDestructive, .selection, armed, .requested),
-            (.inPlace, .dictation, disarmed, .requested),
-            (.inPlace, .selection, disarmed, .requested),
-            (.nonDestructive, .dictation, disarmed, .requested),
-            (.nonDestructive, .selection, disarmed, .requested),
-        ]
-        check("bullseye C1 truth table: all 8 landing-kind x input-source x armed rows are exact",
-              c1TruthTable.allSatisfy { landingKind, inputSource, bullseye, expected in
-                NotesBullseyeLogic.delivery(
-                    bullseye: bullseye, snapshotNoteId: nil,
-                    landingKind: landingKind, inputSource: inputSource) == expected
-              })
-
-        // C1 stateful seam: compare the raw / `?` tuple and one-shot dictation tuple through the same helper,
-        // then exercise selection, non-destructive, and gone-bullseye behavior with synthetic callbacks only.
-        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
-        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
-        let suiteName = "test.viddydictate.selftest.notes-c1"
-        if let defaults = UserDefaults(suiteName: suiteName) {
-            defaults.removePersistentDomain(forName: suiteName)
-            defer { defaults.removePersistentDomain(forName: suiteName) }
-            let noteId = "note-c1-bullseye"
-            let store = StickyNotesStore(root: freshRoot())
-            store.saveOpenNote(id: noteId, body: "synthetic open note")
-            let state = NotesBullseyeState(store: store, defaults: defaults)
-            state.setAtCaret(noteId: noteId)
-
-            var bullseyeOutcome = NoteInsertOutcome.delivered
-            var bullseyeDeliveries = 0
-            var snapshotDeliveries = 0
-            var markerRefreshes = 0
-            var clipboardParks: [String] = []
-            let callbacks = NotesDeliveryCallbacks(
-                onSnapshotNoteTarget: { _ in nil },
-                onDeliverToNoteTarget: { _, _ in snapshotDeliveries += 1; return .delivered },
-                onInsertIntoActiveNote: { _ in .noWindow },
-                onSetBullseyeAtCaret: { nil },
-                onDeliverToBullseye: { _ in bullseyeDeliveries += 1; return bullseyeOutcome },
-                onBullseyeStateChanged: { markerRefreshes += 1 },
-                onRevealBullseye: { .noneSet },
-                onResolveReplaceHighlightTarget: { nil },
-                onShowReplaceHighlight: { _, _, _ in },
-                onClearReplaceHighlight: { _ in },
-                onUndoNoteDelivery: { _ in false },
-                onReplaceNoteDelivery: { _, _ in false },
-                onCurrentNoteId: { nil })
-            let coordinator = NotesDeliveryCoordinator(
-                callbacks: callbacks, bullseyeState: state,
-                copyToClipboard: { clipboardParks.append($0) })
-
-            func route(_ landingKind: NotesBullseyeLogic.LandingKind,
-                       _ inputSource: NotesBullseyeLogic.InputSource,
-                       noteTarget: NotesDictationTarget? = nil) -> NotesDeliveryCoordinator.NotesLanding {
-                coordinator.routeNotesDelivery(
-                    delivered: "synthetic output", mode: .email,
-                    landingKind: landingKind, inputSource: inputSource, noteTarget: noteTarget,
-                    shouldInsertIntoNotes: false, startedInNotes: false, currentlyKey: false)
-            }
-
-            let rawReference = route(.inPlace, .dictation)
-            let oneShotDictation = route(.inPlace, .dictation)
-            check("bullseye C1 call parity: raw / ? and one-shot dictation tuples land identically",
-                  rawReference == .landed(noteUndo: noteId)
-                  && oneShotDictation == rawReference && bullseyeDeliveries == 2)
-
-            let selectionTarget = NotesDictationTarget(noteId: "note-c1-selection")
-            let selectionLanding = route(.inPlace, .selection, noteTarget: selectionTarget)
-            check("bullseye C1 stateful route: selection uses its snapshot, never the armed bullseye",
-                  selectionLanding == .landed(noteUndo: selectionTarget.noteId)
-                  && snapshotDeliveries == 1 && bullseyeDeliveries == 2 && state.armed)
-
-            let nonDestructive = route(.nonDestructive, .dictation, noteTarget: selectionTarget)
-            check("bullseye C1 stateful route: non-destructive mode keeps its landing and bullseye arm",
-                  nonDestructive == .notNotes && snapshotDeliveries == 1
-                  && bullseyeDeliveries == 2 && state.armed)
-
-            bullseyeOutcome = .noWindow
-            let goneLanding = route(.inPlace, .dictation)
-            let goneWasParked: Bool
-            if case .parked(_, refreshBullseye: true) = goneLanding {
-                goneWasParked = true
-            } else {
-                goneWasParked = false
-            }
-            check("bullseye C1 gone note: one-shot tuple auto-disarms, refreshes marker, and parks output",
-                  goneWasParked && !state.armed && markerRefreshes == 1
-                  && clipboardParks == ["synthetic output"])
-        } else {
-            check("bullseye C1 stateful route: isolated defaults suite available", false)
-        }
-
-        // Pin both production call sites, not just the pure function. The coordinator must be the only owner of
-        // the bridge branch so a future caller cannot quietly grow a second precedence ladder.
+        // --- 13b. the take-start snapshot rule (VDLAND2: the note pin is gone) ------------------------
+        // Before VDLAND2 this band pinned the PINNED, persistent note target (set/arm/toggle/persist/
+        // auto-disarm). All of that is deleted: there is no pinned target, no arm state and no persisted pin.
+        // What remains is the snapshot precedence the coordinator still owns — an in-place landing with a
+        // take-start snapshot lands in that note, a non-destructive mode keeps its own landing, and a missing or
+        // empty id keeps the requested destination. The rows here also pin the one remaining controller
+        // call-site shape, the kept OneShot input-source seam, and the bundled/source Web island wire names
+        // (the island's pin code is dead but inert; residual R1). The pure delivery rows live in
+        // `probeLandingRoute`.
         let coordinatorSrcURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent("Sources/App/NotesDeliveryCoordinator.swift", isDirectory: false)
         let coordinatorSrc = (try? String(contentsOf: coordinatorSrcURL, encoding: .utf8)) ?? ""
-        let routeBody = sourceSlice(coordinatorSrc,
-                                    from: "func routeNotesDelivery(",
-                                    to: "return .notNotes")
         let c1ControllerSrc = sourceDictationController
         let inPlaceBody = sourceSlice(c1ControllerSrc,
                                       from: "func landInPlaceTransform(",
@@ -331,17 +148,23 @@ extension NotesProbe {
         let finalizeBody = sourceSlice(c1ControllerSrc,
                                        from: "func finalize(delivered:",
                                        to: "private func deliverPushToTalk(")
-        let bullseyeBridgeCalls = coordinatorSrc.components(separatedBy: "callbacks.onDeliverToBullseye(delivered)").count - 1
+        // Pin both production call sites, not just the pure function. The coordinator must be the only owner of
+        // the notes landing ladder so a future caller cannot quietly grow a second precedence ladder. VDLAND2:
+        // the raw finalize call hands the pure rule the same take-start snapshot the one-shot call does, with
+        // D14's B-off gate in front of it.
         check("bullseye C1 call sites: raw finalize and one-shot in-place call the same coordinator helper",
               finalizeBody.contains("notesDelivery.routeNotesDelivery(")
               && finalizeBody.contains("landingKind: .inPlace")
               && finalizeBody.contains("inputSource: .dictation")
-              && finalizeBody.contains("noteTarget: notesDelivery.noteTarget")
+              && finalizeBody.contains("noteTarget: (takeLandAtStart || lateRecovery) ? notesDelivery.noteTarget : nil")
               && inPlaceBody.contains("notesDelivery.routeNotesDelivery(")
               && inPlaceBody.contains("landingKind: .inPlace, inputSource: inputSource, noteTarget: noteTarget"))
-        check("bullseye C1 single owner: only routeNotesDelivery calls the bullseye delivery bridge",
-              !routeBody.isEmpty && bullseyeBridgeCalls == 1,
-              "onDeliverToBullseye(delivered) occurrences=\(bullseyeBridgeCalls)")
+        check("bullseye C1 helper owner: routeNotesDelivery takes no per-take note view and feeds the pure rule the snapshot",
+              !coordinatorSrc.isEmpty
+              && !coordinatorSrc.contains("bullseyeView:")
+              && sourceSlice(coordinatorSrc, from: "func routeNotesDelivery(", to: "switch route {")
+                  .contains("snapshotNoteId: noteTarget?.noteId"),
+              "Sources/App/NotesDeliveryCoordinator.swift routeNotesDelivery()")
 
         let registrySrcURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent("Sources/App/OneShotRegistry.swift", isDirectory: false)
@@ -352,20 +175,9 @@ extension NotesProbe {
               && registrySrc.contains("inputSource: .selection")
               && registrySrc.contains("inputSource: inputSource"))
 
-        // 13b-vi. persistence round-trip: the {note id, anchor, armed} record the state writes to UserDefaults
-        // survives a JSON encode/decode byte-for-byte (so a restart restores exactly what was pinned).
-        do {
-            let encoded = try JSONEncoder().encode(armed)
-            let decoded = try JSONDecoder().decode(NotesBullseye.self, from: encoded)
-            check("bullseye persist: {note id, anchor, armed} round-trips through JSON intact", decoded == armed)
-        } catch {
-            check("bullseye persist: JSON round-trip did not throw", false, "\(error)")
-        }
-
-        // 13b-vii. the JS half ships. The bundled island is minified (identifiers mangled), so pin the two
-        // outbound wire names (string literals survive) in the BUNDLED app.js; pin the bullseye anchor store +
-        // follow-edits remap in the SOURCE module. (Wire-name parity with the Swift enums is enforced in
-        // probeBridgeParity, which now also covers setBullseye / insertAtBullseye / bullseyeAnchor.)
+        // The JS half still ships (and is still inert from Swift's side — R1). The bundled island is minified
+        // (identifiers mangled), so pin the outbound wire names (string literals survive) in the BUNDLED app.js
+        // and the anchor store in the SOURCE module.
         let appJS = NotesProbe.bundledAppJS
         check("bullseye: bundled island ships the setBullseye + insertAtBullseye outbound handlers",
               appJS.contains("setBullseye") && appJS.contains("insertAtBullseye"))
@@ -377,72 +189,28 @@ extension NotesProbe {
               && targetSrc.contains("setBullseyeAnchor"),
               "Web/StickyNotes/src/dictation-target.js")
 
-        // 13b-viii. items 5a/5b: arm/disarm NEVER cancels the take + Option+B emits no mid-take toast. The live
-        // recording state machine is GUI/tap (live GUI verification), so pin the pure contract PLUS the controller
-        // edit structurally: `notes()` (Option+N set/arm) and `toggleBullseye()` (Option+B) no longer call
-        // `discardIncidentalAudio()` (which idles the take), and `toggleBullseye()` no longer toasts armed/disarmed
-        // mid-take. Guard: the discard seam itself still exists AND is still used elsewhere (the pure-command
-        // chords) — we removed the two bullseye calls, not the seam.
-        check("bullseye 5a: arm/disarm is the identity on the take (never cancels / idles it)",
-              !NotesBullseyeLogic.armDisarmCancelsTake())
-
+        // items 5a/5b (kept): the discard seam itself still exists and is still used elsewhere — VDLAND2
+        // removed nothing from the controller's incidental-audio handling, and Option+N / Option+B never
+        // discarded the in-flight take.
         let controllerSrc = sourceDictationController
-        let notesBody = sourceSlice(controllerSrc,
-                                    from: "private func notes() {",
-                                    to: "private func toggleBullseye()")
-        let toggleBody = sourceSlice(controllerSrc,
-                                     from: "private func toggleBullseye() {",
-                                     to: "func handleBullseyeAutoDisarmed(")
         let discardOccurrences = controllerSrc.components(separatedBy: "discardIncidentalAudio()").count - 1
-        check("bullseye 5a: Option+N (notes / set + arm) no longer discards the in-flight take",
-              !controllerSrc.isEmpty && !notesBody.isEmpty && !notesBody.contains("discardIncidentalAudio()"),
-              "Sources/App/DictationController.swift notes()")
-        check("bullseye 5a: Option+B (toggleBullseye) no longer discards the in-flight take",
-              !toggleBody.isEmpty && !toggleBody.contains("discardIncidentalAudio()"),
-              "Sources/App/DictationController.swift toggleBullseye()")
-        check("bullseye 5b: Option+B no longer emits the armed/disarmed toast mid-take",
-              !toggleBody.isEmpty && !toggleBody.contains("armedToast") && !toggleBody.contains("disarmedToast"),
-              "Sources/App/DictationController.swift toggleBullseye()")
         check("bullseye 5a/5b: the discard seam still exists + is still used elsewhere (2 calls removed, seam kept)",
               controllerSrc.contains("func discardIncidentalAudio()") && discardOccurrences >= 2,
               "discardIncidentalAudio() occurrences=\(discardOccurrences)")
     }
 
     static func probeBullseyeMarker(check: Check) {
-        // --- 13c. inline bullseye marker (notes-bullseye BT3) ----------------------------------------
-        // A CodeMirror widget renders a bullseye glyph inline at the armed bullseye's anchor, shown ONLY while
-        // armed AND while its note is the note in the editor; it follows the pinned anchor through edits and the
-        // TRANSIENT snapshot gets NO marker. The widget render + follow-edits are CodeMirror/GUI (the review
-        // link's job); here the PURE present-only-when-armed gate is locked, plus a bundled-island + source +
-        // CSS shipping check that the JS/CSS half actually ships.
-
-        // 13c-i. present-only-when-armed gate: the marker shows iff armed AND the bullseye's note is the active
-        // (non-history) editor note. Disarmed, a different active note, the history view, or a missing id -> no
-        // marker.
-        check("bullseye marker: shows when armed AND the bullseye note is the active editor note",
-              NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: "note-x",
-                                               activeNoteId: "note-x", showingHistory: false))
-        check("bullseye marker: hidden when disarmed (present-only-when-armed)",
-              !NotesBullseyeLogic.markerVisible(armed: false, bullseyeNoteId: "note-x",
-                                                activeNoteId: "note-x", showingHistory: false))
-        check("bullseye marker: hidden when the active editor note is a DIFFERENT note",
-              !NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: "note-x",
-                                                activeNoteId: "note-y", showingHistory: false))
-        check("bullseye marker: hidden in the history view even when armed",
-              !NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: "note-x",
-                                                activeNoteId: "note-x", showingHistory: true))
-        check("bullseye marker: hidden when there is no bullseye note (nil / empty id)",
-              !NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: nil,
-                                                activeNoteId: "note-x", showingHistory: false)
-              && !NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: "",
-                                                   activeNoteId: "note-x", showingHistory: false))
-        check("bullseye marker: hidden when no note is active (blank home)",
-              !NotesBullseyeLogic.markerVisible(armed: true, bullseyeNoteId: "note-x",
-                                                activeNoteId: nil, showingHistory: false))
+        // --- 13c. the inline marker contract that still ships in the Web island (VDLAND2 leaves it inert) ----
+        // VDLAND2 deleted the Swift arm state and the marker gate (`NotesBullseyeLogic.markerVisible`). The web
+        // island still ships its inline marker, its `bullseyeArmed` handler and its CSS; nothing sends to them
+        // from Swift any more (residual R1 — deleting the web half is a follow-up). What the probe keeps here is
+        // (a) the surviving bundled/source SHIPPING checks for that dead-but-inert island code and (b) the pure
+        // CodeMirror position-mapping fixtures the take-start snapshot still relies on. The former pin-only
+        // decision rows are deleted with the pin state.
 
         // L6: pin the character-like mapping contract at a MID-PARAGRAPH anchor. These ASCII fixtures model
-        // CodeMirror ChangeSet.mapPos(..., -1), the exact mapping used by BOTH the live JS bullseye store and
-        // the marker field. Every case keeps the anchor attached to the LEFT|RIGHT boundary instead of a pixel.
+        // CodeMirror ChangeSet.mapPos(..., -1), the exact mapping the take-start snapshot store uses. Every case
+        // keeps the anchor attached to the LEFT|RIGHT boundary instead of a pixel.
         func applyEdit(_ doc: String, anchor: Int, from: Int, to: Int, insert: String) -> (doc: String, anchor: Int) {
             let start = doc.index(doc.startIndex, offsetBy: from)
             let end = doc.index(doc.startIndex, offsetBy: to)
@@ -459,48 +227,39 @@ extension NotesProbe {
         }
 
         let insertAbove = applyEdit("LEFTRIGHT", anchor: 4, from: 0, to: 0, insert: "TOP ")
-        check("bullseye drift L6: insert above shifts the mapped mid-paragraph anchor with LEFT|RIGHT",
+        check("note target mapping L6: insert above shifts the mapped mid-paragraph anchor with LEFT|RIGHT",
               insertAbove.anchor == 8 && staysAtBoundary(insertAbove, left: "LEFT", right: "RIGHT"))
 
         let deleteAbove = applyEdit("xxLEFTRIGHT", anchor: 6, from: 0, to: 2, insert: "")
-        check("bullseye drift L6: delete above shifts the mapped mid-paragraph anchor back with LEFT|RIGHT",
+        check("note target mapping L6: delete above shifts the mapped mid-paragraph anchor back with LEFT|RIGHT",
               deleteAbove.anchor == 4 && staysAtBoundary(deleteAbove, left: "LEFT", right: "RIGHT"))
 
         let insertAt = applyEdit("LEFTRIGHT", anchor: 4, from: 4, to: 4, insert: "NEW")
-        check("bullseye drift L6: insert AT the anchor keeps it before the inserted text (assoc -1)",
+        check("note target mapping L6: insert AT the anchor keeps it before the inserted text (assoc -1)",
               insertAt.anchor == 4 && staysAtBoundary(insertAt, left: "LEFT", right: "NEWRIGHT"))
 
         let deleteSpanning = applyEdit("LEFTmiddleRIGHT", anchor: 7, from: 4, to: 10, insert: "")
-        check("bullseye drift L6: delete spanning the anchor collapses it to the surviving LEFT|RIGHT boundary",
+        check("note target mapping L6: delete spanning the anchor collapses it to the surviving LEFT|RIGHT boundary",
               deleteSpanning.anchor == 4 && staysAtBoundary(deleteSpanning, left: "LEFT", right: "RIGHT"))
 
         let multiLineAbove = applyEdit("LEFTRIGHT", anchor: 4, from: 0, to: 0, insert: "one\ntwo\n")
-        check("bullseye drift L6: multi-line paste above shifts the anchor by the whole paste",
+        check("note target mapping L6: multi-line paste above shifts the anchor by the whole paste",
               multiLineAbove.anchor == 12
               && staysAtBoundary(multiLineAbove, left: "LEFT", right: "RIGHT"))
 
         let insertAfter = applyEdit("LEFTRIGHT", anchor: 4, from: 9, to: 9, insert: " tail")
         let deleteAfter = applyEdit("LEFTRIGHTxx", anchor: 4, from: 9, to: 11, insert: "")
-        check("bullseye drift L6: inserts and deletes AFTER the mid-paragraph anchor leave it untouched",
+        check("note target mapping L6: inserts and deletes AFTER the mid-paragraph anchor leave it untouched",
               insertAfter.anchor == 4 && deleteAfter.anchor == 4
               && staysAtBoundary(insertAfter, left: "LEFT", right: "RIGHT")
               && staysAtBoundary(deleteAfter, left: "LEFT", right: "RIGHT"))
 
-        let dictationAt = applyEdit("LEFTRIGHT", anchor: 4, from: 4, to: 4, insert: " DICTATED")
-        let advancedAfterDictation = NotesBullseyeLogic.advancedAnchor(
-            at: dictationAt.anchor, textLength: " DICTATED".utf16.count)
-        let advancedFixture = (doc: dictationAt.doc, anchor: advancedAfterDictation)
-        check("bullseye drift L6: dictation lands at the MID-PARAGRAPH anchor and advances before RIGHT",
-              dictationAt.doc == "LEFT DICTATEDRIGHT"
-              && dictationAt.anchor == 4 && advancedAfterDictation == 13
-              && staysAtBoundary(advancedFixture, left: " DICTATED", right: "RIGHT"))
-
-        // 13c-ii. the armed-state push is a wired outbound bridge message (Swift enum ++ JS parity is enforced
-        // in probeBridgeParity, which now also covers bullseyeArmed).
+        // The armed-state push is still a wired outbound bridge message (Swift enum ++ JS parity is enforced in
+        // probeBridgeParity). Nothing in Swift sends it after VDLAND2; the case stays for the fenced bridge.
         check("bullseye marker: bullseyeArmed is a wired outbound bridge message (Swift enum)",
               NotesOutbound.allCases.contains(.bullseyeArmed))
 
-        // 13c-iii. the JS + CSS half ships. The bundled island is minified (identifiers mangled), so pin the
+        // The JS + CSS half still ships. The bundled island is minified (identifiers mangled), so pin the
         // surviving string literals: the bullseyeArmed handler wire name and the marker DOM class in app.js,
         // and the marker style rule in app.css; pin the armed-flag store accessors in the SOURCE module.
         let appJS = NotesProbe.bundledAppJS
@@ -532,21 +291,8 @@ extension NotesProbe {
               && !editorSrc.contains("eq() { return true; }"),
               "Web/StickyNotes/src/editor.js bullseyeMarkerField")
 
-        // 13c-iv. item 5c (inline glyph trails one dictation). A delivery ADVANCES the anchor past the inserted
-        // text so successive takes stack in reading order; the inline marker must then re-render at that ADVANCED
-        // anchor (the END of the just-delivered text), NOT at `at` (the START, where the `side: -1` widget
-        // self-maps = the end of the PREVIOUS dictation). The CodeMirror re-anchor is GUI (live GUI verification),
-        // so pin the PURE advance math + the marker-position contract, plus a source check that `insertAtBullseye`
-        // re-pushes the marker (clear-then-sync) as the last word after render().
-        let at5c = 12, len5c = 5
-        check("bullseye marker 5c: a delivery advances the anchor by the actual inserted span",
-              NotesBullseyeLogic.advancedAnchor(at: at5c, textLength: len5c) == at5c + len5c
-              && NotesBullseyeLogic.advancedAnchor(at: 0, textLength: 3) == 3)
-        check("bullseye marker 5c: the post-delivery marker sits at the ADVANCED anchor, NOT at the insert start",
-              NotesBullseyeLogic.postDeliveryMarkerAnchor(at: at5c, textLength: len5c)
-                  == NotesBullseyeLogic.advancedAnchor(at: at5c, textLength: len5c)
-              && NotesBullseyeLogic.postDeliveryMarkerAnchor(at: at5c, textLength: len5c) != at5c)
-
+        // item 5c (inline glyph trails one dictation), kept as a Web-shipping check: the island's
+        // insertAtBullseye handler still re-pushes the marker (clear-then-sync) as the last word after render().
         let dictationActionsSrcURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent("Web/StickyNotes/src/actions-dictation.js", isDirectory: false)
         let dictationActionsSrc = (try? String(contentsOf: dictationActionsSrcURL, encoding: .utf8)) ?? ""
@@ -564,102 +310,14 @@ extension NotesProbe {
               "Web/StickyNotes/src/actions-dictation.js insertAtBullseye")
     }
 
-    /// --- 13d. Option+Shift+N bullseye reveal (notes-bullseye BT6, L7) -------------------------------------
-    /// "Show me where the bullseye is": front the window holding its note, select that note's tab, scroll the
-    /// anchor into view, and arm it if it was disarmed. Reveal is a NAVIGATION act, not a visibility one — the
-    /// marker already renders persistently, just only while its note is the active tab in a visible window.
-    ///
-    /// The live window/tab/scroll walk is AppKit + CodeMirror (GUI), so pin here: the pure reveal decision, the
-    /// two honest-failure toasts, the shift-qualified chord grammar that makes Option+Shift+N a distinct binding
-    /// from Option+N, and that the JS half actually ships.
+    /// --- 13d. the removed reveal chord (VDLAND2 D7) ------------------------------------------------
+    /// The `bullseyeReveal` command (Option+Shift+N) is gone from `HotkeyCommand`. Because no chord claims
+    /// Shift+N any more, the monitor's existing shift fallback makes right-Option+Shift+N fire plain
+    /// right-Option+N (open/focus the sticky notes). The live window/tab/scroll walk was deleted with the chord;
+    /// what remains here is the web island's (now unreachable) reveal code — kept by D11/R1 as a shipping check —
+    /// and the pre-shift KeySpec decode that a saved map still relies on.
     static func probeBullseyeReveal(freshRoot: () -> URL, check: Check) {
-        let armed = NotesBullseye(noteId: "note-x", anchor: 42, armed: true)
-        let disarmed = NotesBullseye(noteId: "note-x", anchor: 42, armed: false)
-
-        // 13d-i. the reveal decision. An armed bullseye whose note is live navigates without re-arming; a
-        // DISARMED one navigates AND arms (a disarmed bullseye draws no marker, so revealing it would show
-        // nothing); nothing set is the Option+B "none set" case; a set bullseye whose note no live window holds
-        // is the honest "closed" case — never a silent no-op, and never a reopen.
-        check("bullseye reveal: an armed bullseye in a live window reveals without re-arming",
-              NotesBullseyeLogic.reveal(armed, liveNoteIds: ["note-x", "note-y"])
-              == .reveal(noteId: "note-x", arm: false))
-        check("bullseye reveal: a DISARMED bullseye is armed by the reveal (an unarmed one shows no marker)",
-              NotesBullseyeLogic.reveal(disarmed, liveNoteIds: ["note-x"])
-              == .reveal(noteId: "note-x", arm: true))
-        check("bullseye reveal: reveals in whatever window holds the note, not only the active one",
-              NotesBullseyeLogic.reveal(armed, liveNoteIds: ["note-y", "note-x"])
-              == .reveal(noteId: "note-x", arm: false))
-        check("bullseye reveal: nothing set -> the Option+B none-set outcome",
-              NotesBullseyeLogic.reveal(nil, liveNoteIds: ["note-x"]) == .noneSet)
-        check("bullseye reveal: set but its note is in no live window -> the honest closed outcome",
-              NotesBullseyeLogic.reveal(armed, liveNoteIds: ["note-y"]) == .noteClosed
-              && NotesBullseyeLogic.reveal(armed, liveNoteIds: []) == .noteClosed)
-        check("bullseye reveal: both failures toast (none-set reuses Option+B's copy, closed says closed)",
-              NotesBullseyeLogic.noneSetToast == "No bullseye set"
-              && NotesBullseyeLogic.revealNoteClosedToast == "Bullseye note is closed"
-              && NotesBullseyeLogic.revealNoteClosedToast != NotesBullseyeLogic.goneToast)
-
-        // 13d-ii. arming in place. Distinct from `toggle()` (flips) and `setAtCaret` (relocates): the reveal must
-        // leave a disarmed bullseye armed at the SAME anchor, and an already-armed one untouched (so the caller
-        // refreshes the info pill exactly once).
-        // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an empty
-        // plist per run; safe because the house rule runs one heavy suite at a time on this Mac.
-        let defaultsSuite = "test.viddydictate.selftest.notes-reveal"
-        if let defaults = UserDefaults(suiteName: defaultsSuite) {
-            defaults.removePersistentDomain(forName: defaultsSuite)
-            defer { defaults.removePersistentDomain(forName: defaultsSuite) }
-            // The state confirms its persisted value against the store's OPEN notes on first use, so the note has
-            // to really exist in a scratch store or the restore would drop the bullseye before arm() sees it.
-            let noteId = "note-reveal-arm"
-            let store = StickyNotesStore(root: freshRoot())
-            store.saveOpenNote(id: noteId, body: "synthetic open note")
-            if let encoded = try? JSONEncoder().encode(NotesBullseye(noteId: noteId, anchor: 42, armed: false)) {
-                defaults.set(encoded, forKey: "notesBullseye")
-            }
-            let state = NotesBullseyeState(store: store, defaults: defaults)
-            let didArm = state.arm()
-            check("bullseye reveal: arm() arms a disarmed bullseye in place, preserving its anchor",
-                  didArm && state.current?.armed == true && state.current?.anchor == 42
-                  && state.current?.noteId == noteId)
-            check("bullseye reveal: arm() is idempotent — an already-armed bullseye reports no change",
-                  !state.arm() && state.current?.armed == true && state.current?.anchor == 42)
-        } else {
-            check("bullseye reveal: probe defaults suite is creatable", false, defaultsSuite)
-        }
-
-        // 13d-iii. the chord grammar. Option+Shift+N is a SHIFT-QUALIFIED binding on the same keycode as
-        // Option+N: the qualifier is part of KeySpec identity, so the two coexist without conflicting, exact
-        // matching routes a shifted press to the reveal, and an unshifted press still reaches Option+N.
-        let defs = HotkeyMap.defaults()
-        let revealKey = defs.key(for: .bullseyeReveal)
-        let notesKey = defs.key(for: .notes)
-        check("bullseye reveal: the default chord is Shift-qualified N — the same keycode as Option+N",
-              revealKey.code == 45 && revealKey.shift && !revealKey.isModifier
-              && notesKey.code == 45 && !notesKey.shift)
-        check("bullseye reveal: ⇧N and N are DISTINCT bindings (the shift qualifier is part of identity)",
-              revealKey != notesKey)
-        // The shift qualifier is exactly what lets both live on keycode 45: assigning ⇧N to the reveal slot is
-        // conflict-free in a map that already binds N to sticky notes, while assigning plain N to that same slot
-        // collides. Same key, one bit of difference, and the collision flips.
-        check("bullseye reveal: ⇧N binds cleanly alongside N — the qualifier is what avoids the collision",
-              defs.conflict(of: .regular(keyCode: 45, label: "⇧N", shift: true),
-                            assigningTo: .command(.bullseyeReveal)) == nil
-              && defs.conflict(of: .regular(keyCode: 45, label: "N"),
-                               assigningTo: .command(.bullseyeReveal)) == .some(.command(.notes)))
-        check("bullseye reveal: ⇧N is still guarded against a SECOND claimant (it is a real binding, not a free pass)",
-              defs.conflict(of: revealKey, assigningTo: .command(.notes)) == .some(.command(.bullseyeReveal)))
-        check("bullseye reveal: a shifted N resolves to the reveal, an unshifted N to sticky notes",
-              defs.command(forKeyCode: 45, shift: true) == .bullseyeReveal
-              && defs.command(forKeyCode: 45, shift: false) == .notes
-              && defs.command(forKeyCode: 45) == .notes)
-        check("bullseye reveal: no OTHER chord claims a shift qualifier except the History chord (Shift+H, VDLAND1), so every existing chord is unchanged",
-              HotkeyCommand.allCases.filter { defs.key(for: $0).shift } == [.bullseyeReveal, .history])
-        check("bullseye reveal: an unclaimed shifted key still falls back to its plain chord (⇧P is still Cleanup selection)",
-              defs.command(forKeyCode: 35, shift: true) == nil
-              && defs.command(forKeyCode: 35, shift: false) == .cleanupSelection)
-        check("bullseye reveal: the chord is rebindable like every other binding (default-restorable map slot)",
-              defs.bindings[HotkeyCommand.bullseyeReveal.rawValue] == HotkeyCommand.bullseyeReveal.defaultKey
-              && HotkeyCommand.displayOrder.contains(.bullseyeReveal))
+        _ = freshRoot
 
         // A saved map written BEFORE the shift qualifier existed carries no `shift` key. Decoding must default
         // it to false rather than throwing the whole map away (which would silently reset every user rebind).
@@ -668,7 +326,7 @@ extension NotesProbe {
         check("bullseye reveal: a pre-shift saved KeySpec decodes as an UNSHIFTED chord, not a decode failure",
               legacy != nil && legacy?.shift == false && legacy?.code == 45)
 
-        // 13d-iv. the wire + the JS half. Wire-name parity with the JS MSG table is enforced in probeBridgeParity.
+        // The wire + the JS half still ship (R1: nothing sends the message after VDLAND2).
         check("bullseye reveal: revealBullseye is a wired outbound bridge message (Swift enum)",
               NotesOutbound.allCases.contains(.revealBullseye))
 
@@ -703,16 +361,7 @@ extension NotesProbe {
               && !revealBody.contains("setEditorSelection("),
               "Web/StickyNotes/src/actions-dictation.js revealBullseye")
 
-        // 13d-iv-b. the reveal's attention cue (VDPF L7). A 12px glyph in a wall of text is easy to miss even
-        // once it has been scrolled to, so the reveal plays a one-shot pulse on the marker. Three properties are
-        // worth locking, because each one is a way this turns from a cue into a nuisance or into a layout bug:
-        //   1. the flag is effect-gated and re-defaulted to false inside update(), never read off the previous
-        //      marker — otherwise a pulse would ride along on the next unrelated rebuild (any doc edit);
-        //   2. it is sent from the reveal path and from EXACTLY ONE place — a glyph that pulsed on every
-        //      ordinary syncBullseyeMarker (each delivery, each tab switch) would be a tic, not an answer;
-        //   3. the animation is confined to the pseudo-element and to transform/opacity, so the zero-width
-        //      side:-1 widget still cannot occupy space or reflow the line (locked: the marker covers the
-        //      character under it, hand-tested and kept).
+        // 13d-iv-b. the reveal's attention cue (VDPF L7), kept as a Web-shipping check.
         let markerFieldUpdate = sourceSlice(editorSrc,
                                             from: "const bullseyeMarkerField = StateField.define({",
                                             to: "// Show the inline bullseye marker")
@@ -761,24 +410,6 @@ extension NotesProbe {
               && pulseFrames.contains("transform: scale(") && pulseFrames.contains("opacity:")
               && layoutProperties.allSatisfy { !pulseRule.contains($0) && !pulseFrames.contains($0) },
               "StickyNotes/app.css .cm-bullseye-pulse::after")
-
-        // 13d-v. locked scope: the reveal must NOT reopen a closed note (that is restart/reopen durability,
-        // explicitly out of scope). Pin it structurally on the registry walk.
-        let registrySrcURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent("Sources/App/NotesWindowRegistry.swift", isDirectory: false)
-        let registrySrc = (try? String(contentsOf: registrySrcURL, encoding: .utf8)) ?? ""
-        let revealWalk = sourceSlice(registrySrc,
-                                     from: "func revealBullseye() -> NotesBullseyeLogic.RevealOutcome {",
-                                     to: "/// Deliver an armed take to the pinned bullseye's note BY ID")
-        check("bullseye reveal: the registry walk fronts the app, selects the tab, and scrolls — and never reopens a note",
-              !revealWalk.isEmpty
-              && revealWalk.contains("NSApp.activate(ignoringOtherApps: true)")
-              && revealWalk.contains("controller.focusTab(noteId: noteId)")
-              && revealWalk.contains("controller.revealBullseye(id: noteId)")
-              && !revealWalk.contains("openPrimary()")
-              && !revealWalk.contains("openFileBackedNote")
-              && !revealWalk.contains("store.restore"),
-              "Sources/App/NotesWindowRegistry.swift revealBullseye()")
     }
 
     static func probeReplaceHighlight(check: Check) {
@@ -1150,11 +781,14 @@ extension NotesProbe {
         probeLandingRoute(check: check)
     }
 
-    /// --- 13g. VDLAND1: the bullseye landing rule -----------------------------------------------
+    /// --- 13g. VDLAND1 + VDLAND2: the landing rule -----------------------------------------------
     /// ONE setting decides where a take lands: `Settings.bullseyeLandAtStart`, copied at take START into
-    /// `takeLandAtStart` (plus the frozen note anchor `takeAnchor`). ON lands in the field focused at take start
-    /// (or the pinned note); OFF lands at live focus when the take ends. The spacebar lock decides nothing. Every
-    /// row below either exercises the pure model or reads a real function body out of the tree.
+    /// `takeLandAtStart`. ON lands in the field focused at take start (or in the sticky note the take started
+    /// in, through its take-start snapshot); OFF lands at live focus when the take ends. The spacebar lock
+    /// decides nothing. VDLAND2 removed the pinned note: `LandingRoute` carries only the route, the marker
+    /// direction and the toast, and the CONTROLLER decides whether a take-start snapshot exists for this take
+    /// (B ON, or a late-recovery retry, which keeps its base inputs). Every row below either exercises the pure
+    /// model or reads a real function body out of the tree.
     static func probeLandingRoute(check: Check) {
         let dictSource = landStripped(landSource("Sources/App/DictationController.swift"))
         let lockStripped = landStripped(landSource("Sources/App/LockTransition.swift"))
@@ -1164,23 +798,16 @@ extension NotesProbe {
         let bullseyeSource = landStripped(landSource("Sources/App/NotesWindowController+Bullseye.swift"))
         let windowSource = landStripped(landSource("Sources/App/NotesWindowController.swift"))
         let queueSource = landStripped(landSource("Sources/App/NotesOutboundQueue.swift"))
-        let tailSource = landStripped(landSource("Sources/SelfTest/TailCheckSelfTest.swift"))
+        let notesBullseyeSource = landStripped(landSource("Sources/App/NotesBullseye.swift"))
+        let hotkeyMapSource = landStripped(landSource("Sources/App/HotkeyMap.swift"))
+        let hotkeysSettingsSource = landStripped(landSource("Sources/App/HotkeysSettingsView.swift"))
+        let featureTourSource = landStripped(landSource("Sources/App/FeatureTour.swift"))
 
         let finalizeBody = landBody(dictSource, "func finalize(")
         let beginBody = landBody(dictSource, "private func beginRecording()")
         let toggleBody = landBody(dictSource, "private func toggleBullseye()")
         let notesBody = landBody(dictSource, "private func notes()")
-        let revealBody = landBody(dictSource, "private func revealBullseye()")
-        let migrateBody = landBody(dictSource, "private func migrateBullseyeOnce()")
-        let autoDisarmBody = landBody(dictSource, "func handleBullseyeAutoDisarmed()")
         let refreshBody = landBody(dictSource, "private func refreshBullseyeIndicator()")
-        let routerBody = landBody(coordinatorSource, "func routeNotesDelivery(")
-        let registryBody = landBody(registrySource,
-                                    "func deliverToBullseye(text: String, noteId: String) -> NoteInsertOutcome")
-        let frozenInsertBody = landBody(bullseyeSource,
-                                        "func insertAtFrozenBullseye(id: String, text: String) -> NoteInsertOutcome")
-        let performFrozenBody = landBody(bullseyeSource, "func performFrozenInsert(id: String, text: String)")
-        let flushBody = landBody(windowSource, "private func flushQueues()")
 
         // 13g-i. the route table: OFF always lands live, ON lands pinned (with a captured field) or pinned with
         // no target to land in.
@@ -1208,38 +835,9 @@ extension NotesProbe {
         check("land-marker-pinned-on: with the setting ON the marker does NOT follow live focus",
               LandingRoute.markerFollowsLive(bullseyeOn: true) == false)
 
-        // 13g-iv. Option+B flips the one state through the pure transition.
-        check("land-b-flips-setting: Option+B writes the pure next state's setting and reads it back for the toast",
-              NotesProbe.countOccurrences(of: "Settings.bullseyeLandAtStart = after.setting", in: toggleBody) == 1
-              && toggleBody.contains("LandingRoute.next(.toggle, from: before)"))
-
-        // 13g-v. arming a note turns the setting ON.
-        check("land-n-sets-setting-on: Option+N in a note turns the landing setting ON",
-              notesBody.contains("Settings.bullseyeLandAtStart = true"))
-
         // 13g-vi. the info-pill glyph shows exactly when the setting is ON.
         check("land-glyph-follows-setting: the info-pill bullseye glyph reads Settings.bullseyeLandAtStart",
               refreshBody.contains("hud.setBullseyeArmed(Settings.bullseyeLandAtStart)"))
-
-        // 13g-vii. finalize routes on the frozen value and calls each delivery branch once.
-        check("land-finalize-uses-route: finalize routes through LandingRoute.route once and calls each deliver arm once",
-              NotesProbe.countOccurrences(of: "LandingRoute.route(", in: finalizeBody) == 1
-              && NotesProbe.countOccurrences(of: "deliverPushToTalk(", in: finalizeBody) == 1
-              && NotesProbe.countOccurrences(of: "deliverLocked(", in: finalizeBody) == 1
-              && NotesProbe.countOccurrences(of: "deliverLockedNoTarget(", in: finalizeBody) == 1)
-
-        // 13g-viii. the per-take freeze: the setting is copied once at take START (the method and the capture),
-        // and finalize reads only the copy.
-        check("land-take-freezes-b: beginRecording copies the setting into takeLandAtStart exactly once and finalize routes on the copy",
-              NotesProbe.countOccurrences(of: "takeLandAtStart = Settings.bullseyeLandAtStart", in: beginBody) == 1
-              && !finalizeBody.contains("Settings.bullseyeLandAtStart")
-              && finalizeBody.contains("LandingRoute.route(bullseyeOn: takeLandAtStart"))
-
-        // 13g-ix. the marker call uses the frozen value and runs after the freeze.
-        check("land-marker-uses-frozen: the marker start uses the frozen setting and runs after takeLandAtStart is set",
-              beginBody.contains("pasteMarker.start(captured: target, followsLive: LandingRoute.markerFollowsLive(bullseyeOn: takeLandAtStart))")
-              && NotesProbe.orderedBefore("takeLandAtStart = Settings.bullseyeLandAtStart",
-                                          "pasteMarker.start(", in: beginBody))
 
         // 13g-x. the toggle toast: bare copy outside a take, plus the next-dictation suffix inside one.
         check("land-toggle-toast-next-dictation: the B toast is bare outside a take and says \"for the next dictation\" inside one",
@@ -1252,157 +850,157 @@ extension NotesProbe {
               && toggleBody.contains("LandingRoute.toggleToast(on: Settings.bullseyeLandAtStart, takeInFlight: state != .idle)")
               && !toggleBody.contains("noneSetToast"))
 
-        // 13g-xi. the note-closed copy says only that the note anchor closed.
-        check("land-note-closed-toast-copy: the note-closed toast is \"Bullseye note closed\" and handleBullseyeAutoDisarmed toasts it",
-              LandingRoute.noteClosedToast == "Bullseye note closed"
-              && !LandingRoute.noteClosedToast.contains("disarmed")
-              && autoDisarmBody.contains("hud.toast(LandingRoute.noteClosedToast)"))
-
-        // 13g-xii. the frozen note anchor: set once through the pure helper, handed to the router as `.frozen`,
-        // never as the live view.
-        check("land-take-freezes-anchor: beginRecording freezes the anchor once and finalize hands the router .frozen(takeAnchor)",
-              NotesProbe.countOccurrences(
-                  of: "takeAnchor = LandingRoute.frozenAnchor(bullseyeOn: takeLandAtStart, current: NotesBullseyeState.shared.current)",
-                  in: beginBody) == 1
-              && finalizeBody.contains("bullseyeView: .frozen(takeAnchor)")
-              && !finalizeBody.contains("bullseyeView: .live"))
-
-        // 13g-xiii. OFF never delivers to a note anchor, whatever the stored armed flag says.
-        let disarmedNote = NotesBullseye(noteId: "note-A", anchor: 7, armed: false)
-        let armedNote = NotesBullseye(noteId: "note-A", anchor: 7, armed: true)
-        let frozenFromDisarmed = LandingRoute.frozenAnchor(bullseyeOn: true, current: disarmedNote)
-        check("land-off-never-delivers-to-anchor: with the setting OFF no anchor is frozen; with it ON the frozen anchor is armed",
-              LandingRoute.frozenAnchor(bullseyeOn: false, current: armedNote) == nil
-              && LandingRoute.frozenAnchor(bullseyeOn: false, current: disarmedNote) == nil
-              && LandingRoute.frozenAnchor(bullseyeOn: true, current: nil) == nil
-              && frozenFromDisarmed?.noteId == "note-A"
-              && frozenFromDisarmed?.armed == true)
-
-        // 13g-xiv. a frozen note anchor hides the foreign-field marker.
-        check("land-marker-hidden-for-note-anchor: a note anchor suppresses the marker, and beginRecording states that condition",
-              LandingRoute.markerShown(hasNoteAnchor: true) == false
-              && LandingRoute.markerShown(hasNoteAnchor: false) == true
-              && beginBody.contains("LandingRoute.markerShown(hasNoteAnchor: takeAnchor != nil)"))
-
-        // 13g-xv. the one-time upgrade: a restored armed note turns the setting ON once.
-        check("land-restore-armed-note-turns-b-on: an armed note restored before the migration turns the setting ON once",
-              LandingRoute.settingAfterRestore(noteArmed: true, setting: false, migrated: false) == true
-              && LandingRoute.settingAfterRestore(noteArmed: true, setting: false, migrated: true) == false
-              && LandingRoute.settingAfterRestore(noteArmed: false, setting: false, migrated: false) == false
-              && LandingRoute.settingAfterRestore(noteArmed: nil, setting: false, migrated: false) == false
-              && LandingRoute.settingAfterRestore(noteArmed: nil, setting: true, migrated: false) == true
-              && beginBody.contains("migrateBullseyeOnce()")
-              && toggleBody.contains("migrateBullseyeOnce()")
-              && migrateBody.contains("LandingRoute.settingAfterRestore(")
-              && migrateBody.contains("LandingRoute.migratedKey"))
-
-        // 13g-xvi. the unified-state invariant: every transition of a consistent state stays consistent, so an
-        // OFF-with-armed-note state can never exist and therefore can never deliver.
-        let consistentStates: [LandingRoute.BullseyeState] = [
-            LandingRoute.BullseyeState(setting: false, noteArmed: nil),
-            LandingRoute.BullseyeState(setting: true, noteArmed: nil),
-            LandingRoute.BullseyeState(setting: false, noteArmed: false),
-            LandingRoute.BullseyeState(setting: true, noteArmed: true),
-        ]
-        let events: [LandingRoute.BullseyeEvent] = [.toggle, .setAnchor, .reveal, .noteGone]
-        var everyTransitionConsistent = true
-        for state in consistentStates {
-            for event in events {
-                everyTransitionConsistent = everyTransitionConsistent
-                    && LandingRoute.next(event, from: state).consistent
-            }
-        }
-        let frozenOnlyWhenOn = consistentStates.allSatisfy { state in
-            let noteExists = state.noteArmed != nil
-            let frozen = LandingRoute.frozenAnchor(bullseyeOn: state.setting,
-                                                  current: noteExists ? armedNote : nil)
-            return (frozen != nil) == (state.setting && noteExists)
-        }
-        check("land-unified-state-invariant: every transition keeps one state consistent and frozenAnchor is non-nil exactly when ON with a note",
-              everyTransitionConsistent
-              && frozenOnlyWhenOn
-              && LandingRoute.next(.toggle,
-                                   from: LandingRoute.BullseyeState(setting: false, noteArmed: false))
-                  == LandingRoute.BullseyeState(setting: true, noteArmed: true)
-              && LandingRoute.next(.setAnchor,
-                                   from: LandingRoute.BullseyeState(setting: false, noteArmed: nil))
-                  == LandingRoute.BullseyeState(setting: true, noteArmed: true))
-
-        // 13g-xvii. the reveal turns the setting ON.
-        check("land-reveal-turns-b-on: Option+Shift+N reveal turns the landing setting ON",
-              revealBody.contains("Settings.bullseyeLandAtStart = true"))
-
-        // 13g-xviii. the router takes the frozen view.
-        check("land-router-takes-frozen-view: routeNotesDelivery takes a BullseyeView and feeds the frozen anchor to the pure rule",
-              routerBody.contains("bullseyeView: LandingRoute.BullseyeView = .live")
-              && coordinatorSource.contains("case .frozen(let frozen): seenBullseye = frozen")
-              && routerBody.contains("bullseye: seenBullseye,")
-              && !routerBody.contains("bullseye: bullseyeState.current"))
-
-        // 13g-xix. the delivery seam writes to the FROZEN note id, and the legacy single-argument callback still
-        // exists exactly once as the fallback.
-        check("land-delivery-uses-frozen-note-id: the coordinator inserts by the frozen note id and keeps one legacy fallback call",
-              coordinatorSource.contains("var onDeliverToBullseyeNote: ((String, String) -> NoteInsertOutcome)? = nil")
-              && routerBody.contains("case .bullseye(let bullseyeNoteId):")
-              && NotesProbe.countOccurrences(of: "byId(delivered, bullseyeNoteId)", in: routerBody) == 1
-              && !routerBody.contains("byId(delivered, bullseyeState")
-              && NotesProbe.countOccurrences(of: "callbacks.onDeliverToBullseye(delivered)", in: routerBody) == 1)
-
-        // 13g-xx. the registry resolves the note by the frozen id and AppDelegate wires that seam.
-        check("land-registry-delivers-by-id: the registry delivers by note id through insertAtFrozenBullseye and AppDelegate wires it",
-              registryBody.contains("controller(holding: noteId)")
-              && registryBody.contains("insertAtFrozenBullseye(id: noteId, text: text)")
-              && !registryBody.contains("insertAtBullseye(")
-              && !registryBody.contains("NotesBullseyeState.shared")
-              && appSource.contains("onDeliverToBullseyeNote: { [weak self] text, noteId in")
-              && appSource.contains("deliverToBullseye(text: text, noteId: noteId)"))
-
-        // 13g-xxi. the inline note marker is the LIVE next-take cue: the B press always rebroadcasts it, and a
-        // take never does.
-        check("land-note-marker-is-next-take-flag: Option+B always rebroadcasts the inline marker and beginRecording never does",
-              toggleBody.contains("notesDelivery.broadcastBullseyeState()")
-              && !toggleBody.contains("state == .idle")
-              && !beginBody.contains("broadcastBullseyeState"))
-
-        // 13g-xxii. the frozen-delivery chain: the insert at the frozen note restores the LIVE pin afterwards.
-        check("land-frozen-delivery-restores-live-pin: performFrozenInsert inserts at the frozen note then re-pushes the live pin",
-              performFrozenBody.contains("call(.insertAtBullseye, payload: [BridgeKey.id: id, BridgeKey.text: text])")
-              && NotesProbe.orderedBefore(
-                  "call(.insertAtBullseye, payload: [BridgeKey.id: id, BridgeKey.text: text])",
-                  "pushBullseyeArmed(NotesBullseyeState.shared.current)",
-                  in: performFrozenBody))
-
-        // 13g-xxiii. the queue keeps the note id, so a flush after a reload still lands in the frozen note.
-        check("land-frozen-queue-keeps-id: the frozen insert queues with its note id and flushQueues replays it through performFrozenInsert",
-              queueSource.contains("func enqueueFrozenInsertion(id: String, text: String)")
-              && queueSource.contains("func drainFrozenInsertions()")
-              && frozenInsertBody.contains("outboundQueue.enqueueFrozenInsertion(id: id, text: text)")
-              && !frozenInsertBody.contains("enqueueInsertion(")
-              && flushBody.contains("performFrozenInsert(id: item.id, text: item.text)"))
-
-        // 13g-xxiv. a frozen note that is gone may drop the LIVE pin only when the live pin IS that note.
-        check("land-gone-frozen-keeps-other-live-pin: only the frozen note itself may drop the live anchor at a gone-note park",
-              LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: "B") == false
-              && LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: nil) == false
-              && LandingRoute.shouldDropLiveAnchor(frozenNoteId: "A", liveNoteId: "A") == true
-              && NotesProbe.countOccurrences(of: "bullseyeState.drop()", in: routerBody) == 1
-              && NotesProbe.orderedBefore(
-                  "if LandingRoute.shouldDropLiveAnchor(frozenNoteId: bullseyeNoteId, liveNoteId: bullseyeState.noteId) {",
-                  "bullseyeState.drop()", in: routerBody))
-
-        // 13g-xxv. note precedence is unchanged: an armed anchor wins over the take-start snapshot, and a
-        // snapshot wins when nothing is armed.
-        check("land-note-armed-wins: an armed note anchor wins over a snapshot note id for an in-place dictation",
-              NotesBullseyeLogic.delivery(bullseye: armedNote, snapshotNoteId: "note-snapshot",
-                                          landingKind: .inPlace, inputSource: .dictation)
-                  == .bullseye(noteId: "note-A"))
-        check("land-note-snapshot-wins: with no note anchor the take-start snapshot receives the text",
-              NotesBullseyeLogic.delivery(bullseye: nil, snapshotNoteId: "note-snapshot",
-                                          landingKind: .inPlace, inputSource: .dictation)
-                  == .snapshot(noteId: "note-snapshot"))
+        // 13g-xxv (kept: the snapshot wins; the armed-note half is gone with the pin).
         check("land-note-routes-before-landing: finalize asks the notes router before it consults the landing route",
               NotesProbe.orderedBefore("notesDelivery.routeNotesDelivery(", "LandingRoute.route(",
                                        in: finalizeBody))
+
+        // VDLAND2 row 1: the take-start snapshot wins for an in-place landing, dictation or selection.
+        check("land2-delivery-snapshot-wins",
+              NotesBullseyeLogic.delivery(snapshotNoteId: "n1", landingKind: .inPlace, inputSource: .dictation)
+                  == .snapshot(noteId: "n1")
+              && NotesBullseyeLogic.delivery(snapshotNoteId: "n1", landingKind: .inPlace, inputSource: .selection)
+                  == .snapshot(noteId: "n1"))
+
+        // VDLAND2 row 2: a non-destructive landing always keeps its requested destination.
+        check("land2-delivery-nondestructive-requested",
+              NotesBullseyeLogic.delivery(snapshotNoteId: "n1", landingKind: .nonDestructive, inputSource: .dictation)
+                  == .requested
+              && NotesBullseyeLogic.delivery(snapshotNoteId: "n1", landingKind: .nonDestructive, inputSource: .selection)
+                  == .requested)
+
+        // VDLAND2 row 3: nil and empty snapshot ids keep the requested destination.
+        check("land2-delivery-empty-id-requested",
+              NotesBullseyeLogic.delivery(snapshotNoteId: nil, landingKind: .inPlace, inputSource: .dictation)
+                  == .requested
+              && NotesBullseyeLogic.delivery(snapshotNoteId: "", landingKind: .inPlace, inputSource: .dictation)
+                  == .requested)
+
+        // VDLAND2 row 4: the pin type and its persisted state class are gone from NotesBullseye.swift.
+        check("land2-pin-state-gone",
+              !notesBullseyeSource.contains("struct NotesBullseye")
+              && !notesBullseyeSource.contains("class NotesBullseyeState")
+              && !notesBullseyeSource.contains("case bullseye("))
+
+        // VDLAND2 row 5: finalize routes only through the notes router and then LandingRoute.route, with the
+        // two D14 expressions and no pin/lock state.
+        check("land2-finalize-setting-only",
+              finalizeBody.contains("LandingRoute.route(bullseyeOn: takeLandAtStart, hasTarget: target != nil)")
+              && finalizeBody.contains("noteTarget: (takeLandAtStart || lateRecovery) ? notesDelivery.noteTarget : nil")
+              && finalizeBody.contains("lateRecovery ? false : (takeLandAtStart ? (targetWasNotesWindow || (notesWindowCurrentlyKey && (target?.pid == getpid()))) : notesWindowCurrentlyKey)")
+              && !finalizeBody.contains("takeAnchor")
+              && !finalizeBody.contains("bullseyeView")
+              && !finalizeBody.contains("wasLocked")
+              && NotesProbe.orderedBefore("notesDelivery.routeNotesDelivery(", "if lateRecovery {", in: finalizeBody))
+
+        // VDLAND2 row 6: beginRecording freezes only the setting; no anchor, no migration, no marker gate.
+        check("land2-begin-recording-no-pin",
+              NotesProbe.countOccurrences(of: "takeLandAtStart = Settings.bullseyeLandAtStart", in: beginBody) == 1
+              && !beginBody.contains("takeAnchor")
+              && !beginBody.contains("migrateBullseyeOnce")
+              && !beginBody.contains("NotesBullseye")
+              && !beginBody.contains("markerShown"))
+
+        // VDLAND2 row 7: Option+B flips the setting and toasts; it touches no note state.
+        check("land2-b-flips-setting-only",
+              toggleBody.contains("Settings.bullseyeLandAtStart = !Settings.bullseyeLandAtStart")
+              && toggleBody.contains("LandingRoute.toggleToast(on: Settings.bullseyeLandAtStart, takeInFlight: state != .idle)")
+              && !toggleBody.contains("notesDelivery")
+              && !toggleBody.contains("NotesBullseye")
+              && !toggleBody.contains("broadcast"))
+
+        // VDLAND2 row 8: Option+N only opens/focuses the sticky notes.
+        check("land2-notes-chord-opens-only",
+              notesBody.contains("callbacks.onOpenNotes()")
+              && !notesBody.contains("Bullseye")
+              && !notesBody.contains("Settings."))
+
+        // VDLAND2 row 9: the reveal chord is gone from every place D7 named, and the enum shrank to 14.
+        check("land2-reveal-chord-removed",
+              HotkeyCommand.allCases.count == 14
+              && HotkeyCommand(rawValue: "bullseyeReveal") == nil
+              && !hotkeyMapSource.contains("bullseyeReveal")
+              && !hotkeysSettingsSource.contains("bullseyeReveal")
+              && !featureTourSource.contains("bullseyeReveal")
+              && !dictSource.contains("bullseyeReveal"))
+
+        // VDLAND2 row 10 (M3): a saved map that still holds the stale reveal key loads with every other
+        // binding intact. There is no zero-argument HotkeyMap initializer, so build the map from defaults and
+        // write it through an isolated suite; `hSwapDoneKey` keeps the one-time H swap out of the way.
+        let row10Suite = "vd-land2-row10-" + UUID().uuidString
+        let row10Defaults = UserDefaults(suiteName: row10Suite)!
+        row10Defaults.removePersistentDomain(forName: row10Suite)
+        defer { row10Defaults.removePersistentDomain(forName: row10Suite) }
+        var saved = HotkeyMap.defaults()
+        saved.bindings["bullseyeReveal"] = KeySpec.regular(keyCode: 45, label: "\u{21E7}N", shift: true)
+        saved.save(row10Defaults)
+        row10Defaults.set(true, forKey: HotkeyMap.hSwapDoneKey)
+        let loaded = HotkeyMap.load(row10Defaults)
+        check("land2-stale-reveal-key-decodes",
+              HotkeyCommand.allCases.allSatisfy { loaded.key(for: $0) == saved.key(for: $0) }
+              && loaded.wakeup == saved.wakeup)
+
+        // VDLAND2 row 11: with no chord claiming Shift+N, a Shift-held N resolves to plain Notes through the
+        // monitor's real `resolveChord` (driven exactly like the VDLAND1 H-chord rows), and History's H is the
+        // only other default chord carrying a shift qualifier.
+        func land2ChordFires(keyCode: Int64, shift: Bool) -> HotkeyCommand? {
+            var fired: HotkeyCommand?
+            let monitor = HotkeyMonitor()
+            monitor.onCommand = { fired = $0 }
+            let latch = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+            latch.flags = CGEventFlags(rawValue: 0x40)
+            _ = monitor.selfTestHandle(type: .flagsChanged, event: latch)
+            let ev = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: true)!
+            if shift { ev.flags = .maskShift }
+            _ = monitor.selfTestHandle(type: .keyDown, event: ev)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            return fired
+        }
+        check("land2-shift-n-falls-back-to-notes",
+              land2ChordFires(keyCode: 45, shift: true) == .notes
+              && land2ChordFires(keyCode: 45, shift: false) == .notes
+              && HotkeyCommand.allCases.filter { HotkeyMap.defaults().key(for: $0).shift } == [.history])
+
+        // VDLAND2 row 12: launch clears exactly the two obsolete upgrade keys and never the landing setting.
+        let appBody = landBody(appSource, "func applicationDidFinishLaunching(")
+        check("land2-upgrade-clears-pin-keys",
+              appBody.contains("UserDefaults.standard.removeObject(forKey: \"notesBullseye\")")
+              && appBody.contains("UserDefaults.standard.removeObject(forKey: \"bullseyeLandMigrated\")")
+              && !appBody.contains("removeObject(forKey: \"bullseyeLandAtStart\")"))
+
+        // VDLAND2 row 13: the replace tint is gated on the landing setting, not on a pin.
+        let armReplaceBody = landBody(coordinatorSource, "func armReplaceHighlightForTake()")
+        let beginArmGate = beginBody.range(
+            of: #"if Settings\.bullseyeLandAtStart \{\s*notesDelivery\.armReplaceHighlightForTake\(\)"#,
+            options: .regularExpression) != nil
+        check("land2-replace-highlight-ungated",
+              !armReplaceBody.isEmpty
+              && !armReplaceBody.contains("armed")
+              && beginArmGate)
+
+        // VDLAND2 row 14: Swift never sends any of the four pin bridge messages.
+        let islandSources = [registrySource, bullseyeSource, windowSource, queueSource, appSource]
+        let islandPushes = ["call(.setBullseye", "call(.insertAtBullseye",
+                            "call(.revealBullseye", "call(.bullseyeArmed"]
+        check("land2-no-island-push",
+              islandSources.allSatisfy { source in
+                  islandPushes.allSatisfy { !source.contains($0) }
+              })
+
+        // VDLAND2 row 17: the two D14 expressions are exact, and the late-recovery branch keeps its base body.
+        let recoverySlice = NotesProbe.sourceSlice(finalizeBody, from: "if lateRecovery {",
+                                                   to: "switch LandingRoute.route(")
+        check("land2-off-follows-end-focus",
+              NotesProbe.countOccurrences(
+                  of: "noteTarget: (takeLandAtStart || lateRecovery) ? notesDelivery.noteTarget : nil",
+                  in: finalizeBody) == 1
+              && NotesProbe.countOccurrences(
+                  of: "lateRecovery ? false : (takeLandAtStart ? (targetWasNotesWindow || (notesWindowCurrentlyKey && (target?.pid == getpid()))) : notesWindowCurrentlyKey)",
+                  in: finalizeBody) == 1
+              && !recoverySlice.isEmpty
+              && recoverySlice.contains("pasteIntoCapturedTargetWithoutActivation")
+              && recoverySlice.contains("return nil")
+              && NotesProbe.orderedBefore("notesDelivery.routeNotesDelivery(", "if lateRecovery {", in: finalizeBody))
 
         // 13g-xxvii. the one-time H swap: the old pair is swapped once, and a deliberate re-save is respected.
         let plainHKey = KeySpec.regular(keyCode: 4, label: "H")
@@ -1496,21 +1094,6 @@ extension NotesProbe {
         } else {
             check("land swap: probe collision defaults suite is creatable", false)
         }
-
-        // 13g-xxvi. the tail-check fixtures: the locked-no-target case pins the frozen setting, and the notes case
-        // freezes its armed anchor so the injected callback is reached.
-        let hookFixtureSlice = NotesProbe.sourceSlice(tailSource, from: "controller.wasLocked = true",
-                                                      to: "\n        return controller")
-        check("land-tailcheck-fixture-pinned: the hook fixture sets takeLandAtStart after wasLocked and reaches the no-target arm",
-              hookFixtureSlice == "\n        controller.takeLandAtStart = true"
-              && LandingRoute.route(bullseyeOn: true, hasTarget: false) == .pinnedNoTarget)
-        let tailParts = tailSource.components(separatedBy: "case .notesBullseye:")
-        let notesCaseSource = tailParts.count == 2 ? tailParts[1] : ""
-        check("land-hook-after-paste-reaches-note: the notes hook fixture freezes its armed anchor before finalize",
-              NotesProbe.orderedBefore("let controller = DictationController(",
-                                       "controller.takeAnchor = bullseyeState.current", in: notesCaseSource)
-              && NotesProbe.orderedBefore("controller.takeAnchor = bullseyeState.current",
-                                          "_ = controller.finalize(", in: notesCaseSource))
     }
 
     /// Read a source file from the tree root (the self-test must run with the repository as its CWD).

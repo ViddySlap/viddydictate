@@ -177,11 +177,12 @@ enum CleanupSelfTest {
               defs.command(forKeyCode: 11) == .bullseyeToggle)
         check("hotkey conflict: reassigning B (bullseye's key) to undo flags bullseyeToggle",
               defs.conflict(of: .regular(keyCode: 11, label: "B"), assigningTo: .command(.undo)) == .some(.command(.bullseyeToggle)))
-        check("hotkey defaults: history=H (keyCode 4, plain)",
-              defs.key(for: .history) == .regular(keyCode: 4, label: "x"))
-        check("hotkey lookup: keyCode 4 without shift resolves to history, with shift to nothing",
-              defs.command(forKeyCode: 4, shift: false) == .history
-              && defs.command(forKeyCode: 4, shift: true) == nil)
+        check("hotkey defaults: history=Shift+H (keyCode 4, shift)",
+              defs.key(for: .history) == .regular(keyCode: 4, label: "x", shift: true)
+              && defs.key(for: .recentDictations) == .regular(keyCode: 4, label: "x"))
+        check("hotkey lookup: keyCode 4 without shift resolves to recentDictations, with shift to history",
+              defs.command(forKeyCode: 4, shift: false) == .recentDictations
+              && defs.command(forKeyCode: 4, shift: true) == .history)
         check("hotkey conflict: history's key is free for the wakeup chords and conflicts only with itself",
               defs.conflict(of: HotkeyCommand.history.defaultKey, assigningTo: .command(.history)) == nil
               && defs.conflict(of: HotkeyCommand.history.defaultKey, assigningTo: .command(.undo)) == .some(.command(.history))

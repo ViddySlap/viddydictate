@@ -62,8 +62,8 @@ enum LockTransition {
 
 /// Where a completed take lands. The ONE rule: `Settings.bullseyeLandAtStart`, copied per take, decides.
 ///
-/// ON  — the take lands in the field that was focused at take START (or in the pinned note anchor captured
-///       with it), whether the take was push-to-talk or locked.
+/// ON  — the take lands in the field that was focused at take START (or in the sticky note the take
+///       started in, through its take-start snapshot), whether the take was push-to-talk or locked.
 /// OFF — the take lands in whatever field is focused when the take ENDS.
 ///
 /// The spacebar LOCK plays no part: it is the hands-free latch, nothing else. Pure, so `--notes-probe` can pin
@@ -82,76 +82,10 @@ enum LandingRoute {
     /// at take start (the setting is ON).
     static func markerFollowsLive(bullseyeOn: Bool) -> Bool { !bullseyeOn }
 
-    /// Whether a marker is drawn at all. With a frozen note anchor the text goes to the note, which shows its
-    /// own inline bullseye marker, so nothing is drawn in the foreign field.
-    static func markerShown(hasNoteAnchor: Bool) -> Bool { !hasNoteAnchor }
-
-    /// What the notes router is handed for a take. `.live` reads the live note state (the one-shot transform
-    /// paths, unchanged); `.frozen` is the note anchor captured at take START, so an Option+N elsewhere mid-take
-    /// cannot redirect this take.
-    enum BullseyeView: Equatable { case live, frozen(NotesBullseye?) }
-
-    /// The note anchor a take freezes at its start: nil unless the setting is ON and an anchor exists. The
-    /// returned anchor is always armed (an ON take armed it by construction), so a stored disarmed flag can
-    /// never deliver while the user's one switch is OFF.
-    static func frozenAnchor(bullseyeOn: Bool, current: NotesBullseye?) -> NotesBullseye? {
-        guard bullseyeOn, var frozen = current else { return nil }
-        frozen.armed = true
-        return frozen
-    }
-
-    /// The setting and the note anchor's armed flag as ONE state (D4: no OFF-with-armed-note). `noteArmed` is
-    /// nil when no anchor exists.
-    struct BullseyeState: Equatable {
-        var setting: Bool
-        var noteArmed: Bool?
-        var consistent: Bool { noteArmed == nil || noteArmed == setting }
-    }
-
-    enum BullseyeEvent { case toggle, setAnchor, reveal, noteGone }
-
-    /// The pure model of every transition the controller performs directly. `.toggle` is the Option+B press:
-    /// the setting flips and an existing anchor's armed flag follows it. `.setAnchor` (Option+N) and `.reveal`
-    /// (Option+Shift+N) turn the state ON; `.noteGone` (the note closed) leaves the setting alone and forgets
-    /// the anchor, so the next take lands at its start field.
-    static func next(_ event: BullseyeEvent, from s: BullseyeState) -> BullseyeState {
-        switch event {
-        case .toggle:
-            return BullseyeState(setting: !s.setting,
-                                 noteArmed: s.noteArmed == nil ? nil : !s.setting)
-        case .setAnchor:
-            return BullseyeState(setting: true, noteArmed: true)
-        case .reveal:
-            return s.noteArmed == nil ? s : BullseyeState(setting: true, noteArmed: true)
-        case .noteGone:
-            return BullseyeState(setting: s.setting, noteArmed: nil)
-        }
-    }
-
-    /// The setting after the one-time upgrade: an armed note restored from a pre-setting install turns the
-    /// setting ON once; once migrated, the persisted setting is the whole truth.
-    static func settingAfterRestore(noteArmed: Bool?, setting: Bool, migrated: Bool) -> Bool {
-        if !migrated && noteArmed == true { return true }
-        return setting
-    }
-
-    /// UserDefaults key of the one-time upgrade marker (a plain bool, deliberately not a registered default).
-    static let migratedKey = "bullseyeLandMigrated"
-
     /// The Option+B toast: the bare armed/disarmed copy, plus a "for the next dictation" suffix while a take is
     /// in flight, so a mid-take change is never silent about which take it applies to.
     static func toggleToast(on: Bool, takeInFlight: Bool) -> String {
         let base = on ? NotesBullseyeLogic.armedToast : NotesBullseyeLogic.disarmedToast
         return takeInFlight ? base + " for the next dictation" : base
-    }
-
-    /// The note-closed notice: says only that the note anchor closed (the landing setting is untouched).
-    static let noteClosedToast = "Bullseye note closed"
-
-    /// Whether a delivery-time gone note may drop the LIVE anchor: only when the live anchor IS the frozen note
-    /// the take pointed at. A frozen note that vanished while the user pinned another still-open note leaves
-    /// that other note pinned for the next take.
-    static func shouldDropLiveAnchor(frozenNoteId: String, liveNoteId: String?) -> Bool {
-        liveNoteId == frozenNoteId
     }
 }

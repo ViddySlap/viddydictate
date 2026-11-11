@@ -19,9 +19,6 @@ final class NotesWindowController: NSObject, NSWindowDelegate, WKNavigationDeleg
     /// Existing markdown dropped on this notes window. AppDelegate owns the shared classify + backup + open
     /// shell, so drag-in follows the same privacy path as Finder Open With and `open -a`.
     var onMarkdownFileDrop: ((URL) -> Void)?
-    /// BT2 (notes-bullseye): fired when the web island reports the pinned bullseye's captured/remapped anchor
-    /// offset, so Swift can persist it for restart-restore.
-    var onBullseyeAnchorReported: ((_ noteId: String, _ anchor: Int) -> Void)?
     /// S2 (`.appendToSource`): push a Sticky Skill append into whichever window HOLDS the note right now.
     /// Set by the registry, because only the registry can answer "which window holds this note" - and a tab
     /// can be dragged to another window while a skill is in flight, at which point rendering into THIS
@@ -308,13 +305,7 @@ final class NotesWindowController: NSObject, NSWindowDelegate, WKNavigationDeleg
             // Mini view (notes-miniview A3): the JS toggle posts the requested MANUAL flag; A2's setManualMini
             // owns the state (flip, persist, re-derive effective mini, push setMini back to the island).
             if let enabled = payload[BridgeKey.enabled] as? Bool { setManualMini(enabled) }
-        case .bullseyeAnchor:
-            // Bullseye (notes-bullseye BT2): the island reports the pinned anchor offset (on set + on each
-            // follow-edits remap) so Swift persists it for restart-restore.
-            if let id = payload[BridgeKey.id] as? String,
-               let anchor = (payload[BridgeKey.anchor] as? NSNumber)?.intValue {
-                onBullseyeAnchorReported?(id, anchor)
-            }
+        case .bullseyeAnchor: break
         }
     }
 
@@ -331,10 +322,6 @@ final class NotesWindowController: NSObject, NSWindowDelegate, WKNavigationDeleg
         // WebContent crash+reload even though no enter event will arrive under a stationary pointer.
         hoverLatch.reset()
         (webView as? FirstMouseWebView)?.syncPointerHover()
-        // BT3: seed the inline bullseye marker for this freshly-loaded island (restart / WebContent reload).
-        // The active note was just loaded by sendInitialState -> receiveState, so the marker lands correctly
-        // if this window shows the bullseye's note.
-        pushBullseyeArmed(NotesBullseyeState.shared.current)
     }
 
     /// The whole-note tab-menu action. Since S5 the dynamic menu carries the selected skill id; the built-in
@@ -763,13 +750,6 @@ final class NotesWindowController: NSObject, NSWindowDelegate, WKNavigationDeleg
         guard pageReady else { return }
         for text in outboundQueue.drainInsertions() {
             call(.insertText, payload: [BridgeKey.text: text])
-        }
-
-        // VDLAND1: replay the frozen bullseye insertions that were queued while the page was not ready, each
-        // through the note id it froze at, so the text, the receipt and the undo agree on the note even if
-        // another tab is active by the time the page comes back.
-        for item in outboundQueue.drainFrozenInsertions() {
-            performFrozenInsert(id: item.id, text: item.text)
         }
 
         for item in outboundQueue.drainSearchResults() {

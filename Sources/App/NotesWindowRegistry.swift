@@ -19,9 +19,6 @@ final class NotesWindowRegistry {
     static let primaryWindowId = "window-primary"
 
     private let store: StickyNotesStore
-    /// BT2 (notes-bullseye): fired once when a membership change auto-disarms the bullseye because its note was
-    /// closed/deleted, so the controller can toast the user. Wired by AppDelegate.
-    var onBullseyeAutoDisarmed: (() -> Void)?
     /// Window order (primary first). Drives the concatenation order of `_open-notes.md` and `windows.json`.
     private var controllers: [NotesWindowController] = []
     /// Window ids in most-recently-key-first order. Resolves the active window for focus / search / the
@@ -227,105 +224,6 @@ final class NotesWindowRegistry {
         return controller.insertAtNoteTarget(id: target.noteId, text: text)
     }
 
-    // MARK: - Bullseye set/arm delivery (notes-bullseye BT2)
-
-    /// Option+N dual-purpose: set/move the PINNED bullseye at the KEY window's active-note caret and ARM it.
-    /// Returns the note id when gated in (a notes window is key AND holds an active materialized note — the
-    /// caret is in a note), or nil otherwise (so the caller keeps Option+N's open/focus behavior). Seeds the
-    /// persistent bullseye state (armed) and tells the live editor to pin the anchor (which reports its offset
-    /// back for persistence). Main thread.
-    @discardableResult
-    func setBullseyeAtCaret() -> String? {
-        guard let controller = controllers.first(where: { $0.isKey }) else { return nil }
-        guard let target = Self.dictationTarget(keyWindowActiveNoteId: controller.membership.activeId) else {
-            return nil
-        }
-        NotesBullseyeState.shared.setAtCaret(noteId: target.noteId)
-        controller.setBullseyeAtCaret(id: target.noteId)
-        // BT3: the key window's `setBullseye` arms + shows the marker at the live caret; broadcast so any other
-        // window that held a stale marker (the bullseye just moved off its note) clears it.
-        broadcastBullseyeState()
-        return target.noteId
-    }
-
-    /// BT3 (inline marker): push the current bullseye state to EVERY window's island so each shows or hides the
-    /// inline armed-bullseye marker. The island renders it only for its own active tab when armed, so a
-    /// broadcast lands the marker in exactly the one window/tab where the note is visible and clears it
-    /// everywhere else. Called after every arm-state transition (set/move, toggle, auto-disarm, drop).
-    func broadcastBullseyeState() {
-        let bullseye = NotesBullseyeState.shared.current
-        for controller in controllers {
-            controller.pushBullseyeArmed(bullseye)
-        }
-    }
-
-    /// Option+Shift+N (notes-bullseye BT6): REVEAL where the bullseye currently is. Four steps, in order —
-    /// foreground the window holding its note, select that note's tab, arm the bullseye if it was disarmed
-    /// (a disarmed bullseye draws no marker, so revealing it would show nothing), and scroll the live anchor
-    /// into view. Reveal is navigation, not visibility: the marker already renders persistently, but only while
-    /// its note is the active tab in a visible window.
-    ///
-    /// Never reopens a closed note — restart/reopen durability is explicitly out of scope. The "live" set is
-    /// the notes actually held by materialized windows, since a reveal has to have somewhere to navigate to.
-    /// Main thread.
-    @discardableResult
-    func revealBullseye() -> NotesBullseyeLogic.RevealOutcome {
-        ensureRestored()
-        let liveNoteIds = Set(controllers.flatMap { $0.membership.noteIds })
-        let outcome = NotesBullseyeLogic.reveal(NotesBullseyeState.shared.current, liveNoteIds: liveNoteIds)
-        guard case .reveal(let noteId, let arm) = outcome else {
-            Log.write("bullseye reveal: \(outcome == .noneSet ? "none set" : "note closed")")
-            return outcome
-        }
-        guard let controller = controller(holding: noteId) else { return .noteClosed }
-        if arm { NotesBullseyeState.shared.arm() }
-        NSApp.activate(ignoringOtherApps: true)
-        controller.focusTab(noteId: noteId)
-        // Push the (possibly just-armed) marker state BEFORE scrolling, so the glyph is already painted at the
-        // anchor when the island scrolls it into view rather than appearing a frame later.
-        broadcastBullseyeState()
-        controller.revealBullseye(id: noteId)
-        Log.write("bullseye reveal: fronted note \(noteId)\(arm ? " (armed it)" : "")")
-        return outcome
-    }
-
-    /// Deliver an armed take to the pinned bullseye's note BY ID (focus-independent — reaches the bullseye
-    /// regardless of which window is key). `.noWindow` means the bullseye's note is gone (no live window holds
-    /// it) or nothing is armed; the caller then auto-disarms + parks the take on the clipboard so it is never
-    /// lost. Main thread.
-    @discardableResult
-    func deliverToBullseye(text: String) -> NoteInsertOutcome {
-        guard let noteId = NotesBullseyeState.shared.noteId else { return .noWindow }
-        guard let controller = controller(holding: noteId) else {
-            return .noWindow
-        }
-        return controller.insertAtBullseye(id: noteId, text: text)
-    }
-
-    /// Deliver a completed take to the FROZEN bullseye note id the take started with (VDLAND1). The id comes
-    /// from the take, never from the live pin, so an Option+N in another note mid-take cannot redirect the text.
-    /// Reaches the note in whatever live window holds it and lands at that note's own pin; `.noWindow` means no
-    /// live window holds the note (the caller parks the take on the clipboard). Main thread.
-    @discardableResult
-    func deliverToBullseye(text: String, noteId: String) -> NoteInsertOutcome {
-        guard let controller = controller(holding: noteId) else {
-            return .noWindow
-        }
-        return controller.insertAtFrozenBullseye(id: noteId, text: text)
-    }
-
-    /// After any store-changing membership event, auto-disarm the bullseye if its note was closed/deleted (no
-    /// longer open in the store), firing the one-shot notice exactly once. Uses `store.openNotes()` — the
-    /// persisted truth — so a note open in the store but not yet materialized in a live window is NOT treated
-    /// as gone. A restore-time drop (note deleted between sessions) happens silently and does not fire here.
-    private func checkBullseyeSurvival() {
-        let openIds = Set(store.openNotes().map(\.id))
-        if NotesBullseyeState.shared.autoDisarmIfGone(openNoteIds: openIds) {
-            broadcastBullseyeState()   // BT3: clear the inline marker in every window
-            onBullseyeAutoDisarmed?()  // BT2: HUD info-pill refresh + toast
-        }
-    }
-
     // MARK: - Four-color replace highlight (notes-bullseye BT4)
 
     /// The note that would receive a replace highlight for an Option+P pick: the KEY window's active
@@ -464,10 +362,6 @@ final class NotesWindowRegistry {
         controller.onMarkdownFileDrop = { [weak self, weak controller] url in
             guard let controller else { return }
             self?.onMarkdownFileRequest?(url, controller.windowId)
-        }
-        // BT2: the island reports the pinned bullseye's anchor offset; persist it for restart-restore.
-        controller.onBullseyeAnchorReported = { noteId, anchor in
-            NotesBullseyeState.shared.updateAnchor(noteId: noteId, anchor: anchor)
         }
         // S2 (`.appendToSource`): resolve the append by note HOLDER, not by the window that started the run.
         controller.onAppendToLiveNote = { [weak self] noteId, text in
@@ -659,8 +553,6 @@ final class NotesWindowRegistry {
 
     private func rewriteAggregate() {
         store.rewriteAggregate(windows: controllers.map(\.membership), activeWindowId: activeWindowId())
-        // BT2: any store change that could have closed/deleted the bullseye's note funnels through here.
-        checkBullseyeSurvival()
     }
 
     private func activeWindowId() -> String? {

@@ -169,11 +169,9 @@ enum FeatureTour {
             body: [
                 "Hold {wakeup} and tap {notes} to open your sticky notes. Notes have tabs, and you can drag one "
                     + "out into its own window.",
-                "{bullseyeToggle} arms the bullseye, the note that receives your answers. "
-                    + "{bullseyeReveal} brings it to the front.",
             ],
             nonObvious: "Files mode: use Open With on a .md file to edit it here. ViddyDictate backs it up first.",
-            commands: [.wakeup, .command(.notes), .command(.bullseyeToggle), .command(.bullseyeReveal)],
+            commands: [.wakeup, .command(.notes)],
             settingsLink: .notes),
         FeatureTourPage(
             id: "skills",

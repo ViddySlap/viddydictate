@@ -83,14 +83,11 @@ final class DictationController {
     /// whether a take was ever locked does not change where its text lands.
     var wasLocked = false
     /// The landing rule frozen for THIS take (VDLAND1): a copy of `Settings.bullseyeLandAtStart` taken at
-    /// take START. ON lands in the field that was focused at take start (or in the frozen note anchor below),
-    /// OFF at live focus when the take ends. `finalize` reads only this copy, never the live setting and never
-    /// the lock, so a B press mid-take changes the NEXT take alone.
+    /// take START. ON lands in the field that was focused at take start (or in the sticky note the take
+    /// started in, through its take-start snapshot), OFF at live focus when the take ends. `finalize` reads
+    /// only this copy, never the live setting and never the lock, so a B press mid-take changes the NEXT take
+    /// alone.
     var takeLandAtStart = false
-    /// The note anchor this take may deliver to, frozen at take START (`nil` when the setting was OFF or no
-    /// anchor existed). Carries the frozen DESTINATION note id through to the insertion itself, so an Option+N
-    /// in another note mid-take cannot redirect this take's text.
-    var takeAnchor: NotesBullseye?
     private var recordingStartedAt: Date?
     private lazy var pasteMarker = PasteTargetMarker()
 
@@ -384,7 +381,6 @@ final class DictationController {
         case .notes:            notes()
         case .dictionary:       callbacks.onOpenDictionary()
         case .bullseyeToggle:   toggleBullseye()
-        case .bullseyeReveal:   revealBullseye()
         case .history:          callbacks.onOpenHistory()
         case .recentDictations: showRecentDictations()
         }
@@ -673,78 +669,24 @@ final class DictationController {
         note(readyHint)
     }
 
-    /// `right-Option + N`: DUAL-PURPOSE (notes-bullseye BT2). When a notes window is key AND the caret is in a
-    /// note, set/move the pinned bullseye at the caret and ARM it (delivery then lands there regardless of
-    /// focus). Otherwise keep the original behavior: open/focus the sticky-notes surface. Like the `?` cleanup
-    /// toggle, arming is a mode change tied to the CURRENT dictation — it does NOT discard the in-flight take
-    /// (item 5a): the take keeps recording and state-at-release decides how it lands.
+    /// `right-Option + N`: open or focus the sticky-notes surface, and nothing else (VDLAND2). The old
+    /// dual-purpose in-note arm is gone with the note pin, so this chord behaves the same inside and outside
+    /// a note. It is still a pure control: it never discards the in-flight take.
     private func notes() {
         Log.write("sticky notes (Option+N) invoked state=\(state)")
-        if let noteId = notesDelivery.setBullseyeAtCaret() {
-            // VDLAND1: arming the note anchor IS the one bullseye state, so it turns the landing setting ON.
-            Settings.bullseyeLandAtStart = true
-            Log.write("bullseye set + armed at note \(noteId) (Option+N in a note)")
-            refreshBullseyeIndicator()
-            hud.toast(NotesBullseyeLogic.setToast)
-        } else {
-            callbacks.onOpenNotes()
-        }
+        callbacks.onOpenNotes()
         note(readyHint)
     }
 
-    /// `right-Option + B` (rebindable): flips the ONE bullseye state (VDLAND1) — the landing setting
-    /// `Settings.bullseyeLandAtStart`, which is also the armed flag of the pinned note anchor while one exists.
-    /// It stays where the user left it across takes and restarts. Like the `?` cleanup toggle, this is a mode
-    /// change tied to the CURRENT dictation — it does NOT discard the in-flight take: the take keeps its frozen
-    /// route, the note's inline marker updates at once (it is the next-take cue), and the toast says so while a
-    /// take is in flight.
+    /// `right-Option + B` (rebindable): flips the ONE landing rule `Settings.bullseyeLandAtStart`. It stays
+    /// where the user left it across takes and restarts. Like the `?` cleanup toggle, this is a mode change
+    /// tied to the CURRENT dictation — it does NOT discard the in-flight take: the take keeps its frozen
+    /// route and the toast says so while a take is in flight.
     private func toggleBullseye() {
         Log.write("bullseye toggle (Option+B) invoked state=\(state)")
-        migrateBullseyeOnce()
-        let before = LandingRoute.BullseyeState(setting: Settings.bullseyeLandAtStart,
-                                                noteArmed: NotesBullseyeState.shared.current?.armed)
-        let after = LandingRoute.next(.toggle, from: before)
-        Settings.bullseyeLandAtStart = after.setting
-        if before.noteArmed != after.noteArmed { _ = notesDelivery.toggleBullseye() }
+        Settings.bullseyeLandAtStart = !Settings.bullseyeLandAtStart
         refreshBullseyeIndicator()
-        notesDelivery.broadcastBullseyeState()
         hud.toast(LandingRoute.toggleToast(on: Settings.bullseyeLandAtStart, takeInFlight: state != .idle))
-        note(readyHint)
-    }
-
-    /// A membership change closed/deleted the bullseye's note, so the registry auto-disarmed it. The landing
-    /// SETTING is deliberately left alone (VDLAND1): only the note anchor went away, so the next take lands in
-    /// the field it started in. Reflect the cleared anchor in the info pill and toast the user (BT2).
-    func handleBullseyeAutoDisarmed() {
-        Log.write("bullseye auto-disarmed: target note closed/deleted")
-        refreshBullseyeIndicator()
-        hud.toast(LandingRoute.noteClosedToast)
-    }
-
-    /// `right-Option + Shift + N` (rebindable): REVEAL where the bullseye is — front its window, select its tab,
-    /// arm it if it was disarmed, and scroll its anchor into view. Navigation, not visibility: the inline marker
-    /// already renders persistently, just only while its note is the active tab in a visible window.
-    ///
-    /// Success is silent on purpose — the window coming forward with the glyph on screen IS the feedback, and a
-    /// toast here would reintroduce exactly the mid-take noise BT5b removed from Option+B. Both failures do
-    /// toast: nothing set reuses the Option+B copy, and a bullseye whose note is closed says so rather than
-    /// silently doing nothing (reopening it would be the durability work, which is out of scope).
-    private func revealBullseye() {
-        Log.write("bullseye reveal (Option+Shift+N) invoked state=\(state)")
-        switch notesDelivery.revealBullseye() {
-        case .reveal(_, let armed):
-            // VDLAND1: the reveal arms the note anchor, and an armed note anchor IS the landing setting ON.
-            let wasOn = Settings.bullseyeLandAtStart
-            Settings.bullseyeLandAtStart = true
-            if armed || !wasOn {
-                refreshBullseyeIndicator()
-                hud.toast(LandingRoute.toggleToast(on: true, takeInFlight: state != .idle))
-            }
-        case .noneSet:
-            hud.toast(NotesBullseyeLogic.noneSetToast)
-        case .noteClosed:
-            hud.toast(NotesBullseyeLogic.revealNoteClosedToast)
-        }
         note(readyHint)
     }
 
@@ -753,19 +695,6 @@ final class DictationController {
     /// is a HUD call (the notes-delivery seam is deliberately HUD-free — ADR 0012).
     private func refreshBullseyeIndicator() {
         hud.setBullseyeArmed(Settings.bullseyeLandAtStart)
-    }
-
-    /// The one-time upgrade (VDLAND1). A Mac that already had an ARMED note anchor when the landing setting
-    /// appeared turns the setting ON once, so an existing bullseye user keeps landing in their note. The marker
-    /// key makes it exactly once: a user who then turns B OFF stays OFF after a restart. Called directly before
-    /// the take's state is frozen and as the first statement of the B press.
-    private func migrateBullseyeOnce() {
-        guard !UserDefaults.standard.bool(forKey: LandingRoute.migratedKey) else { return }
-        Settings.bullseyeLandAtStart = LandingRoute.settingAfterRestore(
-            noteArmed: NotesBullseyeState.shared.current?.armed,
-            setting: Settings.bullseyeLandAtStart,
-            migrated: false)
-        UserDefaults.standard.set(true, forKey: LandingRoute.migratedKey)
     }
 
     /// `right-Option + Z`: the two-tier undo. First, because holding right-Option started audio
@@ -1053,20 +982,19 @@ final class DictationController {
             let noteId = notesDelivery.captureNoteTargetForTake()
             Log.write("beginRecording target=ViddyDictate — Sticky Notes textLike=true notesWindow=true ax=skipped noteTarget=\(noteId ?? "nil")")
             // BT4: a take that started overwriting a selection in a note tints that range by the active
-            // `?`-cleanup level (Raw color when cleanup is off) so the user sees what will be replaced. Gated
-            // on NOT armed: an armed bullseye take delivers to the bullseye (an insert point), NOT the
-            // selection, so nothing is overwritten and nothing is tinted. The island no-ops on a bare-caret
-            // snapshot (nothing to replace).
-            notesDelivery.armReplaceHighlightForTake()
+            // `?`-cleanup level (Raw color when cleanup is off) so the user sees what will be replaced. Only a
+            // B-ON take overwrites its start selection; a B-OFF take lands at end focus, so it must not tint the
+            // note's start range (VDLAND2 D14). The island no-ops on a bare-caret snapshot (nothing to replace).
+            if Settings.bullseyeLandAtStart {
+                notesDelivery.armReplaceHighlightForTake()
+            }
         } else {
             target = TargetResolver.captureFocused()
             targetWasNotesWindow = (target?.pid == getpid()) && callbacks.notesWindowIsKey()
             Log.write("beginRecording target=\(target?.label ?? "nil") textLike=\(target?.isTextLike ?? false) notesWindow=\(targetWasNotesWindow)")
         }
-        migrateBullseyeOnce()
         wasLocked = false
         takeLandAtStart = Settings.bullseyeLandAtStart
-        takeAnchor = LandingRoute.frozenAnchor(bullseyeOn: takeLandAtStart, current: NotesBullseyeState.shared.current)
         DaemonClient.ensureUp { ok in Log.write("daemon ensureUp ok=\(ok)") }
         // Mark active BEFORE starting the engine so the settings preview releases the input device
         // first (the dictationActive observer is synchronous) — avoids two input taps at once.
@@ -1086,7 +1014,7 @@ final class DictationController {
         refreshBullseyeIndicator()
         hud.update(state: "Listening…", target: target?.label, text: "", locked: false)
         hud.show()
-        if hud is HUDPanel && !targetWasNotesWindow && LandingRoute.markerShown(hasNoteAnchor: takeAnchor != nil) { pasteMarker.start(captured: target, followsLive: LandingRoute.markerFollowsLive(bullseyeOn: takeLandAtStart)) }
+        if hud is HUDPanel && !targetWasNotesWindow { pasteMarker.start(captured: target, followsLive: LandingRoute.markerFollowsLive(bullseyeOn: takeLandAtStart)) }
         hud.setCleanup(enabled: CleanupState.shared.cleanupEnabled, level: CleanupState.shared.cleanupLevel.rawValue)
         hud.setArmedMode(glyph: TransformArmState.shared.armedOneShot?.glyph)
         note("recording")
@@ -1526,25 +1454,23 @@ final class DictationController {
                                            id: historyID)
         let revertable = CleanupLogic.isRevertable(raw: raw, cleaned: cleaned)
 
-        // Notes delivery (ADR 0012): the coordinator routes the take's FROZEN note anchor > the take's
-        // snapshotted note target (BT1) > the key-window insert, and performs the note-undo bookkeeping + the
-        // gone-note clipboard-park. The anchor handed over is `takeAnchor`, frozen at take START (VDLAND1), so
-        // the router never reads the live note pin. The HUD + the foreign `pendingUndo` tail stay here (the seam
-        // is HUD-free), applied via `landDelivery`. The key-window discriminators read `target`, so they are
-        // computed here and passed in.
+        // Notes delivery (ADR 0012): the coordinator routes the take's snapshotted note target (B ON only,
+        // plus a late-recovery retry, which keeps its base inputs) > the key-window insert, and performs the
+        // note-undo bookkeeping + the gone-note clipboard-park. The HUD + the foreign `pendingUndo` tail stay
+        // here (the seam is HUD-free), applied via `landDelivery`. The key-window discriminators read `target`,
+        // so they are computed here and passed in (VDLAND2 D14: with B OFF a live take is offered no snapshot
+        // and inserts only when a sticky note is the key window when the take ENDS).
         let notesWindowCurrentlyKey = callbacks.notesWindowIsKey()
         // A late retry may run after the user has moved to another note. Only its exact take-start snapshot may
         // receive the text; never reinterpret the currently active note as the old target.
-        let shouldInsertIntoNotes = lateRecovery ? false : (targetWasNotesWindow
-            || (notesWindowCurrentlyKey && (target?.pid == getpid())))
+        let shouldInsertIntoNotes = lateRecovery ? false : (takeLandAtStart ? (targetWasNotesWindow || (notesWindowCurrentlyKey && (target?.pid == getpid()))) : notesWindowCurrentlyKey)
         switch notesDelivery.routeNotesDelivery(delivered: delivered, mode: mode,
                                                 landingKind: .inPlace,
                                                 inputSource: .dictation,
-                                                noteTarget: notesDelivery.noteTarget,
+                                                noteTarget: (takeLandAtStart || lateRecovery) ? notesDelivery.noteTarget : nil,
                                                 shouldInsertIntoNotes: shouldInsertIntoNotes,
                                                 startedInNotes: targetWasNotesWindow,
-                                                currentlyKey: notesWindowCurrentlyKey,
-                                                bullseyeView: .frozen(takeAnchor)) {
+                                                currentlyKey: notesWindowCurrentlyKey) {
         case .landed(let noteUndo):
             landDelivery(foreignUndo: nil, noteUndo: noteUndo, toast: nil, keepHUD: keepHUD)
             return finish(.note(noteUndo))

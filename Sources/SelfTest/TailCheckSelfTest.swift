@@ -1448,8 +1448,8 @@ enum TailCheckSelfTest {
     // (`TargetResolver.copyToClipboard`) goes to a PRIVATE, uniquely-named pasteboard -- never
     // `.general` -- the same "private named pasteboard, never general" convention `CleanupSelfTest`'s
     // own `runClipboardTests` already established, so driving a real delivery branch here never touches
-    // the user's actual clipboard. `NotesBullseyeState` gets its own fresh store + UserDefaults suite
-    // per call so no scenario can observe another's state.
+    // the user's actual clipboard. The notes arm of `hook-after-paste` supplies its take-start snapshot
+    // through the coordinator's injected callback, so no scenario can observe another's state.
 
     private static func scratchPasteboard() -> NSPasteboard {
         NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("tailcheck-selftest-\(UUID().uuidString)")))
@@ -1462,20 +1462,13 @@ enum TailCheckSelfTest {
             onSnapshotNoteTarget: { _ in nil },
             onDeliverToNoteTarget: { _, _ in .noWindow },
             onInsertIntoActiveNote: { _ in .noWindow },
-            onSetBullseyeAtCaret: { nil },
-            onDeliverToBullseye: { _ in .noWindow },
-            onBullseyeStateChanged: {},
-            onRevealBullseye: { .noneSet },
             onResolveReplaceHighlightTarget: { nil },
             onShowReplaceHighlight: { _, _, _ in },
             onClearReplaceHighlight: { _ in },
             onUndoNoteDelivery: { _ in false },
             onReplaceNoteDelivery: { _, _ in false },
             onCurrentNoteId: { nil })
-        let bullseyeState = NotesBullseyeState(
-            store: StickyNotesStore(),
-            defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-\(UUID().uuidString)")!)
-        let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
+        let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks)
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
                 onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
@@ -1489,51 +1482,6 @@ enum TailCheckSelfTest {
             hud: NullHUDPresenter())
         controller.wasLocked = true
         controller.takeLandAtStart = true
-        return controller
-    }
-
-    /// vdtpwg3 repair (point 2): a SECOND real, AX-free, system-pasteboard-free delivery branch --
-    /// `finalize()`'s notes/bullseye landing (`NotesLanding.bullseye`), which `NotesBullseyeLogic.delivery`
-    /// routes to BEFORE either the `wasLocked` or `target` checks, so this is a genuinely different real
-    /// branch from `makeHookTestController`'s locked-no-target one, not a relabeled copy of it. Armed
-    /// deterministically via `NotesBullseyeState.setAtCaret` (no JS bridge, no real note, no AX) with
-    /// `onDeliverToBullseye` answering `.delivered` -- the same "real seam, injected answer" shape as
-    /// `makeHookTestController`'s clipboard pasteboard. Push-to-talk and locked-WITH-a-captured-target are
-    /// NOT driven here: both require a real `DictationTarget` wrapping a live AX element with no existing
-    /// fake-target seam into the REAL `finalize()` (see `LockedDeliverySelfTest`, which tests the pure
-    /// `lockedDeliveryResolution` classifier plus a parallel fake harness for exactly this reason, never
-    /// the real controller) -- driving them here would mean either a live AX paste-synthesis call or a
-    /// write to `NSPasteboard.general`, the one thing every fixture in this file is built to avoid. Noted
-    /// as a residual (see this chain's GW3 report), not closed by this link.
-    private static func makeBullseyeHookTestController(
-        tailCheckHook: TailCheckDictationHook, noteId: String = "tailcheck-selftest-bullseye-note"
-    ) -> DictationController {
-        let notesCallbacks = NotesDeliveryCallbacks(
-            onSnapshotNoteTarget: { _ in nil },
-            onDeliverToNoteTarget: { _, _ in .noWindow },
-            onInsertIntoActiveNote: { _ in .noWindow },
-            onSetBullseyeAtCaret: { nil },
-            onDeliverToBullseye: { _ in .delivered },
-            onBullseyeStateChanged: {},
-            onRevealBullseye: { .noneSet },
-            onResolveReplaceHighlightTarget: { nil },
-            onShowReplaceHighlight: { _, _, _ in },
-            onClearReplaceHighlight: { _ in },
-            onUndoNoteDelivery: { _ in false },
-            onReplaceNoteDelivery: { _, _ in false },
-            onCurrentNoteId: { nil })
-        let bullseyeState = NotesBullseyeState(
-            store: StickyNotesStore(),
-            defaults: UserDefaults(suiteName: "tailcheck-selftest-bullseye-armed-\(UUID().uuidString)")!)
-        bullseyeState.setAtCaret(noteId: noteId)
-        let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
-        let controller = DictationController(
-            callbacks: DictationControllerCallbacks(
-                onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
-                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
-            notesDelivery: notesDelivery,
-            tailCheckHook: tailCheckHook,
-            hud: NullHUDPresenter())
         return controller
     }
 
@@ -1559,11 +1507,11 @@ enum TailCheckSelfTest {
     // let a hook that synchronously sleeps 90-99ms before dispatching still pass; tightened to `<= 20`
     // ms, well under any budget a real dispatch-and-return-fast implementation needs. (b) "two distinct
     // takes" never varied the DELIVERY BRANCH, only the text -- both ran through the same locked-no-
-    // target path. A second real branch (`NotesLanding.bullseye`, via `makeBullseyeHookTestController`)
-    // is added; its own real, synchronous write (the injected `onDeliverToBullseye` callback) is proven
-    // observable by return the same way the clipboard write is, via a dedicated counter rather than a
-    // pasteboard changeCount (that branch never touches any pasteboard). Push-to-talk and locked-with-
-    // a-captured-target stay out of scope -- see `makeBullseyeHookTestController`'s own doc comment.
+    // target path. A second real branch (`NotesLanding.landed` through the take-start snapshot) is added;
+    // its own real, synchronous write (the injected `onDeliverToNoteTarget` callback) is proven observable
+    // by return the same way the clipboard write is, via a dedicated counter rather than a pasteboard
+    // changeCount (that branch never touches any pasteboard). Push-to-talk and locked-with-a-captured-
+    // target stay out of scope: both need a real AX-backed `DictationTarget` with no existing fake seam.
     // Elapsed is still measured from OUTSIDE the call (`t0` wraps `controller.finalize(...)` itself,
     // never a value the hook or observer reports about itself), per the addendum's directive 2.
 
@@ -1644,34 +1592,24 @@ enum TailCheckSelfTest {
                 writeDetail = "clipboard changeCount before=\(changeCountBefore) after=\(changeCountAfter)"
             case .notesBullseye:
                 let writeLock = NSLock()
-                var bullseyeWrites = 0
+                var noteWrites = 0
                 let notesCallbacks = NotesDeliveryCallbacks(
                     onSnapshotNoteTarget: { _ in nil },
-                    onDeliverToNoteTarget: { _, _ in .noWindow },
-                    onInsertIntoActiveNote: { _ in .noWindow },
-                    onSetBullseyeAtCaret: { nil },
-                    onDeliverToBullseye: { _ in
-                        writeLock.lock(); bullseyeWrites += 1; writeLock.unlock()
+                    onDeliverToNoteTarget: { _, _ in
+                        writeLock.lock(); noteWrites += 1; writeLock.unlock()
                         return .delivered
                     },
-                    onBullseyeStateChanged: {},
-                    onRevealBullseye: { .noneSet },
+                    onInsertIntoActiveNote: { _ in .noWindow },
                     onResolveReplaceHighlightTarget: { nil },
                     onShowReplaceHighlight: { _, _, _ in },
                     onClearReplaceHighlight: { _ in },
                     onUndoNoteDelivery: { _ in false },
                     onReplaceNoteDelivery: { _, _ in false },
                     onCurrentNoteId: { nil })
-                // Fixed name (not UUID) so repeated runs reuse one prefs domain instead of leaking an
-                // empty plist per run; safe because the house rule runs one heavy suite at a time.
-                let timingDefaults = UserDefaults(suiteName: "test.viddydictate.selftest.tailcheck-bullseye-timing")!
-                timingDefaults.removePersistentDomain(forName: "test.viddydictate.selftest.tailcheck-bullseye-timing")
-                defer { timingDefaults.removePersistentDomain(forName: "test.viddydictate.selftest.tailcheck-bullseye-timing") }
-                let bullseyeState = NotesBullseyeState(
-                    store: StickyNotesStore(),
-                    defaults: timingDefaults)
-                bullseyeState.setAtCaret(noteId: "tailcheck-selftest-timing-note")
-                let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks, bullseyeState: bullseyeState)
+                let notesDelivery = NotesDeliveryCoordinator(callbacks: notesCallbacks)
+                // VDLAND2 D13/M6: the take-start snapshot is the landing, and the fixture sets the per-take
+                // landing flag explicitly because it builds the controller WITHOUT `beginRecording`.
+                notesDelivery.noteTarget = NotesDictationTarget(noteId: "tailcheck-selftest-timing-note")
                 let controller = DictationController(
                     callbacks: DictationControllerCallbacks(
                         onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
@@ -1679,14 +1617,14 @@ enum TailCheckSelfTest {
                     notesDelivery: notesDelivery,
                     tailCheckHook: hook,
                     hud: NullHUDPresenter())
-                controller.takeAnchor = bullseyeState.current
                 let t0 = DispatchTime.now()
+                controller.takeLandAtStart = true
                 _ = controller.finalize(delivered: c.text, raw: c.text, cleaned: nil, mode: .raw,
                                         historyID: UUID(), segments: c.segments)
                 elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
-                writeLock.lock(); let writes = bullseyeWrites; writeLock.unlock()
+                writeLock.lock(); let writes = noteWrites; writeLock.unlock()
                 writeObservedByReturn = writes == 1
-                writeDetail = "onDeliverToBullseye calls=\(writes)"
+                writeDetail = "onDeliverToNoteTarget calls=\(writes)"
             }
 
             reporter.record(
@@ -1710,6 +1648,31 @@ enum TailCheckSelfTest {
                 finalSinkThread !== callingThread,
                 "sinkThread=\(String(describing: finalSinkThread)) pasteThread=\(callingThread)")
         }
+
+        // VDLAND2 D13: the re-aimed notes arm must hand finalize the take-start snapshot, and the per-take
+        // landing flag must be set BEFORE the finalize call (the fixture never runs beginRecording, so the flag
+        // starts false and D14 would otherwise drop the supplied snapshot). Read the arm's own source from the
+        // tree root, exactly like the probe rows read production bodies.
+        let selfURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/SelfTest/TailCheckSelfTest.swift", isDirectory: false)
+        let selfText = (try? String(contentsOf: selfURL, encoding: .utf8)) ?? ""
+        let armSource: String = {
+            guard let a = selfText.range(of: "case .notesBullseye:"),
+                  let b = selfText.range(of: "\n            }\n\n            reporter.record(",
+                                         range: a.upperBound..<selfText.endIndex)
+            else { return "" }
+            return String(selfText[a.upperBound..<b.lowerBound])
+        }()
+        let flagBeforeFinalize = armSource.range(
+            of: #"controller\.takeLandAtStart = true\s*\n\s*_ = controller\.finalize\("#,
+            options: .regularExpression) != nil
+        reporter.record("land2-tailcheck-note-arm-snapshot",
+                        !armSource.isEmpty
+                        && armSource.contains("notesDelivery.noteTarget = NotesDictationTarget(noteId: \"tailcheck-selftest-timing-note\")")
+                        && flagBeforeFinalize
+                        && armSource.contains("noteWrites += 1")
+                        && armSource.contains("writes == 1")
+                        && !armSource.contains("NotesBullseyeState"))
 
         print("\n=== RESULT ===")
         print(reporter.summaryLine(prefix: "hook-after-paste"))

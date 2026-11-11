@@ -87,10 +87,18 @@ enum FeatureTourFixtureSelfTest {
     // MARK: - (a)
 
     private static func checkCoverage(_ pages: [FeatureTourPage], _ r: SelfTestReporter) {
-        let missing = tokens(FeatureTour.uncoveredSlots(in: pages))
+        // VDLAND2: the tour no longer explains the landing switch (its sticky-notes paragraph was deleted with
+        // the note pin), so that one slot is exempt from D10 teaching. The exemption is pinned here, not
+        // folded into `FeatureTour.uncoveredSlots`, so any OTHER new untaught command still fails.
+        let untaughtSlots: [HotkeySlot] = [.command(.bullseyeToggle)]
+        let untaughtTokens = tokens(untaughtSlots)
+        let missing = tokens(FeatureTour.uncoveredSlots(in: pages)).filter { !untaughtTokens.contains($0) }
         r.record(coverageCheck, missing.isEmpty,
                  missing.isEmpty ? "\(FeatureTour.builtInSlots.count) slots"
                     : "missing: " + missing.joined(separator: ","))
+        r.record("only the landing switch is exempt from D10 teaching, and it is exactly one slot",
+                 untaughtTokens == ["bullseyeToggle"]
+                    && Set(FeatureTour.uncoveredSlots(in: pages).map(FeatureTour.token(for:))) == Set(untaughtTokens))
         r.record("the built-in slots are the wakeup plus every HotkeyCommand case",
                  tokens(FeatureTour.builtInSlots) == ["wakeup"] + HotkeyCommand.allCases.map(\.rawValue))
 
@@ -168,7 +176,7 @@ enum FeatureTourFixtureSelfTest {
         r.record("a chord is drawn with the Hotkeys tab's own label",
                  FeatureTour.chordLabel(.command(.notes), map: map) == map.key(for: .notes).label
                     && FeatureTour.chordLabel(.wakeup, map: map) == map.wakeup.label
-                    && FeatureTour.chordLabel(.command(.bullseyeReveal), map: map) == "\u{21E7}N")
+                    && FeatureTour.chordLabel(.command(.bullseyeToggle), map: map) == map.key(for: .bullseyeToggle).label)
     }
 
     // MARK: - (c)
@@ -351,15 +359,22 @@ enum FeatureTourFixtureSelfTest {
 
     private static func checkNegativeControls(_ r: SelfTestReporter) {
         let real = FeatureTour.pages
-        requireCaught(r, mutant: "page list missing the bullseye reveal", by: coverageCheck) {
+        let stickyNotesPage = real.first { $0.id == "sticky-notes" }
+        r.record("land2-tour-copy",
+                 stickyNotesPage?.commands == [.wakeup, .command(.notes)]
+                    && !(stickyNotesPage?.body.joined(separator: " ").contains("receives your answers") ?? true))
+        requireCaught(r, mutant: "page list missing the sticky-notes command", by: coverageCheck) {
             let pages = real.map { page -> FeatureTourPage in
                 guard page.id == "sticky-notes" else { return page }
                 return FeatureTourPage(
                     id: page.id, title: page.title,
-                    body: page.body.map { $0.replacingOccurrences(of: " {bullseyeReveal} brings it to the front.",
-                                                                  with: "") },
+                    body: page.body.map {
+                        $0.replacingOccurrences(
+                            of: "Hold {wakeup} and tap {notes} to open your sticky notes. Notes have tabs, and you can drag one out into its own window.",
+                            with: "")
+                    },
                     nonObvious: page.nonObvious,
-                    commands: page.commands.filter { FeatureTour.token(for: $0) != "bullseyeReveal" },
+                    commands: page.commands.filter { FeatureTour.token(for: $0) != "notes" },
                     settingsLink: page.settingsLink, liveStatus: page.liveStatus)
             }
             checkCoverage(pages, $0)

@@ -12,16 +12,6 @@ struct NotesDeliveryCallbacks {
     let onDeliverToNoteTarget: (NotesDictationTarget, String) -> NoteInsertOutcome
     /// Dictation into the Notes window inserts through the JS bridge at the editor caret (we own the WKWebView).
     let onInsertIntoActiveNote: (String) -> NoteInsertOutcome
-    /// BT2: Option+N dual-purpose sets/moves the pinned bullseye at the active note's caret. Returns the note id
-    /// when gated in, or nil to keep Option+N's open/focus behavior.
-    let onSetBullseyeAtCaret: () -> String?
-    /// BT2: deliver an armed take to the pinned bullseye's note by id (focus-independent).
-    let onDeliverToBullseye: (String) -> NoteInsertOutcome
-    /// BT3: refresh the inline bullseye marker after its armed state changes.
-    let onBullseyeStateChanged: () -> Void
-    /// BT6: Option+Shift+N reveal — front the bullseye's window, select its tab, arm it if disarmed, and scroll
-    /// its anchor into view. Returns what happened so the caller can toast the two honest failures.
-    let onRevealBullseye: () -> NotesBullseyeLogic.RevealOutcome
     /// BT4: resolve the note that would receive an Option+P replace highlight.
     let onResolveReplaceHighlightTarget: () -> String?
     /// BT4: show or live-update the four-color replace highlight.
@@ -34,10 +24,6 @@ struct NotesDeliveryCallbacks {
     let onReplaceNoteDelivery: (String, String) -> Bool
     /// BT5: resolve the key notes window's active note id for the plain key-window insertion path.
     let onCurrentNoteId: () -> String?
-    /// VDLAND1: deliver a take to the FROZEN bullseye note id the take started with (text, note id), reaching
-    /// the note by id rather than through the live pin. Optional and defaulted so the fixtures that exercise
-    /// only the legacy live-pin seam below keep compiling and behaving unchanged.
-    var onDeliverToBullseyeNote: ((String, String) -> NoteInsertOutcome)? = nil
 }
 
 /// The Family-3 notes-delivery collaborator (ADR 0012).
@@ -62,14 +48,11 @@ struct NotesDeliveryCallbacks {
 final class NotesDeliveryCoordinator {
 
     private let callbacks: NotesDeliveryCallbacks
-    private let bullseyeState: NotesBullseyeState
     private let copyToClipboard: (String) -> Void
 
     init(callbacks: NotesDeliveryCallbacks,
-         bullseyeState: NotesBullseyeState = .shared,
          copyToClipboard: @escaping (String) -> Void = { TargetResolver.copyToClipboard($0) }) {
         self.callbacks = callbacks
-        self.bullseyeState = bullseyeState
         self.copyToClipboard = copyToClipboard
     }
 
@@ -100,39 +83,6 @@ final class NotesDeliveryCoordinator {
     /// collapses the live selection) never clobbers the live range captured at take-start, while a genuinely
     /// newer gesture always wins. One authoritative note-selection range per gesture, owned here.
     var gestureGeneration = 0
-
-    // MARK: bullseye (Option+N set/arm, Option+B toggle)
-
-    /// The Option+B toggle outcome the thin controller entry point switches on. `.noneSet` toasts on the
-    /// controller side (there is nothing to reflect); `.toggled` refreshes the info-pill + rebroadcasts the
-    /// inline marker (both driven from the controller so the HUD call stays there).
-    enum BullseyeToggle { case toggled, noneSet }
-
-    /// BT2: Option+N set/move + arm the pinned bullseye at the key window's active-note caret. Returns the note
-    /// id (armed) or nil (keep Option+N's open/focus behavior). The registry broadcasts the inline marker itself.
-    func setBullseyeAtCaret() -> String? { callbacks.onSetBullseyeAtCaret() }
-
-    /// Option+B: pure toggle of the pinned bullseye's ARMED state (location preserved). Logs like the pre-move
-    /// controller body; the info-pill refresh + marker rebroadcast + the "No bullseye set" toast stay on the
-    /// controller so no HUD call moves here.
-    func toggleBullseye() -> BullseyeToggle {
-        switch NotesBullseyeState.shared.toggle() {
-        case .toggled(let b):
-            Log.write("bullseye toggle -> \(b.armed ? "armed" : "disarmed") (note \(b.noteId))")
-            return .toggled
-        case .noneSet:
-            Log.write("bullseye toggle: none set")
-            return .noneSet
-        }
-    }
-
-    /// BT3: rebroadcast the inline bullseye marker to the notes islands (the registry side). Called by the
-    /// controller after an Option+B toggle / a delivery-time drop.
-    func broadcastBullseyeState() { callbacks.onBullseyeStateChanged() }
-
-    /// Option+Shift+N (BT6): reveal where the bullseye is. All four navigation steps happen on the registry
-    /// side (it owns the windows); the two failure toasts stay on the controller, keeping this seam HUD-free.
-    func revealBullseye() -> NotesBullseyeLogic.RevealOutcome { callbacks.onRevealBullseye() }
 
     // MARK: replace highlight (BT4)
 
@@ -183,11 +133,11 @@ final class NotesDeliveryCoordinator {
     }
 
     /// BT4: a take that started overwriting a selection in a note tints that range by the active `?`-cleanup
-    /// level (Raw when cleanup is off) so the user sees what will be replaced. Gated on NOT armed: an armed
-    /// bullseye take delivers to the bullseye (an insert point), so nothing is overwritten and nothing is tinted.
-    /// The island no-ops on a bare-caret snapshot. No-op when the take did not start in a note.
+    /// level (Raw when cleanup is off) so the user sees what will be replaced. The island no-ops on a
+    /// bare-caret snapshot. No-op when the take did not start in a note. VDLAND2: the caller gates this on the
+    /// landing setting, because a B-OFF take does not overwrite the start selection.
     func armReplaceHighlightForTake() {
-        guard let nt = noteTarget, !NotesBullseyeState.shared.armed else { return }
+        guard let nt = noteTarget else { return }
         replaceHighlightNoteId = nt.noteId
         refreshReplaceHighlightLevel()
     }
@@ -241,55 +191,24 @@ final class NotesDeliveryCoordinator {
     }
 
     /// The one owner of the notes precedence ladder. Raw / `?` delivery and one-shot in-place delivery both
-    /// call this method with their landing kind and input source. The pure rule decides bullseye versus snapshot
+    /// call this method with their landing kind and input source. The pure rule decides the take-start snapshot
     /// versus the requested destination; this stateful shell performs the chosen bridge delivery and gone-note
     /// recovery. The controller still owns the HUD application of the returned landing.
     ///
-    /// `bullseyeView` is the per-take freeze (VDLAND1): `.live` (the default, used by the one-shot transform
-    /// paths) reads the live note state; `.frozen` is the anchor captured at take START.
+    /// VDLAND2: there is no per-take frozen pin any more. The controller decides whether a take-start snapshot
+    /// exists for this take (B ON, or a late-recovery retry, which keeps its base inputs).
     func routeNotesDelivery(delivered: String, mode: HistoryMode,
                             landingKind: NotesBullseyeLogic.LandingKind,
                             inputSource: NotesBullseyeLogic.InputSource,
                             noteTarget: NotesDictationTarget?,
                             shouldInsertIntoNotes: Bool,
-                            startedInNotes: Bool, currentlyKey: Bool,
-                            bullseyeView: LandingRoute.BullseyeView = .live) -> NotesLanding {
-        let seenBullseye: NotesBullseye?
-        switch bullseyeView {
-        case .live: seenBullseye = bullseyeState.current
-        case .frozen(let frozen): seenBullseye = frozen
-        }
-        func byId(_ text: String, _ noteId: String) -> NoteInsertOutcome {
-            callbacks.onDeliverToBullseyeNote?(text, noteId) ?? callbacks.onDeliverToBullseye(delivered)
-        }
+                            startedInNotes: Bool, currentlyKey: Bool) -> NotesLanding {
         let route = NotesBullseyeLogic.delivery(
-            bullseye: seenBullseye,
             snapshotNoteId: noteTarget?.noteId,
             landingKind: landingKind,
             inputSource: inputSource)
 
         switch route {
-        case .bullseye(let bullseyeNoteId):
-            // The target vanished between the precedence decision and the bridge delivery. Drop the persistent
-            // target and park the output so the fresh dictation is never lost.
-            // The insertion goes to the FROZEN note id, never the live pin.
-            let bullseyeOutcome = byId(delivered, bullseyeNoteId)
-            switch bullseyeOutcome {
-            case .delivered, .queued:
-                Log.write("deliver: landed at armed bullseye (\(delivered.count) chars, mode=\(mode))")
-                return .landed(noteUndo: bullseyeNoteId)
-            case .noWindow:
-                Log.write("deliver: bullseye note gone at delivery, auto-disarm + clipboard park (\(delivered.count) chars, mode=\(mode))")
-                // Only the note this take froze at may drop the LIVE pin: a frozen note A that disappeared while
-                // the user pinned another still-open note B leaves B pinned for the next take.
-                if LandingRoute.shouldDropLiveAnchor(frozenNoteId: bullseyeNoteId, liveNoteId: bullseyeState.noteId) {
-                    bullseyeState.drop()
-                    callbacks.onBullseyeStateChanged()   // BT3: clear the inline marker (the bullseye just dropped)
-                }
-                copyToClipboard(delivered)
-                return .parked(toast: "📋 " + NotesBullseyeLogic.deliverGoneToast, refreshBullseye: true)
-            }
-
         case .snapshot:
             guard let noteTarget = noteTarget else { return .notNotes }
             let outcome = callbacks.onDeliverToNoteTarget(noteTarget, delivered)

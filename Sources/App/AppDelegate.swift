@@ -335,15 +335,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onInsertIntoActiveNote: { [weak self] text in
                 self?.notesRegistry.insertIntoKeyWindow(text) ?? .noWindow
             },
-            // BT2: Option+N can set the bullseye, whose delivery remains focus-independent.
-            onSetBullseyeAtCaret: { [weak self] in self?.notesRegistry.setBullseyeAtCaret() },
-            onDeliverToBullseye: { [weak self] text in
-                self?.notesRegistry.deliverToBullseye(text: text) ?? .noWindow
-            },
-            // BT3: a bullseye toggle or delivery-time drop refreshes every inline marker.
-            onBullseyeStateChanged: { [weak self] in self?.notesRegistry.broadcastBullseyeState() },
-            // BT6: Option+Shift+N reveals where the bullseye is (front + select tab + arm + scroll to it).
-            onRevealBullseye: { [weak self] in self?.notesRegistry.revealBullseye() ?? .noneSet },
             // BT4: resolve, show/update, and clear the four-color replace highlight by note id.
             onResolveReplaceHighlightTarget: { [weak self] in
                 self?.notesRegistry.replaceHighlightTargetNoteId()
@@ -362,11 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onReplaceNoteDelivery: { [weak self] id, text in
                 self?.notesRegistry.replaceNoteDelivery(noteId: id, text: text) ?? false
             },
-            onCurrentNoteId: { [weak self] in self?.notesRegistry.currentActiveNoteId() },
-            // VDLAND1: a take lands in the note id it froze at take START, not in the live pin.
-            onDeliverToBullseyeNote: { [weak self] text, noteId in
-                self?.notesRegistry.deliverToBullseye(text: text, noteId: noteId) ?? .noWindow
-            }
+            onCurrentNoteId: { [weak self] in self?.notesRegistry.currentActiveNoteId() }
         ))
         let controller = DictationController(
             callbacks: DictationControllerCallbacks(
@@ -479,6 +466,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        // VDLAND2 upgrade: the sticky-note pin is gone. Drop its stored state and the one-time
+        // VDLAND1 migration marker silently; the landing setting itself (`bullseyeLandAtStart`) is left
+        // exactly as the user had it, and it now means "land at the take-start field".
+        UserDefaults.standard.removeObject(forKey: "notesBullseye")
+        UserDefaults.standard.removeObject(forKey: "bullseyeLandMigrated")
         // Armed before any of the setup below, because a hang DURING launch is exactly as invisible as
         // a hang at rest and nothing else would ever report it. ADR 0017.
         hangWatchdog.start()
@@ -533,7 +525,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // set on each `ensureReady` load (interop ADR 0004, reversing ADR 0006's app-side idle timer),
         // and the LM Studio server is started lazily on the first load. See docs/model-residency.md.
         // The registry owns this inverse notification; it is not one of the controller/coordinator contracts.
-        notesRegistry.onBullseyeAutoDisarmed = { [weak self] in self?.controller.handleBullseyeAutoDisarmed() }
         // Hotkey rebinding: the Settings Hotkeys tab drives capture through the controller (tap owner).
         settingsWC.onBeginHotkeyCapture = { [weak self] onCap, onCancel in
             self?.controller.beginHotkeyCapture(onCapture: onCap, onCancel: onCancel)
