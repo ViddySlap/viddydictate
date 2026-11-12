@@ -432,6 +432,18 @@ enum CleanupSelfTest {
               && dismissBody.contains("removeMonitors()")
               && NotesProbe.orderedBefore("event.window === self", "self.dismiss()", in: localEscBody))
 
+        let addTappedBody = dictAddBody("@objc private func addTapped()", in: panelSrc)
+        var okBranch = ""
+        if let okStart = addTappedBody.range(of: "case .ok:"),
+           let dupStart = addTappedBody.range(of: "case .duplicate", range: okStart.upperBound..<addTappedBody.endIndex) {
+            okBranch = String(addTappedBody[okStart.upperBound..<dupStart.lowerBound])
+        }
+        check("dict-add-closes-after-add",
+              !addTappedBody.isEmpty && !okBranch.isEmpty
+              && okBranch.contains("dismiss()")
+              && !okBranch.contains("makeFirstResponder(heardField)")
+              && !okBranch.contains("setStatus(\"Added\"")))
+
         let viewSrc = dictAddSource("Sources/App/DictionarySettingsView.swift")
         let syncBody = dictAddBody("private func syncAndPersist()", in: viewSrc)
         let reloadBody = dictAddBody("private func reloadFromStore()", in: viewSrc)

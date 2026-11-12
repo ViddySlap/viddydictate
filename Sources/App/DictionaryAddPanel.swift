@@ -258,16 +258,7 @@ final class DictionaryAddPanel: NSPanel, NSTextFieldDelegate {
                                                            intended: intendedField.stringValue, column: column)
         switch verdict {
         case .ok:
-            heardField.stringValue = ""
-            intendedField.stringValue = ""
-            refresh()
-            setStatus("Added", color: Phosphor.green)
-            let token = statusToken.press()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                guard let self = self, self.statusToken.isCurrent(token) else { return }
-                self.refresh()
-            }
-            makeFirstResponder(heardField)
+            dismiss()
         case .duplicate(let existing):
             addButton.isEnabled = false
             showDuplicate(existing)
