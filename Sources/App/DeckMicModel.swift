@@ -72,6 +72,46 @@ enum DeckMicModel {
         }
     }
 
+    /// What the next take will try, worded as a prediction. Names exactly the device `choose` would pick.
+    static func nextTakeText(signal: Signal?, devices: [InputDevice], userUID: String, defaultName: String?) -> String {
+        let prefix = "Next dictation uses: "
+        let choice = choose(signal: signal, devices: devices)
+        if case .blackHole(_, let name) = choice { return prefix + name + " (Steam Deck on)" }
+        var text: String
+        if userUID.isEmpty {
+            text = prefix + (defaultName.map { $0 + " (system default)" } ?? "system default")
+        } else if let pinned = devices.first(where: { $0.uid == userUID }) {
+            text = prefix + pinned.name
+        } else {
+            text = prefix + (defaultName.map { $0 + " (system default; pinned mic unavailable)" }
+                             ?? "system default (pinned mic unavailable)")
+        }
+        if case .blackHoleMissing = choice { text += " (Steam Deck on, no BlackHole input)" }
+        return text
+    }
+
+    /// The device a take is recording from right now. A follow-default take names the route, with the
+    /// start device only as a fact about the start.
+    static func activeText(name: String?, followsDefault: Bool, viaDeck: Bool) -> String {
+        let prefix = "Dictating now from: "
+        if followsDefault {
+            return prefix + (name.map { "system default (\($0) at start)" } ?? "system default")
+        }
+        return prefix + (name ?? "unnamed input") + (viaDeck ? " (Steam Deck)" : "")
+    }
+
+    /// True when the next take would use a BlackHole input that is not the picker's device.
+    static func nextDiffersFromPicker(signal: Signal?, devices: [InputDevice], userUID: String) -> Bool {
+        if case .blackHole(let uid, _) = choose(signal: signal, devices: devices) { return uid != userUID }
+        return false
+    }
+
+    /// Whether the "meter below uses the picker" line shows: the active take's value when a take is
+    /// recording, otherwise the idle prediction's.
+    static func meterNoteNeeded(nextDiffersFromPicker: Bool, activeDiffersFromPicker: Bool?) -> Bool {
+        activeDiffersFromPicker ?? nextDiffersFromPicker
+    }
+
     private struct Body: Decodable {
         let on: Bool
         let since: Double?
