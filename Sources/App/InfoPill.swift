@@ -254,9 +254,12 @@ final class InfoPillPanel: NSObject {
             locked: locked,
             cleanup: cleanupEnabled,
             oneShotArmed: armedModeGlyph != nil)
+        // Left-hand layout on a frame too narrow for the capsule beside the scope: shift the whole band right
+        // so the capsule never starts left of the visible frame (the scope never moves; zero when it fits).
         side = (scope.maxX + gapSide(ps) + maxCapsuleWidth(ps) <= visible.maxX) ? .right : .left
-        let pf = panelFrame(ps, beside: scope, side: side)
+        var pf = panelFrame(ps, beside: scope, side: side)
         let capLocal = capsuleLocalFrame(newSet, ps)
+        if side == .left { pf.origin.x += max(0, visible.minX - (pf.minX + capLocal.minX)) }
 
         applyGen += 1; let gen = applyGen
 

@@ -40,6 +40,7 @@ enum HUDProbe {
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
         probeInfoSide(hud, visibleFrame: vf)
+        probeInfoEdges(hud, visibleFrame: vf)
         probeLowPowerToast(hud, visibleFrame: vf)
         probeModeAdaptiveRouterToast(hud, visibleFrame: vf)
         probePillAfterToast(hud)
@@ -90,7 +91,7 @@ enum HUDProbe {
 
     private static func probeInfoPill(_ hud: HUDPanel) {
         // Item B: the low-power INFO PILL is content-gated (lock and/or cleanup), grows as more
-        // elements join, sits just below the scope, and NEVER moves the scope pill — its on-screen
+        // elements join, sits beside the scope on its row, and NEVER moves the scope pill — its on-screen
         // frame is invariant across every info-pill show/hide/resize.
         Settings.hudUIScale = 1.0
 
@@ -102,7 +103,7 @@ enum HUDProbe {
         check("info-hidden-when-idle", !hud.infoPillShownForTesting,
               "shown=\(hud.infoPillShownForTesting) expect false")
 
-        // locked only -> the info pill appears, just below the scope; the scope stays put.
+        // locked only -> the info pill appears, beside the scope on its row; the scope stays put.
         hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
         check("info-shown-when-locked", hud.infoPillShownForTesting, "shown=\(hud.infoPillShownForTesting)")
         let infoLocked = hud.infoPillFrameForTesting
@@ -233,6 +234,126 @@ enum HUDProbe {
 
         // Cleanup: restore the providers `run` installed at its start and the scale.
         hud.hide()
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        Settings.hudUIScale = 1.0
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
+    }
+
+    private static func probeInfoEdges(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        // Edge coverage for the info capsule: the flip back to the right, both ends of the size slider, the
+        // top and bottom screen edges, and (VDCURF) a visible frame too narrow for the left-hand layout,
+        // where the capsule's left edge wins over the scope: it never starts left of the frame.
+        Settings.hudUIScale = 1.0
+        hud.hide()
+        hud.setBullseyeArmed(false)
+        hud.setCleanup(enabled: false, level: 0)
+        hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
+
+        func showAt(_ p: NSPoint) -> (scope: NSRect, info: NSRect) {
+            hud.hide()
+            hud.pointerProviderForTesting = { p }
+            hud.show()
+            return (hud.frameForTesting, hud.infoPillFrameForTesting)
+        }
+        func layoutOK(_ f: (scope: NSRect, info: NSRect), in r: NSRect) -> Bool {
+            !f.scope.intersects(f.info) && r.contains(f.scope) && r.contains(f.info)
+                && approx(f.scope.midY, f.info.midY)
+        }
+        let rightP = NSPoint(x: vf.minX + 400, y: vf.maxY - 200)
+        let leftP = NSPoint(x: vf.maxX - 20, y: vf.maxY - 200)
+
+        // 1) Flip back: left of the scope at the right edge, then the pointer moves away and a follow tick
+        //    re-applies the info pill, which returns to the right-hand layout.
+        let first = showAt(leftP)
+        let wasLeft = first.info.maxX <= first.scope.minX - 1.5
+        hud.pointerProviderForTesting = { rightP }
+        hud.followTickForTesting()
+        let s1 = hud.frameForTesting
+        let i1 = hud.infoPillFrameForTesting
+        check("info-flips-back-right",
+              wasLeft && i1.minX >= s1.maxX + 1.5 && i1.minX <= s1.maxX + 12
+                && approx(s1.midY, i1.midY) && vf.contains(i1),
+              "first=\(first.info) after=\(i1) scope=\(s1) expect info right of scope on its row, inside vf=\(vf)")
+
+        // 2) Smallest size (70 percent): both layouts hold and the capsule keeps its height floor.
+        Settings.hudUIScale = 0.7
+        let minR = showAt(rightP)
+        let minL = showAt(leftP)
+        check("info-scale-min-layouts-ok",
+              layoutOK(minR, in: vf) && layoutOK(minL, in: vf)
+                && minR.info.height >= 30.5 && minL.info.height >= 30.5,
+              "right info=\(minR.info) left info=\(minL.info) expect heights >= 30.5 inside vf=\(vf)")
+
+        // 3) Largest size (160 percent).
+        Settings.hudUIScale = 1.6
+        let maxR = showAt(rightP)
+        let maxL = showAt(leftP)
+        let gapR = maxR.info.minX - maxR.scope.maxX
+        check("info-scale-max-layouts-ok",
+              layoutOK(maxR, in: vf) && layoutOK(maxL, in: vf)
+                && approx(maxR.info.height, 54) && approx(maxL.info.height, 54) && gapR >= 1.5 && gapR <= 14,
+              "right info=\(maxR.info) left info=\(maxL.info) gap=\(gapR) expect heights ≈54, gap in [1.5, 14]")
+
+        // 4, 5) Top and bottom screen edges.
+        Settings.hudUIScale = 1.0
+        let top = showAt(NSPoint(x: vf.minX + 400, y: vf.maxY - 5))
+        check("info-at-top-edge", layoutOK(top, in: vf), "info=\(top.info) scope=\(top.scope) vf=\(vf)")
+        let bottom = showAt(NSPoint(x: vf.minX + 400, y: vf.minY + 5))
+        check("info-at-bottom-edge", layoutOK(bottom, in: vf), "info=\(bottom.info) scope=\(bottom.scope) vf=\(vf)")
+
+        // Narrow fixtures, built from the live widths (the widest set: bullseye, lock, cleanup).
+        hud.setBullseyeArmed(true)
+        hud.setCleanup(enabled: true, level: 1)
+        let wide = showAt(rightP)
+        let scopeW = wide.scope.width
+        let fullW = wide.info.width
+        let narrow = NSRect(x: vf.minX, y: vf.minY, width: scopeW + 7 + fullW - 40, height: vf.height)
+        let narrowP = NSPoint(x: narrow.maxX - 20, y: narrow.maxY - 200)
+        func scopeAtFormula(_ scope: NSRect, pointer p: NSPoint, screen r: NSRect) -> Bool {
+            let o = HUDPointerPlacement.origin(pointer: p, size: scope.size, scale: 1.0,
+                                               screens: [HUDPointerPlacement.Screen(frame: r, visible: r)],
+                                               fallback: 0)
+            return abs(scope.minX - o.x) <= 0.5 && abs(scope.minY - o.y) <= 0.5
+        }
+
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: narrow, visible: narrow)] }
+        let n = showAt(narrowP)
+        // 6) Room for the capsule but not beside the scope: its left edge lands exactly on the frame's.
+        check("info-left-clamped-narrow-frame", abs(n.info.minX - narrow.minX) <= 0.5,
+              "info=\(n.info) narrow=\(narrow) fullW=\(fullW) expect info.minX ≈ narrow.minX")
+        // 7) The scope pill never moves for the capsule.
+        check("info-narrow-scope-unmoved", scopeAtFormula(n.scope, pointer: narrowP, screen: narrow),
+              "scope=\(n.scope) expect the HUDPointerPlacement.origin(...) position")
+        // 8) The capsule stays inside the narrow frame, on the scope's row.
+        check("info-narrow-inside-visible",
+              n.info.minX >= narrow.minX - 0.5 && n.info.maxX <= narrow.maxX + 0.5
+                && approx(n.scope.midY, n.info.midY),
+              "info=\(n.info) narrow=\(narrow)")
+
+        // 9) A frame narrower than the capsule: the left edge still wins and the scope still does not move.
+        let tiny = NSRect(x: vf.minX, y: vf.minY, width: fullW - 20, height: vf.height)
+        let tinyP = NSPoint(x: tiny.maxX - 20, y: tiny.maxY - 200)
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: tiny, visible: tiny)] }
+        let t = showAt(tinyP)
+        check("info-tiny-frame-left-edge-wins",
+              abs(t.info.minX - tiny.minX) <= 0.5 && scopeAtFormula(t.scope, pointer: tinyP, screen: tiny),
+              "info=\(t.info) scope=\(t.scope) tiny=\(tiny)")
+
+        // 10) The clamp is zero when the capsule fits: lock only, the capsule sits flush left of the scope.
+        hud.setBullseyeArmed(false)
+        hud.setCleanup(enabled: false, level: 0)
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: narrow, visible: narrow)] }
+        let small = showAt(narrowP)
+        check("info-left-unshifted-when-it-fits",
+              abs(small.info.maxX - (small.scope.minX - 7)) <= 0.5 && small.info.minX >= narrow.minX - 0.5,
+              "info=\(small.info) scope=\(small.scope) expect info.maxX ≈ scope.minX - 7")
+
+        // Cleanup: restore what probeInfoSide restores, plus bullseye and cleanup off.
+        hud.hide()
+        hud.setBullseyeArmed(false)
+        hud.setCleanup(enabled: false, level: 0)
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         Settings.hudUIScale = 1.0
         hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
