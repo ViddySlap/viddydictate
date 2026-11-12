@@ -442,7 +442,7 @@ enum CleanupSelfTest {
               !addTappedBody.isEmpty && !okBranch.isEmpty
               && okBranch.contains("dismiss()")
               && !okBranch.contains("makeFirstResponder(heardField)")
-              && !okBranch.contains("setStatus(\"Added\"")))
+              && !okBranch.contains("setStatus(\"Added\""))
 
         let viewSrc = dictAddSource("Sources/App/DictionarySettingsView.swift")
         let syncBody = dictAddBody("private func syncAndPersist()", in: viewSrc)
