@@ -34,6 +34,11 @@ final class AudioRecorder {
     /// run indefinitely (reading `scopeSamples`) without growing an unused buffer.
     var captureSamples = true
 
+    /// Only the dictation recorder opts in: before each take it asks the Deck microphone helper
+    /// whether to record from a BlackHole input instead of the user's setting. The settings-window
+    /// meter and the mic probe leave this false.
+    var honorsDeckMic = false
+
     // Ring of recent mono samples for the live oscilloscope (full-width waveform view).
     private var ring = [Float](repeating: 0, count: 2048)
     private var ringIdx = 0
@@ -63,7 +68,16 @@ final class AudioRecorder {
         // a pinned mic at a different rate captures silence (or crashes installTap) — see HALInputCapture.
         // No pin (or the pin is unplugged) -> follow the system default via AVAudioEngine, which handles
         // default-device changes itself.
-        let uid = Settings.inputDeviceUID
+        let userUID = Settings.inputDeviceUID
+        let uid = honorsDeckMic ? DeckMicSignal.effectiveInputUID(userUID: userUID) : userUID
+        do { try startCapture(uid: uid) } catch where uid != userUID {
+            Log.write("audio.deckmic: BlackHole capture failed (\(error.localizedDescription)) — using the user's input setting")
+            stop()
+            try startCapture(uid: userUID)
+        }
+    }
+
+    private func startCapture(uid: String) throws {
         if !uid.isEmpty, let devID = AudioDevices.deviceID(forUID: uid) {
             try startHAL(deviceID: devID, uid: uid)
         } else {
@@ -120,7 +134,7 @@ final class AudioRecorder {
     private func startHAL(deviceID: AudioDeviceID, uid: String) throws {
         let cap = HALInputCapture()
         cap.onMono = { [weak self] mono in self?.ingest(mono) }
-        try cap.start(deviceID: deviceID)
+        do { try cap.start(deviceID: deviceID) } catch { cap.stop(); throw error }
         guard cap.sampleRate > 0 else {
             cap.stop()
             throw NSError(domain: "ViddyDictate.AudioRecorder", code: 1, userInfo: [

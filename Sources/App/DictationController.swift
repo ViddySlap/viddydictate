@@ -48,7 +48,7 @@ final class DictationController {
     }
 
     private let hotkey = HotkeyMonitor()
-    private let audio = AudioRecorder()
+    private let audio: AudioRecorder = { let recorder = AudioRecorder(); recorder.honorsDeckMic = true; return recorder }()
     private let audioWorkQueue = DispatchQueue(label: AppIdentity.queueLabel("audio-work"),
                                                qos: .userInitiated)
     private lazy var retainedTakeRecovery = RetainedTakeRecovery(progress: { [weak self] takeID, pending in

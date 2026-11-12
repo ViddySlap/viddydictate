@@ -80,6 +80,7 @@ enum CleanupSelfTest {
         checkUndoAndFallbackLogic(reporter.record)
         checkPromptPrepAndHotkeys(reporter.record)
         checkCorrectionDictionary(reporter.record)
+        checkDeckMic(reporter.record)
         checkStickyNotesContracts(reporter.record)
         checkOneShotDescriptors(reporter.record)
         checkCriticalFailureDetectors(reporter.record)
@@ -206,6 +207,67 @@ enum CleanupSelfTest {
         mut.assign(.regular(keyCode: 3, label: "F"), to: .command(.undo))
         check("hotkey assign + restore round-trips", mut.key(for: .undo).code == 3
               && { mut.restoreDefault(.command(.undo)); return mut.key(for: .undo).code == 6 }())
+    }
+
+    /// Deck microphone wiring (VDMIC). Source-text rows only: none of them makes a network call,
+    /// lists audio devices or opens Settings. They read the tree from the current directory.
+    private static func checkDeckMic(_ check: (String, Bool) -> Void) {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        func raw(_ path: String) -> String {
+            (try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)) ?? ""
+        }
+        // Source with block comments and whole-line or trailing line comments removed.
+        func code(_ path: String) -> String {
+            raw(path)
+                .replacingOccurrences(of: "(?s)/\\*.*?\\*/", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "(?m)(^|[ \\t])//.*$", with: "$1", options: .regularExpression)
+        }
+        let appDir = "Sources/App"
+        let appFiles = ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(appDir).path)) ?? [])
+            .filter { $0.hasSuffix(".swift") }.sorted()
+        func count(_ needle: String, in text: String) -> Int { NotesProbe.countOccurrences(of: needle, in: text) }
+        /// Total occurrences of `needle` across Sources/App, skipping the named files.
+        func appCount(_ needle: String, except: Set<String> = []) -> Int {
+            appFiles.filter { !except.contains($0) }.reduce(0) { $0 + count(needle, in: raw("\(appDir)/\($1)")) }
+        }
+
+        let recorder = code("Sources/App/AudioRecorder.swift")
+        let controller = code("Sources/App/DictationController.swift")
+        let signal = code("Sources/App/DeckMicSignal.swift")
+
+        check("deckmic-recorder-opt-in-only",
+              recorder.contains("var honorsDeckMic = false")
+              && count("DeckMicSignal.effectiveInputUID", in: recorder) == 1
+              && recorder.contains("honorsDeckMic ? DeckMicSignal.effectiveInputUID("))
+        check("deckmic-controller-opts-in-preview-does-not",
+              count("honorsDeckMic = true", in: controller) == 1
+              && !raw("Sources/App/SettingsWindow.swift").isEmpty
+              && !raw("Sources/App/SettingsWindow.swift").contains("honorsDeckMic")
+              && !raw("Sources/SelfTest/MicProbe.swift").isEmpty
+              && !raw("Sources/SelfTest/MicProbe.swift").contains("honorsDeckMic"))
+        check("deckmic-never-writes-input-setting",
+              raw("Sources/App/SettingsWindow.swift").contains("Settings.inputDeviceUID = ")
+              && appCount("Settings.inputDeviceUID = ", except: ["SettingsWindow.swift"]) == 0
+              && !appFiles.isEmpty)
+        check("deckmic-reader-bounded-loopback",
+              raw("Sources/App/DeckMicSignal.swift")
+                .contains("static let url = URL(string: \"http://127.0.0.1:8796/deckmic\")!")
+              && signal.contains("URLSessionConfiguration.ephemeral")
+              && signal.contains("timeoutIntervalForRequest = DeckMicModel.timeoutSeconds")
+              && signal.contains("timeoutIntervalForResource = DeckMicModel.timeoutSeconds")
+              && signal.contains("wait(timeout: .now() + DeckMicModel.timeoutSeconds")
+              && !raw("Sources/App/DeckMicSignal.swift").contains("URLSession.shared"))
+        let catchSlice = NotesProbe.sourceSlice(recorder, from: "catch where uid != userUID {",
+                                                to: "private func startCapture(uid: String) throws")
+        check("deckmic-start-failure-falls-back",
+              !catchSlice.isEmpty
+              && catchSlice.contains("stop()")
+              && catchSlice.contains("try startCapture(uid: userUID)")
+              && recorder.contains("do { try cap.start(deviceID: deviceID) } catch { cap.stop(); throw error }"))
+        check("deckmic-single-reader-path",
+              appCount("DeckMicSignal.read(", except: ["DeckMicSignal.swift"]) == 0
+              && appCount("DeckMicSignal.effectiveInputUID(", except: ["AudioRecorder.swift"]) == 0
+              && count("DeckMicSignal.effectiveInputUID(", in: raw("Sources/App/AudioRecorder.swift")) == 1)
     }
 
     private static func checkCorrectionDictionary(_ check: (String, Bool) -> Void) {
