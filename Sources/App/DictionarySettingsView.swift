@@ -16,6 +16,10 @@ final class DictionarySettingsView: NSView, NSTextFieldDelegate {
     private(set) var contentHeight: CGFloat = 0
     private let W: CGFloat
 
+    /// True while this editor's own save is posting `didChange`, so the observer ignores it.
+    private var persisting = false
+    private var dictionaryObserver: NSObjectProtocol?
+
     init(width: CGFloat) {
         self.W = width
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 10))
@@ -23,8 +27,19 @@ final class DictionarySettingsView: NSView, NSTextFieldDelegate {
         if hard.isEmpty { hard = [CorrectionEntry(heard: "", intended: "")] }
         if context.isEmpty { context = [CorrectionEntry(heard: "", intended: "")] }
         rebuild()
+        // `queue: nil` delivers on the posting thread, synchronously inside `update`, so `persisting` is
+        // still true for the editor's own save and only another writer's change reloads the lists.
+        dictionaryObserver = NotificationCenter.default.addObserver(
+            forName: CorrectionDictionary.didChange, object: nil, queue: nil) { [weak self] _ in
+            if Thread.isMainThread { self?.reloadFromStore() }
+            else { DispatchQueue.main.async { self?.reloadFromStore() } }
+        }
     }
     required init?(coder: NSCoder) { fatalError("no coder") }
+
+    deinit {
+        if let observer = dictionaryObserver { NotificationCenter.default.removeObserver(observer) }
+    }
 
     // MARK: layout
 
@@ -121,7 +136,11 @@ final class DictionarySettingsView: NSView, NSTextFieldDelegate {
 
     // MARK: edits
 
-    func controlTextDidEndEditing(_ obj: Notification) { syncAndPersist() }
+    /// While `reloadFromStore` ends an edit and swaps the lists, `persisting` is true and it saves the
+    /// merged lists itself, so this callback must not write the old fields over the store.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if !persisting { syncAndPersist() }
+    }
 
     @objc private func addRow(_ sender: NSButton) {
         syncFromFields()
@@ -151,6 +170,62 @@ final class DictionarySettingsView: NSView, NSTextFieldDelegate {
 
     private func syncAndPersist() {
         syncFromFields()
+        persisting = true
         CorrectionDictionary.shared.update(hardCoded: hard, contextAware: context)
+        persisting = false
+    }
+
+    /// Another writer (the add-to-dictionary pop-up) changed the dictionary: show its lists. A field still
+    /// being edited here is ended first, with `persisting` set so its end-editing callback does not save
+    /// the old lists over the new entry. If that edit changed anything, the edited lists are kept, the
+    /// entries the other writer added are appended, and the merge is saved once; otherwise the store wins.
+    private func reloadFromStore() {
+        guard !persisting else { return }
+        persisting = true
+        if isEditingOwnField { window?.makeFirstResponder(nil) }
+        let seenHard = hard, seenContext = context
+        syncFromFields()
+        let editedHard = hard, editedContext = context
+        // No later end-editing callback may read the old fields back over the store.
+        hardFields.removeAll(); contextFields.removeAll()
+        let storeHard = CorrectionDictionary.shared.hardCoded
+        let storeContext = CorrectionDictionary.shared.contextAware
+        let edited = editedHard.filter { $0.isUsable } != seenHard.filter { $0.isUsable }
+            || editedContext.filter { $0.isUsable } != seenContext.filter { $0.isUsable }
+        if edited {
+            let editedRows = editedHard + editedContext
+            hard = editedHard + Self.entriesAdded(store: storeHard, seen: seenHard, edited: editedRows)
+            context = editedContext + Self.entriesAdded(store: storeContext, seen: seenContext, edited: editedRows)
+        } else {
+            hard = storeHard
+            context = storeContext
+        }
+        if hard.isEmpty { hard = [CorrectionEntry(heard: "", intended: "")] }
+        if context.isEmpty { context = [CorrectionEntry(heard: "", intended: "")] }
+        rebuild()
+        persisting = false
+        if edited { syncAndPersist() }
+    }
+
+    /// True when the window's field editor is editing one of this editor's text fields.
+    private var isEditingOwnField: Bool {
+        guard let editor = window?.firstResponder as? NSText,
+              let field = editor.delegate as? NSTextField else { return false }
+        return field.isDescendant(of: self)
+    }
+
+    /// Store rows the editor has not seen (the other writer's additions), in store order, minus any whose
+    /// "When I say" text the edited lists already hold (the dictionary's duplicate rule).
+    private static func entriesAdded(store: [CorrectionEntry], seen: [CorrectionEntry],
+                                     edited: [CorrectionEntry]) -> [CorrectionEntry] {
+        var seenLeft = seen.filter { $0.isUsable }
+        let editedHeard = Set(edited.filter { $0.isUsable }.map { DictionaryAddModel.normalize($0.heard) })
+        var added: [CorrectionEntry] = []
+        for entry in store {
+            if let i = seenLeft.firstIndex(of: entry) { seenLeft.remove(at: i); continue }
+            if editedHeard.contains(DictionaryAddModel.normalize(entry.heard)) { continue }
+            added.append(entry)
+        }
+        return added
     }
 }

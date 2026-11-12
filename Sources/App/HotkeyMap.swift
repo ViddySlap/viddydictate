@@ -109,7 +109,7 @@ enum HotkeyCommand: String, CaseIterable, Codable {
         case .searchLocal:      return "Speak a question, search the web locally, answer it"
         case .searchGemini:     return "Speak a question, answer it with Gemini grounding"
         case .notes:            return "Open the sticky-notes scratchpad"
-        case .dictionary:       return "Open Settings on the Dictionary tab"
+        case .dictionary:       return "Add a word or phrase to the dictionary (pop-up)"
         case .bullseyeToggle:   return "Land each dictation where it started (on) or where you are when it ends (off)"
         case .history:          return "Open Settings on the History tab"
         case .recentDictations: return "Pop up the last three dictations"

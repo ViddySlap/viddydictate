@@ -67,6 +67,52 @@ final class CorrectionDictionary {
         NotificationCenter.default.post(name: CorrectionDictionary.didChange, object: nil)
     }
 
+    // MARK: add one entry (the add-to-dictionary pop-up)
+
+    /// What `adding` decided and the two lists to keep (unchanged unless the verdict is `.ok`).
+    struct AddOutcome {
+        let verdict: DictionaryAddModel.Verdict
+        let hardCoded: [CorrectionEntry]
+        let contextAware: [CorrectionEntry]
+    }
+
+    /// The usable rows of both columns as model entries, hard-coded first. A row with a blank side is not
+    /// saved by `update`, so it never counts as a duplicate.
+    static func addEntries(hardCoded: [CorrectionEntry], contextAware: [CorrectionEntry]) -> [DictionaryAddEntry] {
+        hardCoded.filter { $0.isUsable }.map { DictionaryAddEntry(heard: $0.heard, intended: $0.intended, column: .hardCoded) }
+            + contextAware.filter { $0.isUsable }.map { DictionaryAddEntry(heard: $0.heard, intended: $0.intended, column: .contextAware) }
+    }
+
+    /// Pure: ask the model whether the pair may be added; on `.ok` append the trimmed pair to the chosen
+    /// column only. Any other verdict returns both lists as they came in.
+    static func adding(heard: String, intended: String, column: DictionaryColumn,
+                       hardCoded: [CorrectionEntry], contextAware: [CorrectionEntry]) -> AddOutcome {
+        let verdict = DictionaryAddModel.verdict(
+            heard: heard, intended: intended,
+            entries: addEntries(hardCoded: hardCoded, contextAware: contextAware))
+        guard verdict == .ok else {
+            return AddOutcome(verdict: verdict, hardCoded: hardCoded, contextAware: contextAware)
+        }
+        let entry = CorrectionEntry(heard: heard.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    intended: intended.trimmingCharacters(in: .whitespacesAndNewlines))
+        switch column {
+        case .hardCoded:
+            return AddOutcome(verdict: verdict, hardCoded: hardCoded + [entry], contextAware: contextAware)
+        case .contextAware:
+            return AddOutcome(verdict: verdict, hardCoded: hardCoded, contextAware: contextAware + [entry])
+        }
+    }
+
+    /// The only new code path that writes the dictionary. The check and the append happen in one call on
+    /// the current lists, so a second quick call sees the first. Writes once, and only on `.ok`.
+    @discardableResult
+    func addIfNew(heard: String, intended: String, column: DictionaryColumn) -> DictionaryAddModel.Verdict {
+        let outcome = CorrectionDictionary.adding(heard: heard, intended: intended, column: column,
+                                                  hardCoded: hardCoded, contextAware: contextAware)
+        if outcome.verdict == .ok { update(hardCoded: outcome.hardCoded, contextAware: outcome.contextAware) }
+        return outcome.verdict
+    }
+
     // MARK: live consumers (used by the pipeline)
 
     /// Layer 1: run the hard-coded replacements on a fresh transcript.

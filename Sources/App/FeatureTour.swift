@@ -100,7 +100,7 @@ enum FeatureTour {
                 "Hold {wakeup} and tap {recentDictations} to see your last three takes.",
             ],
             nonObvious: "The Dictionary teaches Whisper how to spell your names and terms. "
-                + "Hold {wakeup} and tap {dictionary} to open it.",
+                + "Hold {wakeup} and tap {dictionary} to add a word or phrase. The full list is on the Dictionary tab in Settings.",
             commands: [.wakeup, .command(.lock), .command(.undo), .command(.dictionary), .command(.history), .command(.recentDictations)],
             settingsLink: .dictionary,
             liveStatus: .practice),

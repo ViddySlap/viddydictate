@@ -81,6 +81,7 @@ enum CleanupSelfTest {
         checkPromptPrepAndHotkeys(reporter.record)
         checkCorrectionDictionary(reporter.record)
         checkDeckMic(reporter.record)
+        checkDictionaryAdd(reporter.record)
         checkStickyNotesContracts(reporter.record)
         checkOneShotDescriptors(reporter.record)
         checkCriticalFailureDetectors(reporter.record)
@@ -308,6 +309,162 @@ enum CleanupSelfTest {
               CorrectionDictionary.whisperBias(
                 hardCoded: [CorrectionEntry(heard: "a", intended: "Foo"), CorrectionEntry(heard: "b", intended: "foo")],
                 contextAware: []).components(separatedBy: "Foo").count == 2)
+    }
+
+    /// Source text of a tree-root file with block and line comments removed (empty when unreadable).
+    private static func dictAddSource(_ path: String) -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        guard var text = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else { return "" }
+        for (pattern, options) in [("/\\*.*?\\*/", NSRegularExpression.Options.dotMatchesLineSeparators),
+                                   ("//.*$", NSRegularExpression.Options.anchorsMatchLines)] {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: options) else { return "" }
+            text = re.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length),
+                                               withTemplate: "")
+        }
+        return text
+    }
+
+    /// The text between the braces of the function whose header starts with `signature` (empty if absent).
+    private static func dictAddBody(_ signature: String, in text: String) -> String {
+        guard let sig = text.range(of: signature),
+              let open = text[sig.upperBound...].firstIndex(of: "{") else { return "" }
+        var depth = 0
+        var idx = open
+        while idx < text.endIndex {
+            if text[idx] == "{" { depth += 1 }
+            if text[idx] == "}" {
+                depth -= 1
+                if depth == 0 { return String(text[text.index(after: open)..<idx]) }
+            }
+            idx = text.index(after: idx)
+        }
+        return ""
+    }
+
+    private static func dictAddFlat(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// Add-to-dictionary pop-up (right-Option+D): the pure add path in the store, the copy, and the wiring.
+    private static func checkDictionaryAdd(_ check: (String, Bool) -> Void) {
+        typealias Entry = CorrectionEntry
+        let hard = [Entry(heard: "a", intended: "b"), Entry(heard: "c", intended: "")]
+        let ctx = [Entry(heard: "d", intended: "e"), Entry(heard: "", intended: "f")]
+
+        check("dict-add-entries-hard-first-usable-only",
+              CorrectionDictionary.addEntries(hardCoded: hard, contextAware: ctx)
+                == [DictionaryAddEntry(heard: "a", intended: "b", column: .hardCoded),
+                    DictionaryAddEntry(heard: "d", intended: "e", column: .contextAware)])
+
+        let toCtx = CorrectionDictionary.adding(heard: "  New Word \n", intended: " New  Spelling ",
+                                                column: .contextAware, hardCoded: hard, contextAware: ctx)
+        let toHard = CorrectionDictionary.adding(heard: "  New Word \n", intended: " New  Spelling ",
+                                                 column: .hardCoded, hardCoded: hard, contextAware: ctx)
+        let added = Entry(heard: "New Word", intended: "New  Spelling")
+        check("dict-add-appends-trimmed-to-chosen-column",
+              toCtx.verdict == .ok && toCtx.contextAware == ctx + [added] && toCtx.hardCoded == hard
+              && toHard.verdict == .ok && toHard.hardCoded == hard + [added] && toHard.contextAware == ctx)
+
+        let existing = [Entry(heard: "vidi dictate", intended: "ViddyDictate")]
+        let dup = CorrectionDictionary.adding(heard: "VIDI  Dictate", intended: "x", column: .contextAware,
+                                              hardCoded: existing, contextAware: [])
+        check("dict-add-duplicate-leaves-lists-unchanged",
+              dup.verdict == .duplicate(DictionaryAddEntry(heard: "vidi dictate", intended: "ViddyDictate",
+                                                           column: .hardCoded))
+              && dup.hardCoded == existing && dup.contextAware.isEmpty)
+
+        let blank = CorrectionDictionary.adding(heard: "z", intended: " ", column: .hardCoded,
+                                                hardCoded: existing, contextAware: [])
+        check("dict-add-blank-leaves-lists-unchanged",
+              blank.verdict == .blank && blank.hardCoded == existing && blank.contextAware.isEmpty)
+
+        let first = CorrectionDictionary.adding(heard: "q", intended: "r", column: .hardCoded,
+                                                hardCoded: [], contextAware: [])
+        let second = CorrectionDictionary.adding(heard: "q", intended: "r", column: .hardCoded,
+                                                 hardCoded: first.hardCoded, contextAware: first.contextAware)
+        var secondIsDuplicate = false
+        if case .duplicate = second.verdict { secondIsDuplicate = true }
+        check("dict-add-twice-second-is-duplicate",
+              first.verdict == .ok && secondIsDuplicate && second.hardCoded == first.hardCoded)
+
+        let unusable = CorrectionDictionary.adding(heard: "x", intended: "y", column: .hardCoded,
+                                                   hardCoded: [Entry(heard: "x", intended: "")], contextAware: [])
+        check("dict-add-unusable-row-not-a-duplicate", unusable.verdict == .ok)
+
+        // Source-text rows: comments stripped, function bodies cut.
+        let storeSrc = dictAddSource("Sources/App/CorrectionDictionary.swift")
+        let addBody = dictAddBody("func addIfNew(heard: String, intended: String, column: DictionaryColumn) -> DictionaryAddModel.Verdict",
+                                  in: storeSrc)
+        check("dict-add-if-new-persists-only-on-ok",
+              !addBody.isEmpty
+              && NotesProbe.countOccurrences(of: "update(hardCoded:", in: addBody) == 1
+              && dictAddFlat(addBody).contains("if outcome.verdict == .ok { update(hardCoded: outcome.hardCoded, contextAware: outcome.contextAware) }")
+              && addBody.contains("return outcome.verdict"))
+
+        let hotkeySrc = dictAddSource("Sources/App/HotkeyMap.swift")
+        let tourSrc = dictAddSource("Sources/App/FeatureTour.swift")
+        check("dict-add-hint-and-tour-copy",
+              hotkeySrc.contains("case .dictionary:       return \"Add a word or phrase to the dictionary (pop-up)\"")
+              && !hotkeySrc.contains("Open Settings on the Dictionary tab")
+              && tourSrc.contains("Hold {wakeup} and tap {dictionary} to add a word or phrase. The full list is on the Dictionary tab in Settings.")
+              && !tourSrc.contains("tap {dictionary} to open it."))
+
+        let controllerSrc = dictAddSource("Sources/App/DictationController.swift")
+        let handleBody = dictAddBody("private func handle(command: HotkeyCommand)", in: controllerSrc)
+        let showBody = dictAddBody("private func showDictionaryAdd()", in: controllerSrc)
+        check("dict-add-chord-opens-popup",
+              !handleBody.isEmpty && !showBody.isEmpty
+              && dictAddFlat(handleBody).contains("case .dictionary: showDictionaryAdd()")
+              && !handleBody.contains("callbacks.onOpenDictionary()")
+              && dictAddFlat(showBody).contains("if let panel = dictionaryAddPanel, panel.isVisible { panel.dismiss() return }")
+              && showBody.contains("dictionaryAddPanel = DictionaryAddPanel(onOpenDictionary: callbacks.onOpenDictionary)")
+              && showBody.contains("dictionaryAddPanel?.show()"))
+
+        let panelSrc = dictAddSource("Sources/App/DictionaryAddPanel.swift")
+        let dismissBody = dictAddBody("func dismiss()", in: panelSrc)
+        let localEscBody = dictAddBody("localKeyMonitor = NSEvent.addLocalMonitorForEvents(", in: panelSrc)
+        check("dict-add-panel-contract",
+              dictAddFlat(panelSrc).contains("override var canBecomeKey: Bool { true }")
+              && panelSrc.contains("CorrectionDictionary.shared.addIfNew(heard:")
+              && !panelSrc.contains("update(hardCoded:")
+              && panelSrc.contains("DictionaryAddModel.search(query:")
+              && panelSrc.contains("DictionaryAddModel.verdict(heard:")
+              && dismissBody.contains("removeMonitors()")
+              && NotesProbe.orderedBefore("event.window === self", "self.dismiss()", in: localEscBody))
+
+        let viewSrc = dictAddSource("Sources/App/DictionarySettingsView.swift")
+        let syncBody = dictAddBody("private func syncAndPersist()", in: viewSrc)
+        let reloadBody = dictAddBody("private func reloadFromStore()", in: viewSrc)
+        let deinitBody = dictAddBody("deinit", in: viewSrc)
+        let observerBody = dictAddBody("forName: CorrectionDictionary.didChange", in: viewSrc)
+        let endEditingBody = dictAddBody("func controlTextDidEndEditing(", in: viewSrc)
+        check("dict-add-settings-view-reloads",
+              dictAddFlat(viewSrc).contains("forName: CorrectionDictionary.didChange, object: nil, queue: nil)")
+              && reloadBody.contains("guard !persisting else { return }")
+              && NotesProbe.orderedBefore("persisting = true", "CorrectionDictionary.shared.update(hardCoded:", in: syncBody)
+              && NotesProbe.orderedBefore("CorrectionDictionary.shared.update(hardCoded:", "persisting = false", in: syncBody)
+              && deinitBody.contains("removeObserver(")
+              && dictAddFlat(observerBody).contains("if Thread.isMainThread { self?.reloadFromStore() }")
+              && NotesProbe.orderedBefore("persisting = true", "window?.makeFirstResponder(nil)", in: reloadBody)
+              && NotesProbe.orderedBefore("window?.makeFirstResponder(nil)", "CorrectionDictionary.shared.hardCoded", in: reloadBody)
+              && NotesProbe.orderedBefore("hardFields.removeAll()", "rebuild()", in: reloadBody)
+              && dictAddFlat(endEditingBody).contains("if !persisting { syncAndPersist() }"))
+
+        // Every call site of update(hardCoded: across the app sources: exactly the two allowed writers.
+        let appDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/App", isDirectory: true)
+        let appFiles = ((try? FileManager.default.contentsOfDirectory(atPath: appDir.path)) ?? [])
+            .filter { $0.hasSuffix(".swift") }.sorted()
+        var callers: [String] = []
+        for name in appFiles {
+            let n = NotesProbe.countOccurrences(of: "update(hardCoded:", in: dictAddSource("Sources/App/" + name))
+            if n > 0 { callers.append("\(name):\(n)") }
+        }
+        check("dict-add-single-writer-paths",
+              !appFiles.isEmpty
+              && callers == ["CorrectionDictionary.swift:1", "DictionarySettingsView.swift:1"]
+              && NotesProbe.countOccurrences(of: "update(hardCoded:", in: dictAddBody("func addIfNew(", in: storeSrc)) == 1
+              && NotesProbe.countOccurrences(of: "update(hardCoded:", in: syncBody) == 1)
     }
 
     private static func checkStickyNotesContracts(_ check: (String, Bool) -> Void) {
