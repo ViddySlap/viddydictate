@@ -74,6 +74,7 @@ final class DictationController {
     let notesDelivery: NotesDeliveryCoordinator
     private let callbacks: DictationControllerCallbacks
     private var recentDictationsPanel: RecentDictationsPanel?
+    private var dictionaryAddPanel: DictionaryAddPanel?
     private var target: DictationTarget?
     private var targetWasNotesWindow = false
     /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
@@ -379,7 +380,7 @@ final class DictationController {
         case .searchLocal:      armBuiltIn(.searchLocal, command: .searchLocal)
         case .searchGemini:     armBuiltIn(.searchGemini, command: .searchGemini)
         case .notes:            notes()
-        case .dictionary:       callbacks.onOpenDictionary()
+        case .dictionary:       showDictionaryAdd()
         case .bullseyeToggle:   toggleBullseye()
         case .history:          callbacks.onOpenHistory()
         case .recentDictations: showRecentDictations()
@@ -397,6 +398,19 @@ final class DictationController {
             recentDictationsPanel = RecentDictationsPanel(onOpenHistory: callbacks.onOpenHistory)
         }
         recentDictationsPanel?.show()
+    }
+
+    /// Right-Option+D toggles the add-to-dictionary pop-up: a second press closes it. (VDDICT moved the
+    /// Dictionary tab off this chord; the pop-up's Open Dictionary button and the Settings window reach it.)
+    private func showDictionaryAdd() {
+        if let panel = dictionaryAddPanel, panel.isVisible {
+            panel.dismiss()
+            return
+        }
+        if dictionaryAddPanel == nil {
+            dictionaryAddPanel = DictionaryAddPanel(onOpenDictionary: callbacks.onOpenDictionary)
+        }
+        dictionaryAddPanel?.show()
     }
 
     /// Route a matched custom-mode chord (by id) through the shared one-shot engine. Resolves the id to
