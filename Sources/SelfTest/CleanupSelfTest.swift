@@ -238,8 +238,8 @@ enum CleanupSelfTest {
 
         check("deckmic-recorder-opt-in-only",
               recorder.contains("var honorsDeckMic = false")
-              && count("DeckMicSignal.effectiveInputUID", in: recorder) == 1
-              && recorder.contains("honorsDeckMic ? DeckMicSignal.effectiveInputUID("))
+              && count("DeckMicSignal.effectiveInput(", in: recorder) == 1
+              && recorder.contains("honorsDeckMic ? DeckMicSignal.effectiveInput(userUID: userUID) : (uid: userUID,"))
         check("deckmic-controller-opts-in-preview-does-not",
               count("honorsDeckMic = true", in: controller) == 1
               && !raw("Sources/App/SettingsWindow.swift").isEmpty
@@ -265,10 +265,78 @@ enum CleanupSelfTest {
               && catchSlice.contains("stop()")
               && catchSlice.contains("try startCapture(uid: userUID)")
               && recorder.contains("do { try cap.start(deviceID: deviceID) } catch { cap.stop(); throw error }"))
+        let settings = code("Sources/App/SettingsWindow.swift")
+        let refreshSlice = NotesProbe.sourceSlice(settings, from: "private func refreshMicNote() {",
+                                                  to: "@objc private func resetDefaults")
+        let readerSlice = NotesProbe.sourceSlice(refreshSlice, from: "micNoteQueue.async {",
+                                                 to: "DispatchQueue.main.async {")
         check("deckmic-single-reader-path",
-              appCount("DeckMicSignal.read(", except: ["DeckMicSignal.swift"]) == 0
-              && appCount("DeckMicSignal.effectiveInputUID(", except: ["AudioRecorder.swift"]) == 0
-              && count("DeckMicSignal.effectiveInputUID(", in: raw("Sources/App/AudioRecorder.swift")) == 1)
+              appCount("DeckMicSignal.read(", except: ["DeckMicSignal.swift", "SettingsWindow.swift"]) == 0
+              && count("DeckMicSignal.read(", in: raw("Sources/App/SettingsWindow.swift")) == 1
+              && readerSlice.contains("DeckMicSignal.read(")
+              && appCount("DeckMicSignal.effectiveInput(", except: ["AudioRecorder.swift"]) == 0
+              && count("DeckMicSignal.effectiveInput(", in: raw("Sources/App/AudioRecorder.swift")) == 1
+              && appCount("effectiveInputUID", except: ["DeckMicSignal.swift"]) == 0)
+        check("deckmic-note-text-from-model",
+              count("micInUseLabel.stringValue =", in: settings) == 1
+              && settings.contains("DeckMicModel.nextTakeText(")
+              && settings.contains("DeckMicModel.activeText(")
+              && settings.contains("DeckMicModel.meterNoteNeeded(")
+              && settings.contains("micInUseLabel.stringValue = text"))
+        let deinitSlice = NotesProbe.sourceSlice(settings, from: "deinit {", to: "func show(tab:")
+        let closeSlice = NotesProbe.sourceSlice(settings, from: "func windowWillClose(", to: "private func build()")
+        let occlusionSlice = NotesProbe.sourceSlice(settings, from: "func windowDidChangeOcclusionState(",
+                                                    to: "func windowWillClose(")
+        let stopTimerSlice = NotesProbe.sourceSlice(settings, from: "private func stopMicNoteTimer() {",
+                                                    to: "private func setMicNote(")
+        let startTimerSlice = NotesProbe.sourceSlice(settings, from: "private func startMicNoteTimer() {",
+                                                     to: "private func stopMicNoteTimer() {")
+        let invalidateAt = startTimerSlice.range(of: "micNoteTimer?.invalidate()")?.lowerBound
+        let scheduleAt = startTimerSlice.range(of: "Timer.scheduledTimer(")?.lowerBound
+        check("deckmic-note-timer-lifecycle",
+              count("private var micNoteTimer: Timer?", in: settings) == 1
+              && count("Timer.scheduledTimer(", in: settings) == 1
+              && deinitSlice.contains("micNoteTimer?.invalidate()")
+              && closeSlice.contains("micNoteTimer?.invalidate()")
+              && occlusionSlice.contains("stopMicNoteTimer()")
+              && stopTimerSlice.contains("micNoteTimer?.invalidate()")
+              && invalidateAt != nil && scheduleAt != nil && invalidateAt! < scheduleAt!)
+        let mainHop = NotesProbe.sourceSlice(refreshSlice, from: "DispatchQueue.main.async {", to: "\n    }\n")
+        check("deckmic-note-generation-check",
+              !mainHop.isEmpty && mainHop.contains("gen == self.micNoteGeneration")
+              && refreshSlice.contains("let gen = micNoteGeneration"))
+        let busyAt = mainHop.range(of: "self.micNoteBusy = false")?.lowerBound
+        let genAt = mainHop.range(of: "gen == self.micNoteGeneration")?.lowerBound
+        let pendingAt = mainHop.range(of: "self.micNotePending")?.lowerBound
+        check("deckmic-note-busy-cleared",
+              busyAt != nil && genAt != nil && pendingAt != nil
+              && busyAt! < genAt! && genAt! < pendingAt!)
+        let observeSlice = NotesProbe.sourceSlice(settings, from: "forName: DictationInputState.didChange",
+                                                  to: "providerSignIn.onFinished")
+        check("deckmic-note-observes-input-state",
+              !observeSlice.isEmpty && observeSlice.contains("queue: .main")
+              && observeSlice.contains("[weak self]") && observeSlice.contains("refreshMicNote()"))
+        let waitAt = refreshSlice.range(of: "if window == nil { return }")?.lowerBound
+        let firstSetAt = refreshSlice.range(of: "setMicNote(")?.lowerBound
+        check("deckmic-note-waits-for-controls",
+              waitAt != nil && firstSetAt != nil && waitAt! < firstSetAt!)
+        let changedSlice = NotesProbe.sourceSlice(settings, from: "@objc private func micChanged() {",
+                                                  to: "private func startMicNoteTimer()")
+        check("deckmic-note-never-writes-setting",
+              count("Settings.inputDeviceUID = ", in: settings) == 1
+              && changedSlice.contains("Settings.inputDeviceUID = "))
+        let startSlice = NotesProbe.sourceSlice(recorder, from: "func start() throws {", to: "enum CaptureRoute")
+        let stopSlice = NotesProbe.sourceSlice(recorder, from: "func stop() {", to: "var hasAudio")
+        let captureAt = startSlice.range(of: "route = try startCapture(uid: userUID)")?.lowerBound
+        let guardAt = startSlice.range(of: "guard honorsDeckMic else { return }")?.lowerBound
+        let setAt = startSlice.range(of: "DictationInputState.set(")?.lowerBound
+        check("deckmic-recorder-publishes-active-device",
+              captureAt != nil && guardAt != nil && setAt != nil
+              && captureAt! < guardAt! && guardAt! < setAt!
+              && startSlice.contains("case .hal(let halUID, let deviceID):")
+              && startSlice.contains("AudioDevices.name(forDeviceID: deviceID)")
+              && startSlice.contains("AudioDevices.defaultInputName()")
+              && stopSlice.contains("if honorsDeckMic { DictationInputState.clear() }"))
     }
 
     private static func checkCorrectionDictionary(_ check: (String, Bool) -> Void) {

@@ -29,6 +29,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var previewing = false
 
     private var micPopup: NSPopUpButton!
+    private var micInUseLabel: NSTextField!
+    private var micMeterNote: NSTextField!
+    /// One 3 s timer keeps the idle prediction fresh while the window is visible.
+    private var micNoteTimer: Timer?
+    private var micNoteGeneration = 0
+    private var micNoteBusy = false
+    private var micNotePending = false
+    private let micNoteQueue = DispatchQueue(label: "ViddyDictate.settings.micnote")
+    private var inputStateToken: NSObjectProtocol?
     private var sensitivity: NSSlider!
     private var gain: NSSlider!
     private var reactivity: NSSlider!
@@ -81,12 +90,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             object: TextTransformRetryCenter.shared, queue: .main) { [weak self] _ in
                 self?.retryConfirmationPresenter.syncPendingRetry()
             }
+        inputStateToken = NotificationCenter.default.addObserver(
+            forName: DictationInputState.didChange, object: nil, queue: .main) { [weak self] _ in
+                self?.refreshMicNote()
+            }
         // A sign-in attempt is never assumed to have worked: when the flow returns, the surface re-MEASURES.
         providerSignIn.onFinished = { [weak self] in self?.setupView?.check() }
     }
     deinit {
         if let t = dictationToken { NotificationCenter.default.removeObserver(t) }
         if let t = retryToken { NotificationCenter.default.removeObserver(t) }
+        if let t = inputStateToken { NotificationCenter.default.removeObserver(t) }
+        micNoteTimer?.invalidate()
     }
 
     // MARK: show
@@ -112,6 +127,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
         // Don't grab the mic if a dictation is already running; the observer resumes it on end.
         if !Settings.isDictationActive { startPreview() }
+        startMicNoteTimer()
     }
 
     private func startPreview() {
@@ -124,8 +140,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         previewWave.stop(); previewRecorder.stop(); previewing = false
     }
 
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let w = window else { return }
+        if w.occlusionState.contains(.visible) { startMicNoteTimer() }
+        else { stopMicNoteTimer() }
+    }
+
     func windowWillClose(_ notification: Notification) {
         stopPreview()
+        micNoteTimer?.invalidate()
+        micNoteTimer = nil
+        micNoteGeneration += 1      // an in-flight read is dropped
+        micNotePending = false      // and nothing re-runs after close
         CodexConnectionController.shared.cancelDeviceLogin()
         // The wait sheet dies with its host window, so the poll behind it has to stop too rather than keep
         // spawning a status check every two seconds for the rest of its 15-minute bound.
@@ -301,10 +327,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         populateMicPopup()
         // Interop callout (ADR 0004, L3): local voice integrations follow this pin read-only through
         // shared defaults. ViddyDictate remains the only writer.
+        micInUseLabel = noteLine(y: 68, height: 18, x: L, width: WIN.width - 2 * L)
+        root.addSubview(micInUseLabel)
+        micMeterNote = noteLine(y: 86, height: 16, x: L, width: WIN.width - 2 * L)
+        micMeterNote.isHidden = true
+        root.addSubview(micMeterNote)
         root.addSubview(hint("Available read-only to local voice integrations.",
-                             y: 68, width: WIN.width - 2 * L, x: L))
+                             y: 104, width: WIN.width - 2 * L, x: L))
 
-        let dy: CGFloat = 58   // vertical shift applied to the meter rows below the mic picker + interop callout
+        let dy: CGFloat = 94   // vertical shift applied to the meter rows below the mic picker + interop callout
 
         sensitivity = slider(at: 44 + dy, value: Settings.sensitivity, action: #selector(metersChanged),
                              label: "Sensitivity", L: L, labelW: labelW, sx: sliderX, sw: sliderW, into: root)
@@ -413,6 +444,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             weight: bold ? .medium : .regular, color: .labelColor)
     }
 
+    /// A one-line grey note that truncates in the middle rather than wrapping.
+    private func noteLine(y: CGFloat, height: CGFloat, x: CGFloat, width: CGFloat) -> NSTextField {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10.5)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingMiddle
+        field.usesSingleLineMode = true
+        field.frame = NSRect(x: x, y: y, width: width, height: height)
+        return field
+    }
+
     private func hint(_ s: String, y: CGFloat, width: CGFloat, x: CGFloat) -> NSTextField {
         let field = SettingsSectionKit.wrapped(
             s, x: x, y: y, width: width, size: 10.5, color: .tertiaryLabelColor)
@@ -510,6 +552,68 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         Log.write("settings: input device -> \(uid.isEmpty ? "system default" : uid)")
         // Re-point the live preview at the chosen mic so the meter previews the right device.
         if previewing { stopPreview(); startPreview() }
+        refreshMicNote()
+    }
+
+    // MARK: which mic dictation uses
+
+    private func startMicNoteTimer() {
+        micNoteTimer?.invalidate()
+        micNoteTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.refreshMicNote()
+        }
+        refreshMicNote()
+    }
+
+    private func stopMicNoteTimer() {
+        micNoteTimer?.invalidate()
+        micNoteTimer = nil
+    }
+
+    private func setMicNote(_ text: String, meterNeeded: Bool) {
+        micInUseLabel.stringValue = text
+        micInUseLabel.toolTip = text
+        micMeterNote.stringValue = "The meter below uses the picker."
+        micMeterNote.isHidden = !meterNeeded
+    }
+
+    /// Shows the take's own device while one records; otherwise predicts the next take from a background
+    /// read. Never writes a setting and never touches the picker.
+    private func refreshMicNote() {
+        micNoteGeneration += 1
+        if window == nil { return }   // the controls are built on the first show()
+        if let active = DictationInputState.current {
+            setMicNote(DeckMicModel.activeText(name: active.name, followsDefault: active.followsDefault,
+                                               viaDeck: active.viaDeck),
+                       meterNeeded: DeckMicModel.meterNoteNeeded(nextDiffersFromPicker: false,
+                                                                 activeDiffersFromPicker: active.differsFromPicker))
+            return
+        }
+        guard window?.isVisible == true else { return }
+        if micNoteBusy { micNotePending = true; return }
+        micNoteBusy = true
+        let uid = Settings.inputDeviceUID
+        let gen = micNoteGeneration
+        micNoteQueue.async { [weak self] in
+            let signal = DeckMicSignal.read()
+            let devices = AudioDevices.inputDevices().map { DeckMicModel.InputDevice(uid: $0.uid, name: $0.name) }
+            let text = DeckMicModel.nextTakeText(signal: signal, devices: devices, userUID: uid,
+                                                 defaultName: AudioDevices.defaultInputName())
+            let differs = DeckMicModel.nextDiffersFromPicker(signal: signal, devices: devices, userUID: uid)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.micNoteBusy = false
+                if gen == self.micNoteGeneration, self.window?.isVisible == true,
+                   DictationInputState.current == nil {
+                    self.setMicNote(text, meterNeeded: DeckMicModel.meterNoteNeeded(
+                        nextDiffersFromPicker: differs, activeDiffersFromPicker: nil))
+                }
+                if self.micNotePending {
+                    self.micNotePending = false
+                    self.refreshMicNote()
+                }
+            }
+        }
     }
 
     @objc private func resetDefaults() {

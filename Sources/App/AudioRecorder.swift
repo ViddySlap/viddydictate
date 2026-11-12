@@ -69,20 +69,49 @@ final class AudioRecorder {
         // No pin (or the pin is unplugged) -> follow the system default via AVAudioEngine, which handles
         // default-device changes itself.
         let userUID = Settings.inputDeviceUID
-        let uid = honorsDeckMic ? DeckMicSignal.effectiveInputUID(userUID: userUID) : userUID
-        do { try startCapture(uid: uid) } catch where uid != userUID {
+        let deckInput = honorsDeckMic ? DeckMicSignal.effectiveInput(userUID: userUID) : (uid: userUID, choice: DeckMicModel.Choice.userSetting)
+        let uid = deckInput.uid, deckChoice = deckInput.choice
+        let route: CaptureRoute
+        var firstAttempt = true
+        do { route = try startCapture(uid: uid) } catch where uid != userUID {
             Log.write("audio.deckmic: BlackHole capture failed (\(error.localizedDescription)) — using the user's input setting")
             stop()
-            try startCapture(uid: userUID)
+            firstAttempt = false
+            route = try startCapture(uid: userUID)
         }
+        guard honorsDeckMic else { return }
+        // Publish the device this take actually opened (Settings shows it). Only the dictation recorder does.
+        var viaDeck = false
+        var differs = false
+        let name: String?
+        let followsDefault: Bool
+        switch route {
+        case .hal(let halUID, let deviceID):
+            if case .blackHole = deckChoice, firstAttempt { viaDeck = true; differs = halUID != userUID }
+            name = AudioDevices.name(forDeviceID: deviceID) ?? "unnamed input"
+            followsDefault = false
+        case .followDefault:
+            name = AudioDevices.defaultInputName()
+            followsDefault = true
+        }
+        DictationInputState.set(.init(name: name, followsDefault: followsDefault, viaDeck: viaDeck,
+                                      differsFromPicker: differs))
     }
 
-    private func startCapture(uid: String) throws {
+    /// The capture backend that actually started for a take.
+    enum CaptureRoute {
+        case hal(uid: String, deviceID: AudioDeviceID)
+        case followDefault
+    }
+
+    private func startCapture(uid: String) throws -> CaptureRoute {
         if !uid.isEmpty, let devID = AudioDevices.deviceID(forUID: uid) {
             try startHAL(deviceID: devID, uid: uid)
+            return .hal(uid: uid, deviceID: devID)
         } else {
             if !uid.isEmpty { Log.write("audio.device: pinned device absent (\(uid)) — following system default") }
             try startEngine()
+            return .followDefault
         }
     }
 
@@ -162,6 +191,7 @@ final class AudioRecorder {
     }
 
     func stop() {
+        if honorsDeckMic { DictationInputState.clear() }
         if engineRunning { engine.inputNode.removeTap(onBus: 0); engine.stop(); engineRunning = false }
         hal?.stop(); hal = nil
     }

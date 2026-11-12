@@ -39,14 +39,19 @@ enum DeckMicSignal {
         return box.get()
     }
 
-    /// The input uid this take should record from. Reads the signal once; when it is not on, returns
-    /// `userUID` without listing devices or logging.
-    static func effectiveInputUID(userUID: String) -> String {
+    /// The input uid and the choice behind it for this take. Reads the signal once; when it is not on,
+    /// returns `userUID` and `.userSetting` without listing devices or logging.
+    static func effectiveInput(userUID: String) -> (uid: String, choice: DeckMicModel.Choice) {
         let signal = read()
-        guard let signal = signal, signal.on else { return userUID }
+        guard let signal = signal, signal.on else { return (userUID, .userSetting) }
         let devices = AudioDevices.inputDevices().map { DeckMicModel.InputDevice(uid: $0.uid, name: $0.name) }
         let choice = DeckMicModel.choose(signal: signal, devices: devices)
         Log.write(DeckMicModel.describe(choice: choice))
-        return DeckMicModel.effectiveUID(userUID: userUID, choice: choice)
+        return (DeckMicModel.effectiveUID(userUID: userUID, choice: choice), choice)
+    }
+
+    /// The input uid this take should record from.
+    static func effectiveInputUID(userUID: String) -> String {
+        effectiveInput(userUID: userUID).uid
     }
 }

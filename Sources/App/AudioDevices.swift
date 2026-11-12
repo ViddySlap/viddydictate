@@ -29,6 +29,23 @@ enum AudioDevices {
         return inputDevices().first { $0.uid == uid }?.id
     }
 
+    /// The name of the device Core Audio opened for `id`; nil when it cannot be read. Read-only.
+    static func name(forDeviceID id: AudioDeviceID) -> String? { name(of: id) }
+
+    /// The name of the current system default input device, or nil. Read-only.
+    static func defaultInputName() -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
+            id != AudioDeviceID(kAudioObjectUnknown) else { return nil }
+        return name(of: id)
+    }
+
     // MARK: Core Audio property reads
 
     private static func allDeviceIDs() -> [AudioDeviceID] {
