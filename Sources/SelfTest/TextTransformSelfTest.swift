@@ -1156,6 +1156,25 @@ enum TextTransformSelfTest {
                 && cleanupRequest.userMessage == CleanupClient.wrap("CLEANUP INPUT")
                 && cleanupRequest.timeout == 13)
 
+        // VDASK-1: fidelity rules ride on the cleanup routes' request text, after the pinned base.
+        let fidelityBase = "BASE\n\nGLOSSARY"
+        let fidelityCleanupOK = LLMRouteID.cleanupRoutes.allSatisfy { r in
+            let out = CleanupFidelity.appending(to: fidelityBase, routeKey: r.rawValue)
+            return out.hasPrefix(fidelityBase) && out.hasSuffix(CleanupFidelity.rules)
+                && out.components(separatedBy: CleanupFidelity.rules).count == 2
+                && CleanupFidelity.appending(to: out, routeKey: r.rawValue) == out
+        }
+        check("fidelity rules: appended once, after the base, idempotent, on cleanupL1/L2/L3", fidelityCleanupOK)
+        let fidelityOthersOK = [LLMRouteID.promptPrep, .email, .searchRetrieval, .searchLocalSynth,
+                                .searchGeminiSynth, .custom("x")].allSatisfy {
+            CleanupFidelity.appending(to: fidelityBase, routeKey: $0.rawValue) == fidelityBase
+        }
+        check("fidelity rules: not appended for promptPrep, email, search or custom routes", fidelityOthersOK)
+        check("fidelity rules: makeCleanupRequest itself leaves the system prompt untouched",
+              DictationController.makeCleanupRequest(
+                route: .cleanupL1, input: "I", selected: cleanupBundle,
+                systemPrompt: fidelityBase, timeout: 1).systemPrompt == fidelityBase)
+
         let prepBundle = LLMProviderBundle.codex("prep-codex", effort: "high")
         let prepRequest = OneShotRegistry.makeCleanupSelectionRequest(
             input: "PREP INPUT", selected: prepBundle,

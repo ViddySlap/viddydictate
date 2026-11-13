@@ -1341,7 +1341,7 @@ final class DictationController {
                 local: Settings.cleanupTimeout, provider: bundle.provider)
             return Self.makeCleanupRequest(
                 route: route, input: raw, selected: bundle,
-                systemPrompt: providerPrompt, timeout: retryTimeout,
+                systemPrompt: CleanupFidelity.appending(to: providerPrompt, routeKey: route.rawValue), timeout: retryTimeout,
                 timeoutDetail: timeoutDetail)
         }
         TextTransformClient.transformResolved(
