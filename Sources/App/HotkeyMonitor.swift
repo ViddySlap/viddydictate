@@ -117,6 +117,8 @@ final class HotkeyMonitor {
     var onAskVoiceKey: ((Bool) -> Void)?
     static let slashKeyCode: Int64 = 44
     private var askVoiceKeyTaken = false
+    /// A taken press the tap timeout released early: its autorepeats and keyUp are still swallowed.
+    private var askVoiceReleasedEarly = false
 
     private(set) var wakeupHeld = false
     /// Set true once a regular-key wakeup's keyDown latched, so autorepeat keyDowns are swallowed
@@ -368,6 +370,10 @@ final class HotkeyMonitor {
             if askVoiceKeyTaken {
                 if autorepeat { return true }
                 releaseAskVoiceKeyIfTaken()              // a lost release: close the old press, then look at this one
+                askVoiceReleasedEarly = false            // (this press is new; the old one's swallow ends here)
+            } else if askVoiceReleasedEarly {
+                if autorepeat { return true }            // the rest of a press the tap timeout already released
+                askVoiceReleasedEarly = false            // a fresh press: the old physical press is over
             } else if autorepeat {
                 return false                             // the repeat of a press the app already got
             }
@@ -376,17 +382,26 @@ final class HotkeyMonitor {
             askVoiceSend(true)
             return true
         }
-        guard askVoiceKeyTaken else { return false }
-        askVoiceKeyTaken = false
-        askVoiceSend(false)
-        return true
+        if askVoiceKeyTaken {
+            askVoiceKeyTaken = false
+            askVoiceSend(false)
+            return true
+        }
+        if askVoiceReleasedEarly {                       // the keyUp of a press already released: swallowed, no second release
+            askVoiceReleasedEarly = false
+            return true
+        }
+        return false
     }
 
-    /// The tap was disabled (timeout or user input) or the pairing was lost: a taken `/` press whose release will
-    /// never arrive ends here, so the flow stops and transcribes (or discards) as it does on a release.
+    /// The tap was disabled (timeout or user input) or the pairing was lost: a taken `/` press whose release may
+    /// never arrive ends here, so the flow stops and transcribes (or discards) as it does on a release. The
+    /// physical key may still be down, so the rest of that press (autorepeats, keyUp) stays swallowed: only its
+    /// keyUp or a fresh non-autorepeat `/` press ends that.
     func releaseAskVoiceKeyIfTaken() {
         guard askVoiceKeyTaken else { return }
         askVoiceKeyTaken = false
+        askVoiceReleasedEarly = true
         askVoiceSend(false)
     }
     // END askvoice-step

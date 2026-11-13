@@ -1723,10 +1723,21 @@ final class DictationController {
     // to the same daemon and Whisper model a take uses): no second capture stack. The take's audio is stopped
     // while a card is up, so the recorder is free; the HUD and the take's state are not touched.
 
+    // BEGIN askvoice-mic (the Linux oracle cuts this region out and runs it)
+    /// Whether the mic grant lets a voice answer start: only `.authorized`. Not determined, denied and restricted
+    /// (which `Permissions.microphoneAuthorization()` reports as denied) all give "Mic unavailable.".
+    static func askVoiceMicGranted(_ status: MicrophoneAuthorization) -> Bool {
+        switch status {
+        case .authorized: return true
+        case .notDetermined, .denied: return false
+        }
+    }
+    // END askvoice-mic
+
     /// False when the mic cannot start (busy or permission missing).
     private func askVoiceStart() -> Bool {
         // AVAudioEngine commonly starts and delivers silence when the grant is missing, so ask the grant first.
-        let authorized = askSeams.micAuthorized?() ?? (Permissions.microphoneAuthorization() == .authorized)
+        let authorized = askSeams.micAuthorized?() ?? Self.askVoiceMicGranted(Permissions.microphoneAuthorization())
         guard authorized else {
             Log.write("ask-back voice: microphone not authorized")
             return false

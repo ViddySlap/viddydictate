@@ -1248,7 +1248,7 @@ enum AskBackControllerSelfTest {
                   rig.cardStatus == "Didn't catch that. Hold / to try again." && rig.state == "asking" && rig.hotkey.askCardActive
                     && rig.writes.isEmpty && rig.card.shown.count == 1 && rig.card.hides == 0)
             rig.holdSlash(0.5)
-            check("voice: the next hold clears the status and listens again", rig.voiceStarts == 2)
+            check("voice: the next hold starts the recorder again (the status is replaced at 300 ms, not cleared at the press)", rig.voiceStarts == 2)
             rig.answerVoice(nil)
             check("voice: a failed transcription is the same", rig.cardStatus == "Didn't catch that. Hold / to try again."
                     && rig.state == "asking" && rig.writes.isEmpty)
@@ -1392,8 +1392,28 @@ enum AskBackControllerSelfTest {
             rig.clock.advance(by: 0.5); traceSettle()
             rig.hotkey.releaseAskVoiceKeyIfTaken()
             traceSettle()
-            check("voice: the tap disabled under a held / sends the release to the flow (it transcribes) and clears the taken flag",
-                  rig.voiceDone.count == 1 && !rig.slash(down: false))
+            check("voice: the tap disabled under a held / sends the release to the flow (it transcribes) once",
+                  rig.voiceDone.count == 1)
+            let ar = rig.slash(down: true, autorepeat: true)
+            let arOpt = rig.slash(down: true, modifiersClear: false, autorepeat: true)
+            let up = rig.slash(down: false)
+            check("voice: the rest of that physical press stays swallowed (autorepeats, keyUp) and sends no second release",
+                  ar && arOpt && up && rig.voiceDone.count == 1 && rig.voiceDiscards == 0)
+            rig.hotkey.askCardActive = false
+            check("voice: after that a fresh / press with no card up passes, and so does its release",
+                  !rig.slash(down: true) && !rig.slash(down: false) && rig.voiceDone.count == 1)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            rig.hotkey.releaseAskVoiceKeyIfTaken()
+            traceSettle()
+            rig.answerVoice(nil)
+            check("voice: a fresh / press with a card up after a tap-disabled release starts a new answer normally",
+                  rig.slash(down: true) && rig.voiceStarts == 2 && rig.slash(down: false))
         }
         do {
             let rig = TraceRig(); defer { rig.close() }
@@ -1456,8 +1476,17 @@ enum AskBackControllerSelfTest {
             let stopBody = dc.range(of: "private func askVoiceStop(").map { String(dc[$0.lowerBound...].prefix(420)) } ?? ""
             check("wiring (S1): production askVoiceDiscard and askVoiceStop both stop the recorder (audio.stop())",
                   discardBody.contains("audio.stop()") && stopBody.contains("audio.stop()"))
-            check("wiring (S4): askVoiceStart checks the microphone grant before audio.start()",
-                  (dc.range(of: "Permissions.microphoneAuthorization() == .authorized")?.lowerBound ?? dc.endIndex)
+            let seamLine = "if let transcribe = askSeams.voiceTranscribe { transcribe(done); return }"
+            let afterSeam = (dc.range(of: seamLine).map { String(dc[$0.upperBound...].prefix(200)) } ?? "")
+                .drop(while: { $0 == "\n" || $0 == " " })
+            check("wiring (S1): in askVoiceStop audio.stop() is the first statement after the seam line, before the detectedSpeech guard",
+                  afterSeam.hasPrefix("audio.stop()"))
+            check("voice: the mic grant is true only for authorized (notDetermined and denied are not)",
+                  DictationController.askVoiceMicGranted(.authorized) && !DictationController.askVoiceMicGranted(.notDetermined)
+                    && !DictationController.askVoiceMicGranted(.denied))
+            check("wiring (S4): askVoiceStart checks the microphone grant before audio.start(), with the exact default expression",
+                  dc.contains("askSeams.micAuthorized?() ?? Self.askVoiceMicGranted(Permissions.microphoneAuthorization())")
+                    && (dc.range(of: "Permissions.microphoneAuthorization()")?.lowerBound ?? dc.endIndex)
                     < (dc.range(of: "try audio.start(); return true")?.lowerBound ?? dc.startIndex))
             check("wiring (S2, S3): handleKeyDown calls askVoiceModifiersClear with the three masks and the autorepeat flag, and the tap-disabled branch releases a taken /",
                   down.contains("Self.askVoiceModifiersClear(command: f.contains(.maskCommand)")
