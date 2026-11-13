@@ -126,6 +126,7 @@ private final class TraceRig {
     /// VDASK-4: the fake recorder and transcriber behind `askSeams.voice*`. `voiceDone` holds the transcribe
     /// completions the controller handed over, so a row decides when (and whether) each transcript arrives.
     var micOK = true
+    var micAuthorized = true
     var voiceStarts = 0
     var voiceDiscards = 0
     var voiceDone: [(String?) -> Void] = []
@@ -170,6 +171,7 @@ private final class TraceRig {
         ctl.askSeams.now = { [unowned self] in clock.now }
         ctl.askSeams.beginNewTake = { [unowned self] in newTakeStates.append(ctl.traceStateName) }
         ctl.askSeams.cardPanel = card
+        ctl.askSeams.micAuthorized = { [unowned self] in micAuthorized }
         ctl.askSeams.voiceStart = { [unowned self] in voiceStarts += 1; return micOK }
         ctl.askSeams.voiceDiscard = { [unowned self] in voiceDiscards += 1 }
         ctl.askSeams.voiceTranscribe = { [unowned self] done in voiceDone.append(done) }
@@ -214,8 +216,9 @@ private final class TraceRig {
     }
     /// The `/` key through the real monitor routing the tap calls. True means the key was swallowed.
     @discardableResult
-    func slash(down: Bool, modifiersClear: Bool = true) -> Bool {
-        let taken = hotkey.takeAskVoiceKey(keyCode: HotkeyMonitor.slashKeyCode, down: down, modifiersClear: modifiersClear)
+    func slash(down: Bool, modifiersClear: Bool = true, autorepeat: Bool = false) -> Bool {
+        let taken = hotkey.takeAskVoiceKey(keyCode: HotkeyMonitor.slashKeyCode, down: down, modifiersClear: modifiersClear,
+                                           autorepeat: autorepeat)
         traceSettle()
         return taken
     }
@@ -1201,16 +1204,20 @@ enum AskBackControllerSelfTest {
                   !rig.slash(down: true) && !rig.slash(down: false) && rig.voiceStarts == 0)
             rig.answerReview()
             let hudBefore = rig.hud.log.count
-            check("voice: with a card up a press of / is swallowed (its release too), and a Command or Control chord is not",
-                  rig.slash(down: true) && rig.slash(down: true) && rig.slash(down: false)
+            check("voice: with a card up a press of / is swallowed (its autorepeat and release too), and a Command or Control chord is not",
+                  rig.slash(down: true) && rig.slash(down: true, autorepeat: true) && rig.slash(down: false)
                     && !rig.slash(down: true, modifiersClear: false) && !rig.slash(down: false))
-            check("voice: a press shorter than the 300 ms mark is a tap: swallowed, records nothing, answers nothing",
-                  { rig.holdSlash(0.1); return rig.voiceStarts == 0 && rig.voiceDone.isEmpty && rig.writes.isEmpty && rig.state == "asking"
-                    && rig.hotkey.askCardActive && rig.cardStatus == nil }())
+            rig.voiceStarts = 0; rig.voiceDiscards = 0
+            check("voice: a 100 ms tap starts the recorder at the press and discards it (once), no transcription, the card unchanged",
+                  { rig.holdSlash(0.1); return rig.voiceStarts == 1 && rig.voiceDiscards == 1 && rig.voiceDone.isEmpty && rig.writes.isEmpty
+                    && rig.state == "asking" && rig.hotkey.askCardActive && rig.cardStatus == nil }())
+            rig.voiceStarts = 0; rig.voiceDiscards = 0
             rig.slash(down: true)
+            check("voice: the recorder is running at the press itself (start seen at t=0, before the 300 ms mark), no status yet",
+                  rig.voiceStarts == 1 && rig.cardStatus == nil)
             rig.clock.advance(by: 0.5); traceSettle()
-            check("voice: held past 300 ms it records and the card shows Listening, with the card and state unchanged",
-                  rig.voiceStarts == 1 && rig.cardStatus == "Listening\u{2026} release / to send" && rig.state == "asking"
+            check("voice: a 500 ms hold keeps the recording begun at the press and the card shows Listening, with the card and state unchanged",
+                  rig.voiceStarts == 1 && rig.voiceDiscards == 0 && rig.cardStatus == "Listening\u{2026} release / to send" && rig.state == "asking"
                     && rig.hotkey.askCardActive && rig.writes.isEmpty && rig.voiceDone.isEmpty)
             rig.slash(down: false)
             check("voice: release stops and transcribes once and the card shows Transcribing",
@@ -1295,10 +1302,10 @@ enum AskBackControllerSelfTest {
             rig.answerReview()
             rig.slash(down: true)
             rig.clock.advance(by: 0.3); traceSettle()
-            rig.clock.advance(by: 59.9); traceSettle()
-            check("voice: just under 60 s of recording it is still recording", rig.voiceStarts == 1 && rig.voiceDone.isEmpty)
+            rig.clock.advance(by: 59.6); traceSettle()
+            check("voice: just under 60 s after the press it is still recording", rig.voiceStarts == 1 && rig.voiceDone.isEmpty)
             rig.clock.advance(by: 0.2); traceSettle()
-            check("voice: at 60 s it stops and transcribes as if released, once", rig.voiceDone.count == 1 && rig.cardStatus == "Transcribing\u{2026}")
+            check("voice: 60 s after the press it stops and transcribes as if released, once", rig.voiceDone.count == 1 && rig.cardStatus == "Transcribing\u{2026}")
             rig.slash(down: false)
             check("voice: the late release does nothing more", rig.voiceDone.count == 1 && rig.writes.isEmpty && rig.state == "asking")
         }
@@ -1361,8 +1368,70 @@ enum AskBackControllerSelfTest {
             rig.answerReview()
             rig.slash(down: true)
             rig.key(TKey.esc, option: true)
-            check("voice: the card closed under a held / : its autorepeat passes (no card up) but its release is swallowed once",
-                  !rig.hotkey.askCardActive && !rig.slash(down: true) && rig.slash(down: false) && !rig.slash(down: false))
+            check("voice: the card closed under a held / : its autorepeat is still swallowed, its release is swallowed once and clears the flag",
+                  !rig.hotkey.askCardActive && rig.slash(down: true, autorepeat: true) && rig.slash(down: false) && !rig.slash(down: false))
+            check("voice: a fresh / press with no card up afterwards is not swallowed (nor its release)",
+                  !rig.slash(down: true) && !rig.slash(down: false))
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            check("voice: an autorepeat with right Option added mid-hold (modifiers not clear) is swallowed and starts nothing more",
+                  rig.slash(down: true, modifiersClear: false, autorepeat: true) && rig.voiceStarts == 1 && rig.voiceDone.isEmpty)
+            check("voice: the keyUp with Option down is swallowed and ends the answer once",
+                  rig.slash(down: false, modifiersClear: false) && rig.voiceDone.count == 1)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            rig.hotkey.releaseAskVoiceKeyIfTaken()
+            traceSettle()
+            check("voice: the tap disabled under a held / sends the release to the flow (it transcribes) and clears the taken flag",
+                  rig.voiceDone.count == 1 && !rig.slash(down: false))
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            rig.slash(down: true)          // a fresh press while the flag is set: the keyUp was lost
+            rig.clock.advance(by: 0.5); traceSettle()
+            check("voice: a fresh / press while the flag is still set closes the old press first (one transcription; the new press waits for it) and its release is still taken",
+                  rig.voiceDone.count == 1 && rig.voiceStarts == 1 && rig.slash(down: false) && !rig.slash(down: false))
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.1); traceSettle()
+            check("voice: Esc during the first 300 ms discards the recording once and the card stays up",
+                  rig.key(TKey.esc) && rig.voiceDiscards == 1 && rig.state == "asking" && rig.hotkey.askCardActive && rig.cardStatus == nil)
+            rig.slash(down: false)
+            check("voice: and the release after that Esc discards nothing more", rig.voiceDiscards == 1 && rig.voiceDone.isEmpty)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.micAuthorized = false
+            rig.holdSlash(0.5)
+            check("voice: microphone not authorized shows Mic unavailable and never starts the recorder",
+                  rig.voiceStarts == 0 && rig.cardStatus == "Mic unavailable." && rig.voiceDone.isEmpty && rig.state == "asking")
+        }
+        do {
+            check("voice: the modifier rule: Command, Control or Option each stop the voice key, Shift alone and none do not",
+                  !HotkeyMonitor.askVoiceModifiersClear(command: true, control: false, option: false)
+                    && !HotkeyMonitor.askVoiceModifiersClear(command: false, control: true, option: false)
+                    && !HotkeyMonitor.askVoiceModifiersClear(command: false, control: false, option: true)
+                    && HotkeyMonitor.askVoiceModifiersClear(command: false, control: false, option: false))
         }
         do {
             let rig = TraceRig(); defer { rig.close() }
@@ -1382,6 +1451,20 @@ enum AskBackControllerSelfTest {
             check("wiring (production recorder and transcriber): the voice answer uses the take's own recorder and transcribeAudioSnapshot",
                   src("DictationController.swift").contains("try audio.start(); return true")
                     && src("DictationController.swift").contains("transcribeAudioSnapshot { text, _, _ in done(text) }"))
+            let dc = src("DictationController.swift")
+            let discardBody = dc.range(of: "private func askVoiceDiscard()").map { String(dc[$0.lowerBound...].prefix(260)) } ?? ""
+            let stopBody = dc.range(of: "private func askVoiceStop(").map { String(dc[$0.lowerBound...].prefix(420)) } ?? ""
+            check("wiring (S1): production askVoiceDiscard and askVoiceStop both stop the recorder (audio.stop())",
+                  discardBody.contains("audio.stop()") && stopBody.contains("audio.stop()"))
+            check("wiring (S4): askVoiceStart checks the microphone grant before audio.start()",
+                  (dc.range(of: "Permissions.microphoneAuthorization() == .authorized")?.lowerBound ?? dc.endIndex)
+                    < (dc.range(of: "try audio.start(); return true")?.lowerBound ?? dc.startIndex))
+            check("wiring (S2, S3): handleKeyDown calls askVoiceModifiersClear with the three masks and the autorepeat flag, and the tap-disabled branch releases a taken /",
+                  down.contains("Self.askVoiceModifiersClear(command: f.contains(.maskCommand)")
+                    && down.contains("control: f.contains(.maskControl)") && down.contains("option: f.contains(.maskAlternate)")
+                    && down.contains("autorepeat: autorepeat")
+                    && (hot.range(of: "tap DISABLED")
+                        .map { String(hot[$0.lowerBound...].prefix(400)) } ?? "").contains("releaseAskVoiceKeyIfTaken()"))
         }
 
         print(check.summaryLine(prefix: "[askback-controller-selftest]"))

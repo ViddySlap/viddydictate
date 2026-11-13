@@ -219,6 +219,9 @@ final class DictationController {
         var voiceStart: (() -> Bool)?
         var voiceDiscard: (() -> Void)?
         var voiceTranscribe: ((_ done: @escaping (String?) -> Void) -> Void)?
+        /// Stands in for the microphone grant check (`Permissions.microphoneAuthorization()`), which reads the
+        /// real TCC state. nil in production.
+        var micAuthorized: (() -> Bool)?
     }
     var askSeams = AskBackSeams()
 
@@ -1722,6 +1725,12 @@ final class DictationController {
 
     /// False when the mic cannot start (busy or permission missing).
     private func askVoiceStart() -> Bool {
+        // AVAudioEngine commonly starts and delivers silence when the grant is missing, so ask the grant first.
+        let authorized = askSeams.micAuthorized?() ?? (Permissions.microphoneAuthorization() == .authorized)
+        guard authorized else {
+            Log.write("ask-back voice: microphone not authorized")
+            return false
+        }
         if let start = askSeams.voiceStart { return start() }
         do { try audio.start(); return true } catch {
             Log.write("ask-back voice: mic start ERROR: \(error.localizedDescription)")

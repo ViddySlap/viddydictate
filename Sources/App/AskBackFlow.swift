@@ -329,14 +329,14 @@ final class AskBackFlow {
         var voiceStatus: (UUID, AskVoiceStatus?) -> Void = { _, _ in }
     }
 
-    /// The voice answer's sub-state of `.asking`: `/` pressed (not yet a hold), recording, then transcribing.
+    /// The voice answer's sub-state of `.asking`: `/` pressed (recording already, not yet a 300 ms hold), recording, then transcribing.
     enum VoicePhase: Equatable { case idle, pressed, recording, transcribing }
 
     static let holdThreshold: TimeInterval = 0.300
     static let tapWindow: TimeInterval = 0.400
-    /// A `/` press shorter than this is a tap: nothing records. A hold longer starts recording.
+    /// A `/` press shorter than this is a tap: its audio is discarded. A hold longer shows the Listening status.
     static let voiceHoldThreshold: TimeInterval = 0.300
-    /// A voice answer stops by itself this long after recording started, as if the key were released.
+    /// A voice answer stops by itself this long after the press, as if the key were released.
     static let voiceCap: TimeInterval = 60
 
     private let context: Context
@@ -658,39 +658,39 @@ final class AskBackFlow {
 
     /// The `/` key went down. Returns false when no card is up (the key is then not the flow's). A press while
     /// another voice answer is in progress, while `/` is already down (autorepeat) or while a right-Option press
-    /// is down does nothing. Recording starts only when the press has lasted `voiceHoldThreshold`, so a tap of
-    /// the key records nothing.
+    /// is down does nothing. Recording starts AT THE PRESS (so the first word of a short answer is not lost); a
+    /// release before `voiceHoldThreshold` is a tap and discards the audio. The `Listening` status appears at the
+    /// threshold, not at the press, so a stray tap changes nothing the user can see on the card. A mic that
+    /// cannot start shows `Mic unavailable.` at once. The 60 s cap runs from the press.
     @discardableResult
     func voiceDown() -> Bool {
         guard phase == .asking, let card = cardID else { return false }
         guard !voiceKeyDown, voicePhase == .idle, !pressActive else { return true }
         cancelTaps()                       // pending right-Option taps give way, as they do to Return or a click
         voiceKeyDown = true
+        guard hooks.voiceStart() else {
+            hooks.voiceStatus(card, .micUnavailable)
+            return true
+        }
         voicePhase = .pressed
         let id = newID()
         voiceID = id
-        hooks.voiceStatus(card, nil)       // a "didn't catch that" line goes away on the next try
         voiceHoldCancel = schedule(Self.voiceHoldThreshold) { [weak self] in self?.voiceHoldFired(id, card) }
+        voiceCapCancel = schedule(Self.voiceCap) { [weak self] in self?.voiceCapFired(id) }
         return true
     }
 
     private func voiceHoldFired(_ id: UUID, _ card: UUID) {
         guard phase == .asking, card == cardID, voicePhase == .pressed, id == voiceID else { return }
         voiceHoldCancel = nil
-        guard hooks.voiceStart() else {
-            voicePhase = .idle
-            voiceID = nil
-            hooks.voiceStatus(card, .micUnavailable)
-            return
-        }
         voicePhase = .recording
         hooks.voiceStatus(card, .listening)
-        voiceCapCancel = schedule(Self.voiceCap) { [weak self] in self?.voiceCapFired(id) }
     }
 
     private func voiceCapFired(_ id: UUID) {
-        guard phase == .asking, voicePhase == .recording, id == voiceID else { return }
+        guard phase == .asking, voicePhase == .recording || voicePhase == .pressed, id == voiceID else { return }
         voiceCapCancel = nil
+        voiceHoldCancel?(); voiceHoldCancel = nil
         stopRecording()
     }
 
@@ -701,10 +701,12 @@ final class AskBackFlow {
         voiceKeyDown = false
         guard phase == .asking else { return false }
         switch voicePhase {
-        case .pressed:                      // a tap: nothing was recorded, nothing is sent
+        case .pressed:                      // a tap: the audio is thrown away, nothing is sent, the card is unchanged
             voiceHoldCancel?(); voiceHoldCancel = nil
+            voiceCapCancel?(); voiceCapCancel = nil
             voicePhase = .idle
             voiceID = nil
+            hooks.voiceDiscard()
         case .recording:
             voiceCapCancel?(); voiceCapCancel = nil
             stopRecording()
@@ -748,7 +750,7 @@ final class AskBackFlow {
     private func voiceReset() {
         voiceHoldCancel?(); voiceHoldCancel = nil
         voiceCapCancel?(); voiceCapCancel = nil
-        if voicePhase == .recording { hooks.voiceDiscard() }
+        if voicePhase == .recording || voicePhase == .pressed { hooks.voiceDiscard() }
         voicePhase = .idle
         voiceID = nil
     }

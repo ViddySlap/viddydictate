@@ -194,6 +194,7 @@ final class HotkeyMonitor {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             Log.write("tap DISABLED (\(type == .tapDisabledByTimeout ? "timeout" : "userInput")) — re-enabling")
             if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            releaseAskVoiceKeyIfTaken()      // the keyUp of a held `/` may have been lost with the tap
             return Unmanaged.passUnretained(event)
         }
 
@@ -282,9 +283,12 @@ final class HotkeyMonitor {
         if keyCode == returnKeyCode || keyCode == 76 { HotkeyMonitor.realReturnCount += 1 }
 
         let f = event.flags
+        let autorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if takeAskVoiceKey(keyCode: keyCode, down: true,
-                           modifiersClear: !f.contains(.maskCommand) && !f.contains(.maskControl)
-                               && !f.contains(.maskAlternate)) { return nil }
+                           modifiersClear: Self.askVoiceModifiersClear(command: f.contains(.maskCommand),
+                                                                       control: f.contains(.maskControl),
+                                                                       option: f.contains(.maskAlternate)),
+                           autorepeat: autorepeat) { return nil }
         if keyTakenBeforeWakeup(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate)) { return nil }
 
         let w = map.wakeup
@@ -345,22 +349,50 @@ final class HotkeyMonitor {
         return true
     }
 
+    // BEGIN askvoice-step (the Linux oracle cuts this region out and runs it)
+    /// Whether `/` may start a voice answer: Command, Control or Option held means the key is somebody's shortcut
+    /// (Cmd+/ toggles comments, Option+/ types a symbol) and passes. Shift alone is clear (`?`), as is no modifier.
+    static func askVoiceModifiersClear(command: Bool, control: Bool, option: Bool) -> Bool {
+        !command && !control && !option
+    }
+
     /// The `/` step of the tap: true means the key is swallowed. A press is taken only while a card is up and with
-    /// no Command, Control or Option held; autorepeat of a taken press is swallowed with it; a release is taken
-    /// exactly when its press was. Internal for the trace test.
-    func takeAskVoiceKey(keyCode: Int64, down: Bool, modifiersClear: Bool) -> Bool {
+    /// no Command, Control or Option held. A press that was taken stays taken: its autorepeat and its release are
+    /// swallowed whatever the card or the modifiers are by then, so a card that closes under a held `/` (the 60 s
+    /// cap, a transcript that answers the last card) or an Option pressed mid-hold never lets a `/` or a symbol
+    /// type into the focused app. A fresh (non-autorepeat) press while the flag is still set means the earlier
+    /// release was lost: the pairing is reset first (the flow is told the old press ended). Internal for the trace test.
+    func takeAskVoiceKey(keyCode: Int64, down: Bool, modifiersClear: Bool, autorepeat: Bool = false) -> Bool {
         guard keyCode == Self.slashKeyCode else { return false }
         if down {
+            if askVoiceKeyTaken {
+                if autorepeat { return true }
+                releaseAskVoiceKeyIfTaken()              // a lost release: close the old press, then look at this one
+            } else if autorepeat {
+                return false                             // the repeat of a press the app already got
+            }
             guard askCardActive, modifiersClear else { return false }
-            if askVoiceKeyTaken { return true }          // autorepeat
             askVoiceKeyTaken = true
-            DispatchQueue.main.async { self.onAskVoiceKey?(true) }
+            askVoiceSend(true)
             return true
         }
         guard askVoiceKeyTaken else { return false }
         askVoiceKeyTaken = false
-        DispatchQueue.main.async { self.onAskVoiceKey?(false) }
+        askVoiceSend(false)
         return true
+    }
+
+    /// The tap was disabled (timeout or user input) or the pairing was lost: a taken `/` press whose release will
+    /// never arrive ends here, so the flow stops and transcribes (or discards) as it does on a release.
+    func releaseAskVoiceKeyIfTaken() {
+        guard askVoiceKeyTaken else { return }
+        askVoiceKeyTaken = false
+        askVoiceSend(false)
+    }
+    // END askvoice-step
+
+    private func askVoiceSend(_ down: Bool) {
+        DispatchQueue.main.async { self.onAskVoiceKey?(down) }
     }
 
     /// The wakeup key went down or up. While a card is up the press belongs to the card (decided now, on the tap

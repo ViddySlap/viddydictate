@@ -395,17 +395,17 @@ enum AskBackFlowSelfTest {
         do {
             let h = H(); h.flow.start(); h.review([H.question(1), H.question(2)])
             h.flow.voiceDown(); h.clock.advance(to: 0.299)
-            check("voice: nothing records before 300 ms", h.voiceStarts == 0)
+            check("voice: the recorder starts at the press, the Listening status waits for 300 ms", h.voiceStarts == 1 && h.statuses.last != .listening)
             h.clock.advance(to: 0.5)
-            check("voice: held past 300 ms it records with the Listening status",
-                  h.voiceStarts == 1 && h.statuses.last == .listening && h.flow.phase == .asking)
+            check("voice: held past 300 ms it shows the Listening status on the recording begun at the press",
+                  h.voiceStarts == 1 && h.voiceDiscards == 0 && h.statuses.last == .listening && h.flow.phase == .asking)
             h.flow.voiceUp()
             check("voice: release stops and transcribes once", h.voiceStops.count == 1 && h.statuses.last == .transcribing)
             h.flow.voiceTranscript(h.voiceStops[0], text: " Monday \n")
             check("voice: the trimmed transcript is the answer, method voice, and card 2 opens",
                   h.flow.answers[0] == AskBackAnswer(text: "Monday", how: .voice) && h.cards.count == 2 && h.writes.isEmpty)
             h.holdSlash(0.1)
-            check("voice: a 100 ms tap records nothing and sends nothing", h.voiceStarts == 1 && h.voiceStops.count == 1 && h.flow.voicePhase == .idle)
+            check("voice: a 100 ms tap discards its recording and sends nothing", h.voiceStarts == 2 && h.voiceDiscards == 1 && h.voiceStops.count == 1 && h.flow.voicePhase == .idle)
             h.holdSlash(0.5)
             h.flow.voiceTranscript(h.voiceStops[0], text: "stale")
             check("voice: a stale transcript is ignored", h.writes.isEmpty && h.flow.answers[1] == nil)
@@ -424,10 +424,10 @@ enum AskBackFlowSelfTest {
         }
         do {
             let h = H(); h.flow.start(); h.review([H.question(1)])
-            h.flow.voiceDown(); h.clock.advance(to: 0.3); h.clock.advance(to: 60.29)
+            h.flow.voiceDown(); h.clock.advance(to: 0.3); h.clock.advance(to: 59.9)
             check("voice: just under the 60 s cap it is still recording", h.voiceStops.isEmpty)
-            h.clock.advance(to: 60.31)
-            check("voice: at 60 s it stops as if released", h.voiceStops.count == 1 && h.statuses.last == .transcribing)
+            h.clock.advance(to: 60.1)
+            check("voice: 60 s after the press it stops as if released", h.voiceStops.count == 1 && h.statuses.last == .transcribing)
         }
         do {
             let h = H(); h.flow.start(); h.review([H.question(1)])
