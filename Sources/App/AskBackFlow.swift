@@ -627,22 +627,31 @@ final class AskBackFlow {
 ///   landing). A result never pastes while one is open, so "finished" means the take is over AND its delivery
 ///   completed.
 /// - `flowBusy(Bool)`: a card, an A/B picker or a selection one-shot holds the stage.
+/// - `oneShotUp` (an input of `setInputs`): the selection one-shot's busy latch. Every entry in the line is
+///   marked "one-shot seen" at any look that finds it up (a queue event, a poll, the result becoming ready). A
+///   marked entry stays in History only when its turn comes, whatever that one-shot did (landed, parked on the
+///   clipboard, cancelled): one plain rule, no telling a landing from a cancel.
 /// Nothing is persisted: a result that has not pasted when the app quits is not pasted on relaunch.
 struct AskBackHeldQueue {
-    struct Paste: Equatable { let id: UUID; let text: String }
+    /// `oneShotSeen`: the entry waited while a selection one-shot's latch was up, so it does not paste.
+    struct Paste: Equatable {
+        let id: UUID; let text: String; let oneShotSeen: Bool
+        init(id: UUID, text: String, oneShotSeen: Bool = false) { self.id = id; self.text = text; self.oneShotSeen = oneShotSeen }
+    }
 
     private enum Slot { case expected, ready(String), failed }
-    private var slots: [(id: UUID, slot: Slot)] = []
+    private var slots: [(id: UUID, slot: Slot, seen: Bool)] = []
     private var takeLive = false
     private var busy = false
     private var delivering = false
+    private var oneShotUp = false
 
     var isEmpty: Bool { slots.isEmpty }
     var count: Int { slots.count }
 
     mutating func resultExpected(_ id: UUID) -> [Paste] {
         guard !slots.contains(where: { $0.id == id }) else { return [] }
-        slots.append((id, .expected))
+        slots.append((id, .expected, oneShotUp))
         return drain()
     }
 
@@ -658,20 +667,6 @@ struct AskBackHeldQueue {
         return drain()
     }
 
-    /// A result is ready and waiting its turn (a selection one-shot's wait watches this).
-    var hasReady: Bool { slots.contains { if case .ready = $0.slot { return true } else { return false } } }
-
-    /// Takes every ready result out of the line without pasting it (it stays in History only, written elsewhere).
-    /// A result whose write has not ended yet keeps its slot and its turn.
-    mutating func dropReady() -> [UUID] {
-        var ids: [UUID] = []
-        slots.removeAll { entry in
-            if case .ready = entry.slot { ids.append(entry.id); return true }
-            return false
-        }
-        return ids
-    }
-
     mutating func takeStarted() -> [Paste] { takeLive = true; return [] }
 
     mutating func takeFinished() -> [Paste] { takeLive = false; return drain() }
@@ -680,10 +675,12 @@ struct AskBackHeldQueue {
 
     mutating func deliveryOpen(_ on: Bool) -> [Paste] { delivering = on; return drain() }
 
-    /// Level-triggered form for the controller: set all three inputs from what is true now, without releasing.
-    /// Every event it feeds is preceded by this, so the queue never acts on a stale "no take is live".
-    mutating func setInputs(takeLive: Bool, busy: Bool, delivering: Bool) {
-        self.takeLive = takeLive; self.busy = busy; self.delivering = delivering
+    /// Level-triggered form for the controller: set the inputs from what is true now, without releasing.
+    /// Every event it feeds is preceded by this, so the queue never acts on a stale "no take is live". A latch
+    /// that is up marks every entry in the line "one-shot seen".
+    mutating func setInputs(takeLive: Bool, busy: Bool, delivering: Bool, oneShotUp: Bool = false) {
+        self.takeLive = takeLive; self.busy = busy; self.delivering = delivering; self.oneShotUp = oneShotUp
+        if oneShotUp { for i in slots.indices { slots[i].seen = true } }
     }
 
     /// Looks at the head of the line again with the inputs as last set.
@@ -701,7 +698,7 @@ struct AskBackHeldQueue {
                 guard !takeLive, !busy, !delivering else { return [] }
                 slots.removeFirst()
                 takeLive = true
-                return [Paste(id: head.id, text: text)]
+                return [Paste(id: head.id, text: text, oneShotSeen: head.seen)]
             }
         }
         return []
@@ -724,32 +721,15 @@ enum AskBackHeldPolicy {
         receiptClipboardOnly && changeCountAtClose == nowChangeCount
     }
 
-    enum Turn: Equatable { case paste, skipSuspect, skipParked }
+    enum Turn: Equatable { case paste, skipSuspect, skipParked, skipOneShot }
 
-    /// What a held result does when its turn comes. A result the rogue-output check flags, or one that would
-    /// overwrite text the delivery in front parked on the clipboard for a manual Cmd+V, stays in History only.
-    static func turn(suspect: Bool, parked: Bool) -> Turn {
+    /// What a held result does when its turn comes. A result that waited while a selection one-shot was running
+    /// (whatever it did), one the rogue-output check flags, or one that would overwrite text the delivery in
+    /// front parked on the clipboard for a manual Cmd+V, stays in History only.
+    static func turn(suspect: Bool, parked: Bool, oneShotSeen: Bool = false) -> Turn {
+        if oneShotSeen { return .skipOneShot }
         if suspect { return .skipSuspect }
         if parked { return .skipParked }
         return .paste
-    }
-}
-
-/// A held result that waited behind a selection one-shot (its busy latch was up while the result was ready) is
-/// released to History only when that one-shot ends without landing (cancelled at its level picker, failed,
-/// nothing selected). A one-shot that lands opens a delivery, which counts as the delivery in front. Pure: the
-/// controller feeds it the latch, whether a result is ready, and how many deliveries have ever begun.
-struct AskBackOneShotWatch {
-    private var begunWhenSeen: Int?
-
-    /// True once, when the latch has dropped and no delivery has begun since a ready result first saw it up.
-    mutating func observe(latch: Bool, hasReady: Bool, deliveriesBegun: Int) -> Bool {
-        if latch {
-            if hasReady, begunWhenSeen == nil { begunWhenSeen = deliveriesBegun }
-            return false
-        }
-        guard let seen = begunWhenSeen else { return false }
-        begunWhenSeen = nil
-        return deliveriesBegun == seen
     }
 }

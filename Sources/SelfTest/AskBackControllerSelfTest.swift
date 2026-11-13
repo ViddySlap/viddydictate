@@ -874,29 +874,32 @@ enum AskBackControllerSelfTest {
                   rig.hook.finals == ["Earlier text.", traceNewText, "Held one.", "Held two."])
         }
         do {
-            // M2: a selection one-shot holds the user's selection from capture to landing.
+            // One plain one-shot rule: an entry that was waiting at any look that found the one-shot latch up stays in
+            // History only when its turn comes, whatever that one-shot did. Landing at a field (a delivery opens).
             let rig = TraceRig(); defer { rig.close() }
             var latch = false
             rig.ctl.askSeams.oneShotLatch = { latch }
-            _ = rig.detachedOne()
+            let old = rig.detachedOne()
             rig.release()                                        // the new take ends (nothing heard): controller idle
             latch = true                                         // the one-shot has captured the selection
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.clock.advance(by: 3)
-            check("M2: a held result ready while a selection one-shot is busy waits, with no take live",
+            check("one-shot rule: a held result ready while a selection one-shot is busy waits, with no take live",
                   rig.state == "idle" && rig.hook.finals.isEmpty && rig.heldCount() == 1)
             let landing = rig.ctl.traceBeginDelivery()           // the one-shot's own landing starts as its latch drops
             latch = false
             rig.clock.advance(by: 2)
-            check("M2: the one-shot's latch has dropped but its landing has not completed: the held result still waits",
+            check("one-shot rule: the latch has dropped but the landing is still open: the held result still waits its turn",
                   rig.hook.finals.isEmpty && rig.heldCount() == 1)
             landing()
-            rig.clock.advance(by: 0)
-            check("M2: it pastes only after the one-shot's landing completes", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+            rig.clock.advance(by: 5)
+            let e = rig.entries(old)
+            check("one-shot rule: a one-shot that lands at a field: the held result is History only, nothing is pasted or attempted",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0
+                    && e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
         }
         do {
-            // Cancelled one-shot: a held result that waited behind a selection one-shot whose latch then drops with no
-            // landing (cancelled at the level picker, failed, nothing selected) stays in History only; the line moves on.
+            // Landing at a note or a search answer: no delivery opens at all. Same outcome.
             let rig = TraceRig(); defer { rig.close() }
             var latch = false
             rig.ctl.askSeams.oneShotLatch = { latch }
@@ -905,52 +908,98 @@ enum AskBackControllerSelfTest {
             latch = true
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.clock.advance(by: 1)
-            check("cancelled one-shot: while the latch is up the held result waits", rig.hook.finals.isEmpty && rig.heldCount() == 1)
-            latch = false                                        // the one-shot ended without a landing (cancelled)
-            rig.clock.advance(by: 0.5)
-            let e = rig.entries(old)
-            check("cancelled one-shot: when the latch drops with no landing the held result does not paste and nothing is attempted",
-                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0)
-            check("cancelled one-shot: the result stays in History (done, its text)",
-                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
+            latch = false                                        // landed at a note: the latch drops, no delivery was opened
             rig.clock.advance(by: 5)
-            check("cancelled one-shot: and it does not paste later either", rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty)
+            check("one-shot rule: a one-shot that lands at a note (no delivery opened): the held result is History only",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0 && rig.entries(old).first?.text == traceCleaned)
         }
         do {
-            // Cancelled one-shot, two results: the one that waited is History only; one whose write ends later keeps its turn.
+            // The one-shot could not reach its field and put its output on the clipboard: the held result must not paste
+            // over it (or over the still-selected text).
             let rig = TraceRig(); defer { rig.close() }
             var latch = false
             rig.ctl.askSeams.oneShotLatch = { latch }
-            let (first, _) = twoDetached(rig)
+            let old = rig.detachedOne()
+            rig.release()
+            latch = true
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.clock.advance(by: 1)
+            let landing = rig.ctl.traceBeginDelivery()
+            rig.pasteboard.clearContents()
+            rig.pasteboard.setString("the one-shot's output", forType: .string)
+            latch = false
+            landing()
+            rig.clock.advance(by: 5)
+            check("one-shot rule: a one-shot that falls back to the clipboard: the held result is History only and the output stays on the clipboard",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0
+                    && rig.pasteboard.string(forType: .string) == "the one-shot's output" && rig.entries(old).first?.text == traceCleaned)
+        }
+        do {
+            // Cancelled one-shot (level picker closed, failed, nothing selected): History only, and it does not paste later.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            let old = rig.detachedOne()
+            rig.release()
+            latch = true
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.clock.advance(by: 1)
+            check("one-shot rule: while the latch is up the held result waits", rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            latch = false                                        // the one-shot ended without a landing (cancelled)
+            rig.clock.advance(by: 5)
+            let e = rig.entries(old)
+            check("one-shot rule: a cancelled one-shot: the held result is History only, nothing is attempted, now or later",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0
+                    && e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
+        }
+        do {
+            // S1: the result becomes ready with the latch up and the latch drops before the next poll.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            let old = rig.detachedOne()
+            rig.release()
+            latch = true
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            latch = false                                        // no clock advance in between: no poll has run
+            rig.clock.advance(by: 5)
+            check("one-shot rule: a result made ready with the latch up and the latch dropped before the next poll is History only",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0 && rig.entries(old).first?.text == traceCleaned)
+        }
+        do {
+            // Two results: both waited through the one-shot (the second was queued at detach), so both are History only,
+            // including the one whose write ended after the latch dropped.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            let (first, second) = twoDetached(rig)
             rig.release()
             latch = true
             rig.writes[0].done(.ok("Held one.")); traceSettle()
             rig.clock.advance(by: 1)
             latch = false
             rig.clock.advance(by: 0.5)
-            check("cancelled one-shot: the ready result is History only, the one still writing keeps its slot",
-                  rig.hook.finals.isEmpty && rig.heldCount() == 1 && rig.entries(first).first?.text == "Held one.")
             rig.writes[1].done(.ok("Held two.")); traceSettle()
-            rig.clock.advance(by: 1)
-            check("cancelled one-shot: the later result pastes in its turn", rig.hook.finals == ["Held two."] && rig.heldCount() == 0)
+            rig.clock.advance(by: 5)
+            check("one-shot rule: every entry queued while the latch was seen up is History only, the later write included",
+                  rig.hook.finals.isEmpty && rig.heldCount() == 0
+                    && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two.")
         }
         do {
-            // A one-shot that lands counts as the delivery in front: the held result pastes after its completion.
+            // Control: a one-shot that ended before the result was queued does not mark it; no one-shot during its wait
+            // means it pastes after the new take.
             let rig = TraceRig(); defer { rig.close() }
             var latch = false
             rig.ctl.askSeams.oneShotLatch = { latch }
-            _ = rig.detachedOne()
-            rig.release()
             latch = true
-            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.clock.advance(by: 1)
-            let landing = rig.ctl.traceBeginDelivery()
             latch = false
-            rig.clock.advance(by: 0.5)
-            check("landed one-shot: the held result still waits while the landing is open", rig.hook.finals.isEmpty && rig.heldCount() == 1)
-            landing()
-            rig.clock.advance(by: 0)
-            check("landed one-shot: it pastes after the landing completes", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            check("one-shot rule control: a held result with no one-shot during its wait still pastes after the new take",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0)
         }
         do {
             // M2: the gap between a one-shot discarding its incidental take and setting its latch (the selection copy).
@@ -1061,6 +1110,8 @@ enum AskBackControllerSelfTest {
             check("S2 source shape: the click-away park closes its delivery, and every receipt is recorded when a delivery finishes",
                   controller.contains("settled()   // nothing pastes now") && controller.contains("case .clipboard(let count): self.askLastClipboardOnly = true")
                     && controller.contains("case .pastePark: self.askLastClipboardOnly = true"))
+            check("S2 retry: the explicit cleanup retry's clipboard replacement after a clipboard-only delivery refreshes the record's changeCount",
+                  controller.contains("TargetResolver.copyToClipboard(cleaned)\n                    askLastClosedCount = NSPasteboard.general.changeCount"))
         }
 
         // ---------------------------------------------------------------- S4, S5, S6 and tap wiring that no headless row reaches

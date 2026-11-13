@@ -252,9 +252,6 @@ final class DictationController {
     /// VDASK-3: what the last delivery left on the clipboard when it closed, and the pasteboard changeCount then.
     private var askLastClipboardOnly = false
     private var askLastClosedCount = 0
-    /// Deliveries ever begun, and the watch that releases a result a cancelled one-shot kept waiting.
-    private var askDeliveriesBegun = 0
-    private var askOneShotWatch = AskBackOneShotWatch()
 
     /// The notes-delivery JS-bridge callbacks (`onSnapshotNoteTarget` / `onDeliverToNoteTarget` /
     /// `onInsertIntoActiveNote` / `onSetBullseyeAtCaret` / `onDeliverToBullseye` / `onBullseyeStateChanged` /
@@ -1575,32 +1572,21 @@ final class DictationController {
 
     private func heldOneShotLatch() -> Bool { askSeams.oneShotLatch?() ?? oneShot.isBusy }
 
-    private func heldOneShotHolds() -> Bool { heldOneShotLatch() || heldNow() < askGraceUntil }
-
     /// Feeds the queue one event with its inputs freshly read (a take is live, something is busy, a delivery is
     /// still open), then pastes what it releases. A waiting result that is held only by the one-shot latch is
-    /// looked at again on a timer, because the registry has no release callback.
+    /// looked at again on a timer (while the line is not empty), because the registry has no release callback and
+    /// the one-shot mark needs a look at the latch.
     private func heldApply(_ event: (inout AskBackHeldQueue) -> [AskBackHeldQueue.Paste]) {
-        askHeld.setInputs(takeLive: state != .idle, busy: heldBusy(), delivering: askDeliveries > 0)
-        heldWatchOneShot()
+        askHeld.setInputs(takeLive: state != .idle, busy: heldBusy(), delivering: askDeliveries > 0,
+                          oneShotUp: heldOneShotLatch())
         let pastes = event(&askHeld)
-        heldWatchOneShot()
         for paste in pastes { heldPaste(paste) }
-        if !askHeld.isEmpty, askHeldPoll == nil, heldOneShotHolds() {
+        if !askHeld.isEmpty, askHeldPoll == nil {
             askHeldPoll = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPollInterval) { [weak self] in
                 self?.askHeldPoll = nil
                 self?.heldApply { $0.poke() }
             }
         }
-    }
-
-    /// A result that waited behind a selection one-shot which then ended without landing stays in History only.
-    private func heldWatchOneShot() {
-        guard askOneShotWatch.observe(latch: heldOneShotLatch(), hasReady: askHeld.hasReady,
-                                      deliveriesBegun: askDeliveriesBegun) else { return }
-        let ids = askHeld.dropReady()
-        for id in ids { askHeldInfo.removeValue(forKey: id) }
-        if !ids.isEmpty { Log.write("held result not pasted: the selection one-shot it waited for ended without landing, History only") }
     }
 
     /// Something the queue waits on may have changed (a take ended, a delivery completed, a card closed): look
@@ -1618,7 +1604,6 @@ final class DictationController {
     /// (once) and gives a waiting held result its turn.
     private func beginDelivery() -> () -> Void {
         askDeliveries += 1
-        askDeliveriesBegun += 1
         var closed = false
         return { [weak self] in
             guard !closed, let self = self else { return }
@@ -1646,7 +1631,11 @@ final class DictationController {
     private func heldPaste(_ paste: AskBackHeldQueue.Paste) {
         let info = askHeldInfo.removeValue(forKey: paste.id)
         let suspect = info.map { CleanupLogic.cleanupSuspect(rawCount: $0.raw.count, cleanedCount: paste.text.count) } ?? false
-        switch AskBackHeldPolicy.turn(suspect: suspect, parked: heldDeliveryParked()) {
+        switch AskBackHeldPolicy.turn(suspect: suspect, parked: heldDeliveryParked(), oneShotSeen: paste.oneShotSeen) {
+        case .skipOneShot:
+            Log.write("held result not pasted: a selection one-shot ran while it waited, History only")
+            heldKick()
+            return
         case .skipSuspect:
             Log.write("held result not pasted: cleanup suspect (\(info?.raw.count ?? 0)->\(paste.text.count) chars), History only")
             heldKick()
@@ -1791,6 +1780,7 @@ final class DictationController {
             case .clipboard(let changeCount):
                 if NSPasteboard.general.changeCount == changeCount {
                     TargetResolver.copyToClipboard(cleaned)
+                    askLastClosedCount = NSPasteboard.general.changeCount   // the record follows the clipboard (as replaceParkedClipboard does)
                     landed = true
                 } else {
                     landed = false
@@ -2235,7 +2225,6 @@ extension DictationController {
     var traceHeldCount: Int { askHeld.count }
     /// A delivery the rig cannot run for real (a paste with its verify and restore): open until the closure runs.
     func traceBeginDelivery() -> () -> Void { beginDelivery() }
-    var traceDeliveriesBegun: Int { askDeliveriesBegun }
     /// Arms `pastePark` as a delivery that could not reach its field does, on the controller's own pasteboard.
     func traceParkPaste() {
         pastePark = PastePark(previous: PasteboardSnapshot.capture(from: clipboardPasteboard),

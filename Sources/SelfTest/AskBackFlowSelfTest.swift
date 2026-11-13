@@ -342,33 +342,34 @@ enum AskBackFlowSelfTest {
                     && !AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: true, changeCountAtClose: 7, nowChangeCount: 8)
                     && !AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: false, changeCountAtClose: 7, nowChangeCount: 7))
             do {
-                var w = AskBackOneShotWatch()
-                check("one-shot watch: nothing is released while the latch is up, or when no result waited behind it",
-                      !w.observe(latch: true, hasReady: true, deliveriesBegun: 3) && !w.observe(latch: true, hasReady: true, deliveriesBegun: 3)
-                        && !AskBackOneShotWatch().observe(latch: false, hasReady: true, deliveriesBegun: 3))
-                check("one-shot watch: the latch dropping with no delivery begun since is a cancelled one-shot (released once)",
-                      w.observe(latch: false, hasReady: true, deliveriesBegun: 3) && !w.observe(latch: false, hasReady: true, deliveriesBegun: 3))
-                var landed = AskBackOneShotWatch()
-                _ = landed.observe(latch: true, hasReady: true, deliveriesBegun: 3)
-                check("one-shot watch: a delivery begun while the latch was up is a landing, not released",
-                      !landed.observe(latch: false, hasReady: true, deliveriesBegun: 4))
-                var late = AskBackOneShotWatch()
-                _ = late.observe(latch: true, hasReady: false, deliveriesBegun: 3)
-                check("one-shot watch: a result that was not ready while the latch was up did not wait behind it",
-                      !late.observe(latch: false, hasReady: true, deliveriesBegun: 3))
-            }
-            do {
                 let x = UUID(), y = UUID(), z = UUID()
                 var dq = AskBackHeldQueue()
-                _ = dq.resultExpected(x); _ = dq.resultExpected(y); _ = dq.resultExpected(z)
-                dq.setInputs(takeLive: false, busy: true, delivering: false)
-                _ = dq.resultReady(x, text: "x"); _ = dq.resultFailed(z)
-                let dropped = dq.dropReady()
-                check("held queue: dropReady takes out the ready results only; one still writing keeps its slot and turn",
-                      dropped == [x] && dq.hasReady == false && dq.count == 2)
-                dq.setInputs(takeLive: false, busy: false, delivering: false)
-                check("held queue: and the next result pastes when it is ready",
-                      dq.resultReady(y, text: "y") == [AskBackHeldQueue.Paste(id: y, text: "y")])
+                dq.setInputs(takeLive: false, busy: false, delivering: false, oneShotUp: false)
+                _ = dq.resultExpected(x)                          // queued while no one-shot ran: not marked
+                dq.setInputs(takeLive: false, busy: true, delivering: false, oneShotUp: true)   // a look finds the latch up
+                _ = dq.resultExpected(y)                          // queued with the latch up: marked at once
+                _ = dq.resultReady(x, text: "x"); _ = dq.resultReady(y, text: "y")
+                dq.setInputs(takeLive: false, busy: false, delivering: false, oneShotUp: false)  // the latch dropped before its turn
+                let p1 = dq.poke()
+                check("one-shot mark: a look that finds the latch up marks every entry in line; it stays marked after the latch drops",
+                      p1 == [AskBackHeldQueue.Paste(id: x, text: "x", oneShotSeen: true)])
+                check("one-shot mark: a marked entry is released at its turn marked, and the queue moves on to the next",
+                      dq.takeFinished() == [AskBackHeldQueue.Paste(id: y, text: "y", oneShotSeen: true)] && dq.isEmpty)
+                var fresh = AskBackHeldQueue()
+                fresh.setInputs(takeLive: false, busy: false, delivering: false, oneShotUp: false)
+                _ = fresh.resultExpected(z)
+                check("one-shot mark: an entry that never saw the latch up is not marked",
+                      fresh.resultReady(z, text: "z") == [AskBackHeldQueue.Paste(id: z, text: "z", oneShotSeen: false)])
+                var late = AskBackHeldQueue()
+                late.setInputs(takeLive: false, busy: true, delivering: false, oneShotUp: false)
+                _ = late.resultExpected(x)
+                late.setInputs(takeLive: false, busy: true, delivering: false, oneShotUp: true)
+                late.setInputs(takeLive: false, busy: false, delivering: false, oneShotUp: false)
+                check("one-shot mark: the result becoming ready after the latch dropped still pastes marked when an earlier look saw it up",
+                      late.resultReady(x, text: "x") == [AskBackHeldQueue.Paste(id: x, text: "x", oneShotSeen: true)])
+                check("held policy: a marked entry is History only at its turn, ahead of the other outcomes",
+                      AskBackHeldPolicy.turn(suspect: false, parked: false, oneShotSeen: true) == .skipOneShot
+                        && AskBackHeldPolicy.turn(suspect: false, parked: false, oneShotSeen: false) == .paste)
             }
             let a = UUID()
             var q = AskBackHeldQueue()
