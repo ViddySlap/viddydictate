@@ -109,6 +109,17 @@ private final class TraceRig {
     var retryPosts = 0
     private var observer: NSObjectProtocol?
     var takeID = UUID()
+    /// Where the rig's takes land. `.live` (the default, bullseye landing off) pastes through the controller's
+    /// `livePaste` seam, whose completion the rig controls; `.noTarget` is the locked landing with no captured
+    /// field, which only copies the text to the clipboard for a manual Cmd+V.
+    enum Route { case live, noTarget }
+    var route = Route.live
+    /// The faked paste on the live route. `liveAttempts` records every call; `liveCanPaste = false` is "focus left
+    /// the field" (the click-away park). With `liveHold` the paste's completion waits for `finishLivePaste()`.
+    var liveAttempts: [String] = []
+    var liveCanPaste = true
+    var liveHold = false
+    var liveDone: [() -> Void] = []
 
     init() {
         pasteboard = NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("askback-ctl-selftest-\(UUID().uuidString)")))
@@ -136,7 +147,13 @@ private final class TraceRig {
             clipboardPasteboard: pasteboard,
             hud: hud)
         ctl.wasLocked = true
-        ctl.takeLandAtStart = true
+        ctl.takeLandAtStart = false
+        ctl.askSeams.livePaste = { [unowned self] text, done in
+            liveAttempts.append(text)
+            guard liveCanPaste else { return false }
+            if liveHold { liveDone.append(done) } else { done() }
+            return true
+        }
         ctl.askSeams.resolve = { _ in .pinned(.claude("claude-trace-model")) }
         ctl.askSeams.reviewProvider = { [unowned self] system, input, done in reviews.append((system, input, done)) }
         ctl.askSeams.claudeWrite = { [unowned self] request, done in writes.append((request, done)) }
@@ -169,6 +186,7 @@ private final class TraceRig {
     func startTake(level: CleanupLevel = .summarize, cleanup: Bool = true, text: String = traceTranscript) -> UUID {
         let id = UUID()
         takeID = id
+        ctl.takeLandAtStart = route == .noTarget
         ctl.traceEnterFinishing(cleanup: cleanup, level: level)
         ctl.deliver(text: text, error: nil, generation: ctl.traceGeneration, takeID: id, retentionWasEnabled: false)
         return id
@@ -212,6 +230,12 @@ private final class TraceRig {
         finishWrite(result)
     }
     func heldCount() -> Int { ctl.traceHeldCount }
+    /// The faked paste's verify and restore end: the oldest open completion runs, then the controller looks again.
+    func finishLivePaste() {
+        guard !liveDone.isEmpty else { return }
+        liveDone.removeFirst()()
+        clock.advance(by: 0)
+    }
     /// The card is reached, held on, and the old take detached: its write is `writes[0]` (not finished).
     func detachedOne() -> UUID {
         toCard()
@@ -564,8 +588,9 @@ enum AskBackControllerSelfTest {
             check("held: the held result does not paste inside the call that ended the new take (it waits a turn)",
                   rig.hook.finals == [traceNewText])
             rig.clock.advance(by: 0)
-            check("held: then it pastes once, after the new take's paste, through the normal delivery",
-                  rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0 && rig.state == "idle")
+            check("held: then it pastes once, after the new take's paste, through the normal delivery (a route that really pastes)",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.liveAttempts == [traceNewText, traceCleaned]
+                    && rig.heldCount() == 0 && rig.state == "idle")
             rig.clock.advance(by: 5)
             let again = rig.entries(old)
             check("held: nothing pastes twice and the History entry is still one, done, with the landed text",
@@ -757,6 +782,97 @@ enum AskBackControllerSelfTest {
                   rig.hook.finals == [traceNewText] && rig.heldCount() == 0
                     && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two.")
         }
+        // ---------------------------------------------------------------- round 4: the delivery's own outcome and the live route
+        do {
+            // Live route: the held paste waits for the new take's paste to complete, however long (rig-controlled completion).
+            let rig = TraceRig(); defer { rig.close() }
+            rig.liveHold = true
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 30)
+            check("live: the new take pasted through the faked paste and its completion is still pending",
+                  rig.liveAttempts == [traceNewText] && rig.liveDone.count == 1 && rig.ctl.traceDeliveriesOpen == 1)
+            check("live: the held result does not paste while the new take's paste has not completed",
+                  rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            rig.finishLivePaste()
+            check("live: when the paste completes the held result pastes once, after it, and is itself a delivery in front",
+                  rig.liveAttempts == [traceNewText, traceCleaned] && rig.heldCount() == 0 && rig.ctl.traceDeliveriesOpen == 1)
+            rig.finishLivePaste()
+            check("live: and that delivery closes when its own paste completes", rig.ctl.traceDeliveriesOpen == 0 && rig.hook.finals == [traceNewText, traceCleaned])
+        }
+        do {
+            // Live route, focus left the field: the click-away park. The delivery closes at once (the park's settled()),
+            // the new take's text waits on the clipboard, and the held result stays in History only.
+            let rig = TraceRig(); defer { rig.close() }
+            let old = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.liveCanPaste = false
+            rig.newTakeSpeaks()
+            check("live park: the click-away park leaves the new take's text on the clipboard and closes its delivery",
+                  rig.pasteboard.string(forType: .string) == traceNewText && rig.ctl.traceDeliveriesOpen == 0)
+            rig.clock.advance(by: 5)
+            let e = rig.entries(old)
+            check("live park: the held result is not pasted, the clipboard still holds the new take's text, the queue has moved on",
+                  rig.liveAttempts == [traceNewText] && rig.pasteboard.string(forType: .string) == traceNewText && rig.heldCount() == 0)
+            check("live park: the held result stays in History (done, its text)", e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
+        }
+        do {
+            // M1: the new take left its text on the clipboard for a manual Cmd+V (the locked landing with no field).
+            let rig = TraceRig(); defer { rig.close() }
+            rig.route = .noTarget
+            let old = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            check("M1 clipboard-only: the new take's text is on the clipboard for a manual paste",
+                  rig.pasteboard.string(forType: .string) == traceNewText && rig.toasts.contains { $0.contains("Put on your clipboard") })
+            rig.clock.advance(by: 5)
+            let e = rig.entries(old)
+            check("M1 clipboard-only: after the held turn the clipboard still holds the new take's text and the held result is History only",
+                  rig.pasteboard.string(forType: .string) == traceNewText && rig.hook.finals == [traceNewText] && rig.heldCount() == 0
+                    && e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
+        }
+        do {
+            // Control: the user copied something since the clipboard-only delivery closed, so the held result delivers as normal.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.route = .noTarget
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.pasteboard.clearContents()
+            rig.pasteboard.setString("something Ben copied", forType: .string)
+            rig.clock.advance(by: 5)
+            check("M1 clipboard-only control: the pasteboard changed first, so the held result is delivered (to the clipboard, same route)",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.pasteboard.string(forType: .string) == traceCleaned && rig.heldCount() == 0)
+        }
+        do {
+            // Two held results behind a clipboard-only delivery: both stay History only, in order.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.route = .noTarget
+            let (first, second) = twoDetached(rig)
+            rig.writes[0].done(.ok("Held one.")); traceSettle()
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            check("M1 clipboard-only: every held result behind it is History only and the clipboard holds the new take's text",
+                  rig.hook.finals == [traceNewText] && rig.heldCount() == 0 && rig.pasteboard.string(forType: .string) == traceNewText
+                    && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two.")
+        }
+        do {
+            // A delivery that really pasted leaves nothing on the clipboard: the next held result is not held back by an
+            // earlier clipboard-only delivery (the record is replaced by every delivery).
+            let rig = TraceRig(); defer { rig.close() }
+            rig.route = .noTarget
+            rig.startTake(level: .cleanup, text: "A short earlier take."); rig.finishWrite("Earlier text.")
+            rig.route = .live
+            let (_, _) = twoDetached(rig)
+            rig.writes[1].done(.ok("Held one.")); traceSettle()     // writes[0] was the earlier take's own write
+            rig.writes[2].done(.ok("Held two.")); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            check("M1 clipboard-only: a clipboard-only delivery two takes back does not hold the held results back",
+                  rig.hook.finals == ["Earlier text.", traceNewText, "Held one.", "Held two."])
+        }
         do {
             // M2: a selection one-shot holds the user's selection from capture to landing.
             let rig = TraceRig(); defer { rig.close() }
@@ -779,7 +895,47 @@ enum AskBackControllerSelfTest {
             check("M2: it pastes only after the one-shot's landing completes", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
         }
         do {
-            // M2: nothing but the latch dropping releases it (the registry has no callback): the controller looks again.
+            // Cancelled one-shot: a held result that waited behind a selection one-shot whose latch then drops with no
+            // landing (cancelled at the level picker, failed, nothing selected) stays in History only; the line moves on.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            let old = rig.detachedOne()
+            rig.release()
+            latch = true
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.clock.advance(by: 1)
+            check("cancelled one-shot: while the latch is up the held result waits", rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            latch = false                                        // the one-shot ended without a landing (cancelled)
+            rig.clock.advance(by: 0.5)
+            let e = rig.entries(old)
+            check("cancelled one-shot: when the latch drops with no landing the held result does not paste and nothing is attempted",
+                  rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0)
+            check("cancelled one-shot: the result stays in History (done, its text)",
+                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
+            rig.clock.advance(by: 5)
+            check("cancelled one-shot: and it does not paste later either", rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty)
+        }
+        do {
+            // Cancelled one-shot, two results: the one that waited is History only; one whose write ends later keeps its turn.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            let (first, _) = twoDetached(rig)
+            rig.release()
+            latch = true
+            rig.writes[0].done(.ok("Held one.")); traceSettle()
+            rig.clock.advance(by: 1)
+            latch = false
+            rig.clock.advance(by: 0.5)
+            check("cancelled one-shot: the ready result is History only, the one still writing keeps its slot",
+                  rig.hook.finals.isEmpty && rig.heldCount() == 1 && rig.entries(first).first?.text == "Held one.")
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            rig.clock.advance(by: 1)
+            check("cancelled one-shot: the later result pastes in its turn", rig.hook.finals == ["Held two."] && rig.heldCount() == 0)
+        }
+        do {
+            // A one-shot that lands counts as the delivery in front: the held result pastes after its completion.
             let rig = TraceRig(); defer { rig.close() }
             var latch = false
             rig.ctl.askSeams.oneShotLatch = { latch }
@@ -788,9 +944,13 @@ enum AskBackControllerSelfTest {
             latch = true
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.clock.advance(by: 1)
-            latch = false                                        // the one-shot ended without a landing (cancelled)
+            let landing = rig.ctl.traceBeginDelivery()
+            latch = false
             rig.clock.advance(by: 0.5)
-            check("M2: when the latch drops with nothing else in the way a waiting held result pastes", rig.hook.finals == [traceCleaned])
+            check("landed one-shot: the held result still waits while the landing is open", rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            landing()
+            rig.clock.advance(by: 0)
+            check("landed one-shot: it pastes after the landing completes", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
         }
         do {
             // M2: the gap between a one-shot discarding its incidental take and setting its latch (the selection copy).
@@ -843,6 +1003,64 @@ enum AskBackControllerSelfTest {
             }
             check("held: only a dictation take's detached job holds its result; an Option+P job stays History only",
                   job(.dictation).holdsResult && !job(.selection).holdsResult)
+        }
+
+        // ---------------------------------------------------------------- S2: the completion plumbing, exit by exit
+        do {
+            struct Exit { var completes = 0, restores = 0, giveUps = 0, started = false }
+            func drive(states: [PasteFieldState], posts: [Bool] = [true], seen: Bool = true, canContinue: Bool = true,
+                       pasteboardUnchanged: Bool = true) -> Exit {
+                var out = Exit()
+                var si = 0, pi = 0, scheduled = 0
+                let driver = PasteVerifyDriver(
+                    delivered: "world",
+                    readState: { let st = states[min(si, states.count - 1)]; si += 1; return st },
+                    postPaste: { let r = posts[min(pi, posts.count - 1)]; pi += 1; return r },
+                    scheduleAfter: { _, work in scheduled += 1; if scheduled <= 60 { work() } },
+                    pasteboardUnchanged: { pasteboardUnchanged },
+                    canContinue: { canContinue },
+                    seenLive: { seen }, markSeenLive: { },
+                    restore: { out.restores += 1 },
+                    onGiveUp: { out.giveUps += 1 },
+                    log: { _ in },
+                    onComplete: { out.completes += 1 })
+                out.started = driver.run()
+                return out
+            }
+            func st(_ t: String) -> PasteFieldState { PasteFieldState(value: t) }
+            let landed = drive(states: [st("hello"), st("hello world")])
+            check("S2 driver: the paste landed and the restore ran: onComplete fires exactly once, after the restore",
+                  landed.started && landed.restores == 1 && landed.completes == 1)
+            let skipped = drive(states: [st("hello"), st("hello world")], pasteboardUnchanged: false)
+            check("S2 driver: the paste landed but the pasteboard changed (restore skipped): onComplete fires exactly once",
+                  skipped.started && skipped.restores == 0 && skipped.completes == 1)
+            let gaveUp = drive(states: [st("hello")])
+            check("S2 driver: the check gave up after its retries: onGiveUp once and onComplete exactly once",
+                  gaveUp.started && gaveUp.giveUps == 1 && gaveUp.completes == 1 && gaveUp.restores == 0)
+            let repostFailed = drive(states: [st("hello")], posts: [true, false])
+            check("S2 driver: the re-post failed (give up): onComplete exactly once",
+                  repostFailed.started && repostFailed.giveUps == 1 && repostFailed.completes == 1)
+            let stopped = drive(states: [st("hello")], canContinue: false)
+            check("S2 driver: stopped because the pasteboard changed under the retry: no restore, onComplete exactly once",
+                  stopped.started && stopped.restores == 0 && stopped.giveUps == 0 && stopped.completes == 1)
+            let unreadable = drive(states: [st("hello"), PasteFieldState(value: nil)])
+            check("S2 driver: the field became unreadable: restore runs and onComplete fires exactly once",
+                  unreadable.started && unreadable.completes == 1)
+            let notStarted = drive(states: [st("hello")], posts: [false])
+            check("S2 driver: the first keystroke could not be posted: run() is false and the driver does not call onComplete (the caller owns it)",
+                  !notStarted.started && notStarted.completes == 0)
+            // The two callers that cannot run headless (a real focused field, the general pasteboard): named source-shape rows.
+            let here = URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let resolver = (try? String(contentsOf: here.appendingPathComponent("Sources/App/TargetResolver.swift"), encoding: .utf8)) ?? ""
+            let controller = (try? String(contentsOf: here.appendingPathComponent("Sources/App/DictationController.swift"), encoding: .utf8)) ?? ""
+            check("S2 source shape: pasteIntoFocus calls onComplete itself when the first keystroke was not posted",
+                  resolver.contains("let started = driver.run()\n        if !started { onComplete?() }"))
+            check("S2 source shape: pasteIntoCapturedTarget hands settled to the paste when the operation ran and fires it itself otherwise",
+                  resolver.contains("done(pasteIntoFocus(text, onComplete: settled))") && resolver.contains("if !operationRan { settled?() }")
+                    && resolver.contains("operationRan = true"))
+            check("S2 source shape: the click-away park closes its delivery, and every receipt is recorded when a delivery finishes",
+                  controller.contains("settled()   // nothing pastes now") && controller.contains("case .clipboard(let count): self.askLastClipboardOnly = true")
+                    && controller.contains("case .pastePark: self.askLastClipboardOnly = true"))
         }
 
         // ---------------------------------------------------------------- S4, S5, S6 and tap wiring that no headless row reaches

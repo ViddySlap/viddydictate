@@ -658,6 +658,20 @@ struct AskBackHeldQueue {
         return drain()
     }
 
+    /// A result is ready and waiting its turn (a selection one-shot's wait watches this).
+    var hasReady: Bool { slots.contains { if case .ready = $0.slot { return true } else { return false } } }
+
+    /// Takes every ready result out of the line without pasting it (it stays in History only, written elsewhere).
+    /// A result whose write has not ended yet keeps its slot and its turn.
+    mutating func dropReady() -> [UUID] {
+        var ids: [UUID] = []
+        slots.removeAll { entry in
+            if case .ready = entry.slot { ids.append(entry.id); return true }
+            return false
+        }
+        return ids
+    }
+
     mutating func takeStarted() -> [Paste] { takeLive = true; return [] }
 
     mutating func takeFinished() -> [Paste] { takeLive = false; return drain() }
@@ -702,6 +716,14 @@ enum AskBackHeldPolicy {
         pendingPick || abPicker || askCard || oneShotLatch || oneShotGrace
     }
 
+    /// The delivery in front left its text on the clipboard for a manual Cmd+V (a click-away park, the locked
+    /// delivery's clipboard fallback, the locked no-target landing, a late recovery with no target) and the
+    /// pasteboard has not changed since that delivery closed: a held result must not overwrite it. `receiptClipboardOnly`
+    /// and `changeCountAtClose` are what the delivery recorded when it closed.
+    static func clipboardHeld(receiptClipboardOnly: Bool, changeCountAtClose: Int, nowChangeCount: Int) -> Bool {
+        receiptClipboardOnly && changeCountAtClose == nowChangeCount
+    }
+
     enum Turn: Equatable { case paste, skipSuspect, skipParked }
 
     /// What a held result does when its turn comes. A result the rogue-output check flags, or one that would
@@ -710,5 +732,24 @@ enum AskBackHeldPolicy {
         if suspect { return .skipSuspect }
         if parked { return .skipParked }
         return .paste
+    }
+}
+
+/// A held result that waited behind a selection one-shot (its busy latch was up while the result was ready) is
+/// released to History only when that one-shot ends without landing (cancelled at its level picker, failed,
+/// nothing selected). A one-shot that lands opens a delivery, which counts as the delivery in front. Pure: the
+/// controller feeds it the latch, whether a result is ready, and how many deliveries have ever begun.
+struct AskBackOneShotWatch {
+    private var begunWhenSeen: Int?
+
+    /// True once, when the latch has dropped and no delivery has begun since a ready result first saw it up.
+    mutating func observe(latch: Bool, hasReady: Bool, deliveriesBegun: Int) -> Bool {
+        if latch {
+            if hasReady, begunWhenSeen == nil { begunWhenSeen = deliveriesBegun }
+            return false
+        }
+        guard let seen = begunWhenSeen else { return false }
+        begunWhenSeen = nil
+        return deliveriesBegun == seen
     }
 }

@@ -208,6 +208,11 @@ final class DictationController {
         var abPickerShow: ((_ raw: String, _ cleaned: String) -> Void)?
         /// Stands in for the one-shot registry's busy latch (`oneShot.isBusy`), which a headless row cannot set.
         var oneShotLatch: (() -> Bool)?
+        /// Stands in for the push-to-talk landing's real paste (focus check, `pasteIntoFocus`): called with the
+        /// text and the delivery's completion, it returns false when focus has left the field (the click-away
+        /// clipboard park runs), or pastes and calls the completion when the paste check and clipboard restore
+        /// would have finished. A headless row cannot reach a focused field.
+        var livePaste: ((_ text: String, _ onComplete: @escaping () -> Void) -> Bool)?
     }
     var askSeams = AskBackSeams()
 
@@ -244,6 +249,12 @@ final class DictationController {
     /// if you copied something else after the park.
     private struct PastePark { let previous: PasteboardSnapshot; let changeCount: Int }
     private var pastePark: PastePark?
+    /// VDASK-3: what the last delivery left on the clipboard when it closed, and the pasteboard changeCount then.
+    private var askLastClipboardOnly = false
+    private var askLastClosedCount = 0
+    /// Deliveries ever begun, and the watch that releases a result a cancelled one-shot kept waiting.
+    private var askDeliveriesBegun = 0
+    private var askOneShotWatch = AskBackOneShotWatch()
 
     /// The notes-delivery JS-bridge callbacks (`onSnapshotNoteTarget` / `onDeliverToNoteTarget` /
     /// `onInsertIntoActiveNote` / `onSetBullseyeAtCaret` / `onDeliverToBullseye` / `onBullseyeStateChanged` /
@@ -1571,13 +1582,25 @@ final class DictationController {
     /// looked at again on a timer, because the registry has no release callback.
     private func heldApply(_ event: (inout AskBackHeldQueue) -> [AskBackHeldQueue.Paste]) {
         askHeld.setInputs(takeLive: state != .idle, busy: heldBusy(), delivering: askDeliveries > 0)
-        for paste in event(&askHeld) { heldPaste(paste) }
+        heldWatchOneShot()
+        let pastes = event(&askHeld)
+        heldWatchOneShot()
+        for paste in pastes { heldPaste(paste) }
         if !askHeld.isEmpty, askHeldPoll == nil, heldOneShotHolds() {
             askHeldPoll = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPollInterval) { [weak self] in
                 self?.askHeldPoll = nil
                 self?.heldApply { $0.poke() }
             }
         }
+    }
+
+    /// A result that waited behind a selection one-shot which then ended without landing stays in History only.
+    private func heldWatchOneShot() {
+        guard askOneShotWatch.observe(latch: heldOneShotLatch(), hasReady: askHeld.hasReady,
+                                      deliveriesBegun: askDeliveriesBegun) else { return }
+        let ids = askHeld.dropReady()
+        for id in ids { askHeldInfo.removeValue(forKey: id) }
+        if !ids.isEmpty { Log.write("held result not pasted: the selection one-shot it waited for ended without landing, History only") }
     }
 
     /// Something the queue waits on may have changed (a take ended, a delivery completed, a card closed): look
@@ -1595,6 +1618,7 @@ final class DictationController {
     /// (once) and gives a waiting held result its turn.
     private func beginDelivery() -> () -> Void {
         askDeliveries += 1
+        askDeliveriesBegun += 1
         var closed = false
         return { [weak self] in
             guard !closed, let self = self else { return }
@@ -1608,8 +1632,10 @@ final class DictationController {
     /// pasteboard has not changed since: the held result must not overwrite it. (`clipboardPasteboard` is the
     /// general pasteboard in the app; a self-test points it at a private one.)
     private func heldDeliveryParked() -> Bool {
-        guard let park = pastePark else { return false }
-        return clipboardPasteboard.changeCount == park.changeCount
+        if let park = pastePark, clipboardPasteboard.changeCount == park.changeCount { return true }
+        return AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: askLastClipboardOnly,
+                                               changeCountAtClose: askLastClosedCount,
+                                               nowChangeCount: clipboardPasteboard.changeCount)
     }
 
     /// Pastes one held result through the normal delivery path (`finalize`: History by id, notes routing, the
@@ -1872,6 +1898,13 @@ final class DictationController {
                 self.tailCheckHook.call(finalText: delivered, rawText: raw, segments: segments,
                                         cleanupLevel: cleanupLevel)
             }
+            // The delivery's own outcome, for a held result whose turn comes next: did it leave its text on the
+            // clipboard for a manual Cmd+V, and what was the pasteboard's changeCount then.
+            switch receipt {
+            case .clipboard(let count): self.askLastClipboardOnly = true; self.askLastClosedCount = count
+            case .pastePark: self.askLastClipboardOnly = true; self.askLastClosedCount = self.clipboardPasteboard.changeCount
+            case .note, .foreign: self.askLastClipboardOnly = false
+            }
             self.teardownTake(.full)
             self.note(self.readyHint)
             completion?(receipt)
@@ -2004,12 +2037,17 @@ final class DictationController {
         // so a still-in-the-field paste is never misrouted, with a text-like fallback for when you
         // moved to another usable field; only a non-text destination (or nothing focused) takes the
         // clipboard branch.
-        let current = TargetResolver.captureFocused()
+        let fakePaste = askSeams.livePaste
+        let current = fakePaste == nil ? TargetResolver.captureFocused() : nil
         let sameField: Bool
         if let c = current, let t = target { sameField = CFEqual(c.element, t.element) }
         else { sameField = false }
         let canPaste = sameField || (current?.isTextLike ?? false)
-        if canPaste {
+        if let fakePaste = fakePaste, fakePaste(delivered, settled) {
+            landDelivery(foreignUndo: makePendingUndo(raw: raw, delivered: delivered, revertable: revertable, canRevertInPlace: true),
+                         noteUndo: nil, toast: nil, keepHUD: keepHUD)
+            return .foreign(target)
+        } else if fakePaste == nil && canPaste {
             Log.write("deliver: paste-synth into focus (\(delivered.count) chars, mode=\(mode), sameField=\(sameField))")
             TargetResolver.pasteIntoFocus(delivered, onComplete: settled)
             // BT5: foreign-app landing - Option+Z uses the in-place foreign tier (noteUndo nil).
@@ -2021,7 +2059,7 @@ final class DictationController {
             // clipboard. A paste is a clipboard read and fires no event, so HotkeyMonitor watches
             // for the next Cmd+V via the existing key tap to know when the paste has happened.
             Log.write("deliver: focus left the field, clipboard park + one-shot restore (\(delivered.count) chars, mode=\(mode))")
-            let pb = NSPasteboard.general
+            let pb = clipboardPasteboard      // the general pasteboard in the app; a self-test points it at a private one
             let previous = PasteboardSnapshot.capture(from: pb)
             SyntheticPasteboard.write(delivered, to: pb)
             pastePark = PastePark(previous: previous, changeCount: pb.changeCount)
@@ -2197,6 +2235,7 @@ extension DictationController {
     var traceHeldCount: Int { askHeld.count }
     /// A delivery the rig cannot run for real (a paste with its verify and restore): open until the closure runs.
     func traceBeginDelivery() -> () -> Void { beginDelivery() }
+    var traceDeliveriesBegun: Int { askDeliveriesBegun }
     /// Arms `pastePark` as a delivery that could not reach its field does, on the controller's own pasteboard.
     func traceParkPaste() {
         pastePark = PastePark(previous: PasteboardSnapshot.capture(from: clipboardPasteboard),

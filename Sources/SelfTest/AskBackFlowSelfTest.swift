@@ -337,6 +337,39 @@ enum AskBackFlowSelfTest {
                   AskBackHeldPolicy.turn(suspect: false, parked: false) == .paste
                     && AskBackHeldPolicy.turn(suspect: true, parked: false) == .skipSuspect
                     && AskBackHeldPolicy.turn(suspect: false, parked: true) == .skipParked)
+            check("held policy: a clipboard-only delivery holds the clipboard only while the pasteboard is unchanged since it closed",
+                  AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: true, changeCountAtClose: 7, nowChangeCount: 7)
+                    && !AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: true, changeCountAtClose: 7, nowChangeCount: 8)
+                    && !AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: false, changeCountAtClose: 7, nowChangeCount: 7))
+            do {
+                var w = AskBackOneShotWatch()
+                check("one-shot watch: nothing is released while the latch is up, or when no result waited behind it",
+                      !w.observe(latch: true, hasReady: true, deliveriesBegun: 3) && !w.observe(latch: true, hasReady: true, deliveriesBegun: 3)
+                        && !AskBackOneShotWatch().observe(latch: false, hasReady: true, deliveriesBegun: 3))
+                check("one-shot watch: the latch dropping with no delivery begun since is a cancelled one-shot (released once)",
+                      w.observe(latch: false, hasReady: true, deliveriesBegun: 3) && !w.observe(latch: false, hasReady: true, deliveriesBegun: 3))
+                var landed = AskBackOneShotWatch()
+                _ = landed.observe(latch: true, hasReady: true, deliveriesBegun: 3)
+                check("one-shot watch: a delivery begun while the latch was up is a landing, not released",
+                      !landed.observe(latch: false, hasReady: true, deliveriesBegun: 4))
+                var late = AskBackOneShotWatch()
+                _ = late.observe(latch: true, hasReady: false, deliveriesBegun: 3)
+                check("one-shot watch: a result that was not ready while the latch was up did not wait behind it",
+                      !late.observe(latch: false, hasReady: true, deliveriesBegun: 3))
+            }
+            do {
+                let x = UUID(), y = UUID(), z = UUID()
+                var dq = AskBackHeldQueue()
+                _ = dq.resultExpected(x); _ = dq.resultExpected(y); _ = dq.resultExpected(z)
+                dq.setInputs(takeLive: false, busy: true, delivering: false)
+                _ = dq.resultReady(x, text: "x"); _ = dq.resultFailed(z)
+                let dropped = dq.dropReady()
+                check("held queue: dropReady takes out the ready results only; one still writing keeps its slot and turn",
+                      dropped == [x] && dq.hasReady == false && dq.count == 2)
+                dq.setInputs(takeLive: false, busy: false, delivering: false)
+                check("held queue: and the next result pastes when it is ready",
+                      dq.resultReady(y, text: "y") == [AskBackHeldQueue.Paste(id: y, text: "y")])
+            }
             let a = UUID()
             var q = AskBackHeldQueue()
             q.setInputs(takeLive: false, busy: true, delivering: false)
