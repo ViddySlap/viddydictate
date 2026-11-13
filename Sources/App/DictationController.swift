@@ -46,6 +46,7 @@ final class DictationController {
             // declaration, so this observer (which never fires for the .idle default) always has it available.
             hud.setTakeActive(state == .recording || state == .locked)
             if !(state == .recording || state == .locked) { pasteMarker.stop() }
+            heldTakeLiveChanged(wasLive: oldValue != .idle, isLive: state != .idle)
         }
     }
 
@@ -207,6 +208,15 @@ final class DictationController {
         var abPickerShow: ((_ raw: String, _ cleaned: String) -> Void)?
     }
     var askSeams = AskBackSeams()
+
+    /// The detached old takes' results, held until the take in front has finished (`AskBackHeldQueue`). In
+    /// memory only: a result that has not pasted when the app quits is not pasted on relaunch.
+    private var askHeld = AskBackHeldQueue()
+    private var askHeldSettle: (() -> Void)?
+    private var askHeldInfo: [UUID: (raw: String, level: Int)] = [:]
+    /// How long a take must stay finished before a held result pastes: the take's own paste verifies and restores
+    /// the clipboard for a moment, and a second paste inside that window would race it. A new take cancels it.
+    static let heldPasteSettle: TimeInterval = 0.8
     private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
@@ -271,11 +281,31 @@ final class DictationController {
     }
 
     func startMonitoring() -> Bool {
+        installHotkeyCallbacks()
         hud.onLock = { [weak self] in self?.toggleLock() }
         hud.onStop = { [weak self] in self?.finish() }
         hud.onSettings = { [weak self] in self?.callbacks.onOpenSettings() }
         hud.samplesProvider = { [weak self] in self?.audio.scopeSamples ?? [] }
         hud.onSetLevel = { [weak self] lvl in self?.setLevelFromSlider(lvl) }
+        // B13/B14's panel, on the same keyboard-over-the-tap contract as the two pickers below.
+        let offers = PointOfUseOfferPresenter.shared
+        hotkey.onInstallOfferLeft = { offers.moveLeft() }
+        hotkey.onInstallOfferRight = { offers.moveRight() }
+        hotkey.onInstallOfferCommit = { offers.commit() }
+        hotkey.onInstallOfferCancel = { offers.dismiss() }
+        offers.onActiveChanged = { [weak self] active in self?.hotkey.installOfferActive = active }
+        offers.onNotice = { [weak self] message in self?.hud.toast(message) }
+        let liveHotkeyMap = HotkeyMap.load()
+        hotkey.map = liveHotkeyMap
+        hud.setHotkeyMap(liveHotkeyMap)
+        hotkey.customChords = CustomModeStore.shared.chordSnapshot()
+        return hotkey.start()
+    }
+
+    /// Wires every `HotkeyMonitor` callback of the take flow to this controller. `startMonitoring()` calls it
+    /// first; the headless controller trace test calls it on its own controller so key and press events reach the
+    /// real handlers without starting the CGEvent tap. Installs callbacks only: no tap, no HUD, no global state.
+    func installHotkeyCallbacks() {
         hotkey.onRightOptionDown = { [weak self] in self?.rightOptionDown() }
         hotkey.onRightOptionUp = { [weak self] in self?.rightOptionUp() }
         hotkey.onCommand = { [weak self] command in self?.handle(command: command) }
@@ -288,24 +318,11 @@ final class DictationController {
         hotkey.onLevelRight = { [weak self] in self?.oneShot.pickerMoveRight() }
         hotkey.onLevelCommit = { [weak self] in self?.oneShot.commitLevelPick() }
         hotkey.onLevelCancel = { [weak self] in self?.oneShot.cancelLevelPick() }
-        // B13/B14's panel, on the same keyboard-over-the-tap contract as the two pickers above.
-        let offers = PointOfUseOfferPresenter.shared
-        hotkey.onInstallOfferLeft = { offers.moveLeft() }
-        hotkey.onInstallOfferRight = { offers.moveRight() }
-        hotkey.onInstallOfferCommit = { offers.commit() }
-        hotkey.onInstallOfferCancel = { offers.dismiss() }
-        offers.onActiveChanged = { [weak self] active in self?.hotkey.installOfferActive = active }
-        offers.onNotice = { [weak self] message in self?.hud.toast(message) }
         hotkey.onPasteWhileArmed = { [weak self] in self?.restoreParkedClipboard() }
         hotkey.onCancelTake = { [weak self] in self?.cancelTake() }   // BT5: Esc aborts the in-progress take
         hotkey.onAskBackKey = { [weak self] action in self?.askFlow?.key(action) }
         hotkey.onAskCardOptionDown = { [weak self] in self?.askFlow?.optionDown() }
         hotkey.onAskCardOptionUp = { [weak self] in self?.askFlow?.optionUp() }
-        let liveHotkeyMap = HotkeyMap.load()
-        hotkey.map = liveHotkeyMap
-        hud.setHotkeyMap(liveHotkeyMap)
-        hotkey.customChords = CustomModeStore.shared.chordSnapshot()
-        return hotkey.start()
     }
 
     /// Re-read the persisted hotkey map + custom-mode chords into the live tap (called after a rebind /
@@ -587,7 +604,7 @@ final class DictationController {
         secureWarningThisTake = SecureInputPress.afterGate(
             warnPid: warnPid,
             beginRecording: {
-                if wasIdle { self.beginRecording() }
+                if wasIdle { self.startRecording() }
                 return !(wasIdle && self.state == .idle)
             },
             appName: SecureInput.appName(pid:),
@@ -839,6 +856,7 @@ final class DictationController {
         hud.hide()
         if let show = askSeams.abPickerShow { show(raw, cleaned) } else { abPicker.show(raw: raw, cleaned: cleaned) }
         hotkey.abPickerActive = true
+        heldSyncBusy()
         note("pick raw or cleaned")
     }
 
@@ -848,6 +866,7 @@ final class DictationController {
         guard let pick = pendingPick else { return }
         pendingPick = nil
         hotkey.abPickerActive = false
+        heldSyncBusy()
         abPicker.hide()
         let chooseCleaned = !forceRaw && abPicker.selection == .cleaned
         if chooseCleaned {
@@ -1474,16 +1493,29 @@ final class DictationController {
                 runWrite()
             },
             history: { [weak self] event in TranscriptionHistory.shared.apply(event, app: self?.target?.label ?? "") },
-            saveDetached: { job in
-                // Touches nothing of the controller: a write with the old take's own request and a History update.
-                AskBackDetached.run(job, now: { ProcessInfo.processInfo.systemUptime }, write: { _, done in
+            saveDetached: { [weak self] job in
+                // The write touches nothing of the controller: the old take's own request and a History update. A
+                // dictation take's result is then held (`AskBackHeldQueue`) and pastes after the new take.
+                if job.holdsResult {
+                    self?.askHeldInfo[job.historyID] = (job.transcript, job.levelRaw)
+                    self?.heldApply { $0.resultExpected(job.historyID) }
+                }
+                AskBackDetached.run(job, now: self?.askSeams.now ?? { ProcessInfo.processInfo.systemUptime }, write: { _, done in
                     guard let bundle = resolution.bundle else { done(nil); return }
                     let request = makeRequest(bundle, job.questions, job.answers, LocalStreamTimeoutDetail())
                     TextTransformClient.transform(request, local: CleanupClient.localAdapter(surface: .cleanup),
                                                   claude: claudeAdapter, arming: .inert) { result in
                         DispatchQueue.main.async { if case .ok(let text) = result { done(text) } else { done(nil) } }
                     }
-                }, history: { event in TranscriptionHistory.shared.apply(event) })
+                }, history: { event in TranscriptionHistory.shared.apply(event) },
+                completed: { [weak self] id, text in
+                    guard job.holdsResult else { return }
+                    if text == nil { self?.askHeldInfo.removeValue(forKey: id) }
+                    self?.heldApply { queue in
+                        if let text = text { return queue.resultReady(id, text: text) }
+                        return queue.resultFailed(id)
+                    }
+                })
             },
             startNewTake: { [weak self] in self?.askStartNewTake() })
         let flow = AskBackFlow(context: context, schedule: askSeams.schedule ?? Self.mainSchedule,
@@ -1501,9 +1533,55 @@ final class DictationController {
         return { item.cancel() }
     }
 
+    // MARK: held results. The rules live in `AskBackHeldQueue`; these feed it events and do its pastes.
+
+    private func heldApply(_ event: (inout AskBackHeldQueue) -> [AskBackHeldQueue.Paste]) {
+        for paste in event(&askHeld) { heldPaste(paste) }
+    }
+
+    /// The state left or entered idle. A take starting cancels a pending "finished"; a take ending reports it only
+    /// after `heldPasteSettle`, and only if the controller is still idle then (the idle moments inside a hold or an
+    /// Esc-resume last no longer than one run-loop turn and never reach it).
+    private func heldTakeLiveChanged(wasLive: Bool, isLive: Bool) {
+        if isLive && !wasLive {
+            askHeldSettle?(); askHeldSettle = nil
+            heldApply { $0.takeStarted() }
+        } else if !isLive && wasLive {
+            heldScheduleFinished()
+        }
+    }
+
+    private func heldScheduleFinished() {
+        askHeldSettle?()
+        askHeldSettle = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPasteSettle) { [weak self] in
+            guard let self = self else { return }
+            self.askHeldSettle = nil
+            guard self.state == .idle else { return }
+            self.heldApply { $0.takeFinished() }
+            self.heldSyncBusy()
+        }
+    }
+
+    private func heldSyncBusy() {
+        let busy = pendingPick != nil || hotkey.abPickerActive || hotkey.askCardActive
+        heldApply { $0.flowBusy(busy) }
+    }
+
+    /// Pastes one held result through the normal delivery path (`finalize`: History by id, notes routing, the
+    /// frozen landing rule of the last take, paste or clipboard park). Only ever runs with no take live. Counts as
+    /// a take in front of the next held result until it has settled.
+    private func heldPaste(_ paste: AskBackHeldQueue.Paste) {
+        Log.write("held result pastes afterwards (\(paste.text.count) chars)")
+        let info = askHeldInfo.removeValue(forKey: paste.id)
+        finalize(delivered: paste.text, raw: info?.raw ?? paste.text, cleaned: paste.text, mode: .cleanup,
+                 level: info?.level, historyID: paste.id)
+        heldScheduleFinished()
+    }
+
     private func askPhaseChanged(_ phase: AskBackFlow.Phase) {
         hotkey.askReviewActive = phase == .reviewing
         if phase != .asking { hotkey.askCardActive = false }
+        heldSyncBusy()
         switch phase {
         case .reviewing: state = .reviewing
         case .asking: state = .asking
@@ -1531,6 +1609,7 @@ final class DictationController {
         hud.hide()
         panel.show(card, anchor: askAnchor)
         hotkey.askCardActive = true
+        heldSyncBusy()
         note("answer the question")
     }
 
@@ -1544,6 +1623,12 @@ final class DictationController {
         askFlow = nil
         endAskFlowUI()
         state = .idle
+        startRecording()
+    }
+
+    /// Starts a take's recording. The headless trace test replaces the audio-and-AX start with
+    /// `askSeams.beginNewTake`; production always takes `beginRecording()`.
+    private func startRecording() {
         if let begin = askSeams.beginNewTake {
             begin()
             setActive(true)
@@ -2039,6 +2124,7 @@ extension DictationController {
     var traceParkedFlow: AskBackFlow? { askParkedFlow }
     var traceAskAnchor: CGPoint { askAnchor }
     var traceGeneration: Int { takeGeneration }
+    var traceHeldCount: Int { askHeld.count }
 
     /// Put the controller where `finish()` leaves it just before the transcript arrives: a take that ended with
     /// its cleanup setting and level frozen at release.

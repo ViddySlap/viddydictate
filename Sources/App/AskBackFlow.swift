@@ -211,6 +211,12 @@ struct AskBackDetachedJob: Equatable {
     let writeProvider: String
     let writeModel: String
     let generation: Int
+    let source: AskBackSource
+
+    /// A dictation take's detached result is held and pastes afterwards (`AskBackHeldQueue`); an Option+P
+    /// (selection) result stays in History only, because pasting over a selection later would replace text the
+    /// user has moved on from.
+    var holdsResult: Bool { source == .dictation }
 
     var answersBlock: String { AskBackAnswersBlock.block(questions: questions, answers: answers) }
 
@@ -234,16 +240,21 @@ struct AskBackDetachedJob: Equatable {
 enum AskBackDetached {
     /// Runs the write and applies exactly one History update. Never pastes, never touches controller state,
     /// the HUD, the paste target, audio or any modal: its only outputs are the two closures it is handed.
+    /// `completed` (optional) is told once, after the History update is applied, the job's id and the text to
+    /// paste (nil when the write failed).
     static func run(_ job: AskBackDetachedJob,
                     now: @escaping () -> TimeInterval,
                     write: (_ answersBlock: String, _ done: @escaping (String?) -> Void) -> Void,
-                    history: @escaping (AskBackHistoryEvent) -> Void) {
+                    history: @escaping (AskBackHistoryEvent) -> Void,
+                    completed: ((UUID, String?) -> Void)? = nil) {
         let started = now()
         var finished = false
         write(job.answersBlock) { result in
             guard !finished else { return }
             finished = true
-            history(.update(job.completion(result: result, writeMs: Int((now() - started) * 1000))))
+            let update = job.completion(result: result, writeMs: Int((now() - started) * 1000))
+            history(.update(update))
+            completed?(job.historyID, update.status == AskBackHistoryStatus.done ? update.delivered : nil)
         }
     }
 }
@@ -270,6 +281,7 @@ final class AskBackFlow {
         let provider: AskBackProvider
         let writeModel: String
         let generation: Int
+        var source: AskBackSource = .dictation
     }
 
     typealias Schedule = AskBackReviewRunner.Schedule
@@ -564,7 +576,7 @@ final class AskBackFlow {
             historyID: context.historyID, transcript: context.transcript, level: context.level,
             levelRaw: context.levelRaw, questions: questions, answers: answers, record: rec,
             writeProvider: context.provider.rawValue, writeModel: context.writeModel,
-            generation: context.generation)
+            generation: context.generation, source: context.source)
         phase = .detached
         hooks.saveDetached(job)
     }
@@ -598,5 +610,70 @@ final class AskBackFlow {
         guard let rec = record else { return }
         hooks.history(.update(AskBackHistoryUpdate(id: context.historyID, record: rec, status: status,
                                                    delivered: nil, raw: nil, levelRaw: nil)))
+    }
+}
+
+// MARK: - held results (an earlier take pastes afterwards)
+
+/// The rules for the detached old take's result. It is held until the take in front of it has finished, then
+/// pastes through the normal delivery path; results queue in the order their takes were detached, one paste at
+/// a time. Pure: the controller feeds it events and performs the pastes it returns.
+///
+/// - `resultExpected(id)`: a take was detached; its slot in the line is reserved at once.
+/// - `resultReady(id, text)` / `resultFailed(id)`: its write ended. A failed write pastes nothing and the line
+///   moves on.
+/// - `takeStarted` / `takeFinished`: a take (or the paste of the result in front) began / ended.
+/// - `flowBusy(Bool)`: a card or an A/B picker is up.
+/// Nothing is persisted: a result that has not pasted when the app quits is not pasted on relaunch.
+struct AskBackHeldQueue {
+    struct Paste: Equatable { let id: UUID; let text: String }
+
+    private enum Slot { case expected, ready(String), failed }
+    private var slots: [(id: UUID, slot: Slot)] = []
+    private var takeLive = false
+    private var busy = false
+
+    var isEmpty: Bool { slots.isEmpty }
+    var count: Int { slots.count }
+
+    mutating func resultExpected(_ id: UUID) -> [Paste] {
+        guard !slots.contains(where: { $0.id == id }) else { return [] }
+        slots.append((id, .expected))
+        return drain()
+    }
+
+    mutating func resultReady(_ id: UUID, text: String) -> [Paste] {
+        guard let i = slots.firstIndex(where: { $0.id == id }) else { return [] }
+        slots[i].slot = .ready(text)
+        return drain()
+    }
+
+    mutating func resultFailed(_ id: UUID) -> [Paste] {
+        guard let i = slots.firstIndex(where: { $0.id == id }) else { return [] }
+        slots[i].slot = .failed
+        return drain()
+    }
+
+    mutating func takeStarted() -> [Paste] { takeLive = true; return [] }
+
+    mutating func takeFinished() -> [Paste] { takeLive = false; return drain() }
+
+    mutating func flowBusy(_ on: Bool) -> [Paste] { busy = on; return drain() }
+
+    /// Pastes the head of the line when it is ready and nothing is live or busy. A paste counts as a take in
+    /// front of the next result: the caller reports `takeFinished` once it has settled.
+    private mutating func drain() -> [Paste] {
+        while let head = slots.first {
+            switch head.slot {
+            case .failed: slots.removeFirst()
+            case .expected: return []
+            case .ready(let text):
+                guard !takeLive, !busy else { return [] }
+                slots.removeFirst()
+                takeLive = true
+                return [Paste(id: head.id, text: text)]
+            }
+        }
+        return []
     }
 }

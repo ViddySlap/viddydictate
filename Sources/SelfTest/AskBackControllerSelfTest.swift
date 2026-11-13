@@ -3,9 +3,11 @@ import Foundation
 
 // VDASK-3 controller trace test. Drives the REAL DictationController headless (null-style HUD that records,
 // the way TailCheckSelfTest drives deliver()) with a fake review provider, a fake write provider and a fake
-// clock, injected through DictationController.AskBackSeams. It also drives the REAL HotkeyMonitor routing
-// functions (`keyTakenBeforeWakeup`, `takeAskBackKey`, `fireWakeup`) the CGEvent tap calls, because the tap
-// itself cannot run without a window server. Source-shape rows cover only wiring no headless row can reach:
+// clock, injected through DictationController.AskBackSeams. The rig installs the controller's real HotkeyMonitor
+// callbacks (`installHotkeyCallbacks()`, the same call `startMonitoring()` makes first) and then drives the REAL
+// HotkeyMonitor routing functions (`keyTakenBeforeWakeup`, `takeAskBackKey`, `fireWakeup`) the CGEvent tap
+// calls, so a key or a press reaches the controller's own handlers; only the tap itself cannot run without a
+// window server. Source-shape rows cover only wiring no headless row can reach:
 // the tap callback's own call into those functions, beginRecording's placement clear (it needs the mic, AX
 // and the daemon), and the card row's hit test (AppKit view). Every fixture is synthetic text.
 
@@ -80,6 +82,7 @@ private let traceTranscript = "We should ship on Friday. Actually let\u{2019}s s
 private let traceReviewJSON = "{\"spots\":[],\"questions\":[{\"question\":\"Which day?\",\"quote\":\"ship on Friday\","
     + "\"why\":\"two days are named\",\"options\":[\"Friday\",\"Monday\"]}]}"
 private let traceCleaned = "Ship on Friday. Keep the Blue Folder with Ana."
+private let traceNewText = "Lunch is at noon on Tuesday."
 
 private func traceSettle() {
     if Thread.isMainThread { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03)) }
@@ -139,6 +142,7 @@ private final class TraceRig {
         ctl.askSeams.beginNewTake = { [unowned self] in newTakeStates.append(ctl.traceStateName) }
         ctl.askSeams.cardPanel = card
         ctl.askSeams.abPickerShow = { [unowned self] raw, cleaned in abShown.append((raw, cleaned)) }
+        ctl.installHotkeyCallbacks()      // the monitor's callbacks reach this controller, as in production (no tap)
         observer = NotificationCenter.default.addObserver(
             forName: TextTransformRetryCenter.didChange, object: TextTransformRetryCenter.shared, queue: nil) { [weak self] _ in
                 self?.retryPosts += 1
@@ -190,6 +194,21 @@ private final class TraceRig {
         startTake()
         answerReview()
     }
+    /// A hold on the card: the old take is parked and a new take is recording. Returns the old take's id.
+    @discardableResult
+    func holdOnCard() -> UUID {
+        let old = takeID
+        pressDown()
+        clock.advance(by: 0.6)
+        traceSettle()
+        return old
+    }
+    /// The new take ends after speech: its transcript arrives (a short Cleanup take, one write, one paste).
+    func newTakeSpeaks(_ text: String = "A short new take about lunch plans.", writes result: String = traceNewText) {
+        startTake(level: .cleanup, text: text)
+        finishWrite(result)
+    }
+    func heldCount() -> Int { ctl.traceHeldCount }
 }
 
 enum AskBackControllerSelfTest {
@@ -327,7 +346,7 @@ enum AskBackControllerSelfTest {
             m.onAskCardOptionUp = { cardUps += 1 }
             m.takeActive = true
             m.fireWakeup(down: true); m.fireWakeup(down: false); traceSettle()
-            check("trace: with no card up a right-Option press and release start and end the take, never the card",
+            check("trace (routing only, separate monitor): with no card up a press and release go to the take, never the card",
                   downs == 1 && ups == 1 && cardDowns == 0 && cardUps == 0)
             m.askCardActive = true
             m.fireWakeup(down: true); m.fireWakeup(down: false); traceSettle()
@@ -338,6 +357,22 @@ enum AskBackControllerSelfTest {
             m.fireWakeup(down: true); m.fireWakeup(down: false); traceSettle()
             check("trace: while only a review runs the press and release still belong to the take",
                   downs == 2 && ups == 2 && cardDowns == 1 && cardUps == 1)
+
+            // The same on the rig's own controller (callbacks installed): the press starts a take, the release ends it.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.pressDown()
+            check("trace: with no card up a right-Option press starts a normal take on the controller: recording, takeActive, one start, no card",
+                  rig.state == "recording" && rig.hotkey.takeActive && rig.newTakeStates == ["idle"] && rig.card.shown.isEmpty
+                    && rig.ctl.traceAskFlow == nil)
+            check("trace: during that take plain Esc, Return and the arrows pass through to the app",
+                  all.allSatisfy { !rig.key($0) } && rig.state == "recording")
+            rig.release()
+            check("trace: the release ends that take through the controller (nothing heard here: no audio): idle, takeActive off",
+                  rig.state == "idle" && !rig.hotkey.takeActive && rig.toasts.contains("toast:Nothing heard") && rig.card.shown.isEmpty)
+            rig.pressDown()
+            check("trace: a second press starts a second take", rig.state == "recording" && rig.newTakeStates.count == 2)
+            check("trace: Option+Esc during a normal take is swallowed and cancels it through the controller",
+                  rig.key(TKey.esc, option: true) && rig.state == "idle" && !rig.hotkey.takeActive)
         }
 
         // ---------------------------------------------------------------- ask-back off, Cleanup mode, short take: the old path
@@ -455,9 +490,14 @@ enum AskBackControllerSelfTest {
                   rig.newTakeStates == ["idle"] && rig.state == "idle" && rig.toasts == ["toast:Nothing heard"])
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             let e = rig.entries(id)
-            check("trace S2: the detached result is one History update, status done, and nothing is pasted",
-                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 0)
+            check("trace S2: the detached result is one History update, status done, and is held (not pasted yet)",
+                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 0 && rig.heldCount() == 1)
             check("trace: the detached write never supersedes or touches the retry (arming inert)", rig.retryPosts == 0)
+            rig.clock.advance(by: 1.0)
+            let after = rig.entries(id)
+            check("trace S2: after the new take ended (nothing heard) the held result pastes once, History still one entry, done",
+                  rig.pastes == 1 && rig.hook.finals == [traceCleaned] && rig.heldCount() == 0 && after.count == 1
+                    && after[0].status == "done" && after[0].text == traceCleaned)
         }
 
         // ---------------------------------------------------------------- a detached old take leaves the new take alone
@@ -486,7 +526,169 @@ enum AskBackControllerSelfTest {
             check("trace: the detached job leaves the new take's retry untouched and pastes nothing",
                   rig.retryPosts == 0 && rig.pastes == 0)
             check("trace: the detached job's History update is by the old take's id", rig.entries(id).first?.status == "done")
+            check("trace: the held result still waits while the new take is live", rig.heldCount() == 1 && rig.pastes == 0)
+            rig.release()                      // the new take ends (nothing heard); the old take was detached already
+            rig.clock.advance(by: 1.0)
+            check("trace: once the new take has ended the held result pastes", rig.pastes == 1 && rig.hook.finals == [traceCleaned])
             Settings.isDictationActive = false
+        }
+
+        // ---------------------------------------------------------------- an earlier take pastes afterwards (held results)
+        do {
+            // Ready before the new take finishes: pastes once, right after the new take's own paste, never before it.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            let old = rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()            // the old take detaches: one detached write
+            let hudBefore = rig.hud.log.count
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            let e = rig.entries(old)
+            check("held: the detached result is written to History at once, before any paste (status done, its text)",
+                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 0)
+            check("held: while the new take is live the held result changes nothing of it: state, HUD, target, retry",
+                  rig.state == "recording" && rig.hotkey.takeActive && rig.hud.log.count == hudBefore
+                    && rig.retryPosts == 0 && rig.ctl.authoritativeForeignTargetForGesture() == nil && rig.heldCount() == 1)
+            rig.newTakeSpeaks()
+            check("held: the new take pastes first, and only its own text",
+                  rig.pastes == 1 && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            rig.clock.advance(by: 0.5)
+            check("held: the held result waits out the settle after the new take's paste", rig.hook.finals == [traceNewText])
+            rig.clock.advance(by: 0.5)
+            check("held: then it pastes once, after the new take's paste, through the normal delivery",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0 && rig.state == "idle")
+            rig.clock.advance(by: 5)
+            let again = rig.entries(old)
+            check("held: nothing pastes twice and the History entry is still one, done, with the landed text",
+                  rig.pastes == 2 && again.count == 1 && again[0].status == "done" && again[0].text == traceCleaned
+                    && again[0].askBack?.questions.first?.how == "new take")
+        }
+        do {
+            // The result arrives after the new take finished and nothing is busy: it pastes on arrival.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 2)
+            check("held: a result not ready when the new take finished has not pasted and is still waiting",
+                  rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            rig.writes.first?.done(.ok(traceCleaned)); traceSettle()
+            check("held: it pastes when it arrives, nothing being busy", rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // A third take is recording when it arrives: it waits for that take too.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 2)
+            rig.pressDown()                                    // a third take starts recording
+            rig.writes.first?.done(.ok(traceCleaned)); traceSettle()
+            check("held: a result arriving while a third take is recording waits",
+                  rig.state == "recording" && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            rig.release()                                      // the third take ends (nothing heard)
+            rig.clock.advance(by: 1)
+            check("held: it pastes after that third take finishes", rig.hook.finals == [traceNewText, traceCleaned] && rig.state == "idle")
+        }
+        do {
+            // A take that starts inside the settle window after the new take's paste keeps the held result waiting.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()
+            rig.writes.first?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 0.4)
+            rig.pressDown()                                    // a take starts before the settle has passed
+            rig.clock.advance(by: 3)
+            check("held: a take started inside the settle window keeps the held result waiting",
+                  rig.state == "recording" && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            rig.release()
+            rig.clock.advance(by: 1)
+            check("held: and it pastes after that take", rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // The new take ends with nothing heard (hold then release): the held result still pastes.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            rig.holdOnCard()
+            rig.release()                                      // detaches the old take; the new take heard nothing
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            check("held: a new take that heard nothing does not drop the held result, which waits out the settle",
+                  rig.pastes == 0 && rig.state == "idle" && rig.heldCount() == 1)
+            rig.clock.advance(by: 1)
+            check("held: it pastes after the nothing-heard take", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // The take it waits behind is cancelled: the held result still pastes.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.toCard()
+            rig.holdOnCard()
+            rig.release()
+            rig.clock.advance(by: 1)
+            rig.pressDown()                                    // another take starts recording
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            check("held: the result waits behind a take that is recording", rig.state == "recording" && rig.pastes == 0 && rig.heldCount() == 1)
+            check("held: Option+Esc cancels that take", rig.key(TKey.esc, option: true) && rig.state == "idle")
+            rig.clock.advance(by: 1)
+            check("held: the held result still pastes after the cancel", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+        }
+        // Two held results (the old take, then a second old take that was started on the first's new take).
+        func twoDetached(_ rig: TraceRig) -> (UUID, UUID) {
+            rig.toCard()
+            let first = rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()           // the first old take detaches: writes[0]
+            rig.startTake()                                    // the new take is a long take of its own and reaches a card
+            rig.answerReview()
+            let second = rig.holdOnCard()
+            rig.ctl.traceParkedFlow?.parkedRelease()           // the second old take detaches: writes[1]
+            return (first, second)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            let (first, second) = twoDetached(rig)
+            check("held: two takes were detached, each with its own write", rig.writes.count == 2 && first != second)
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            rig.writes[0].done(.ok("Held one.")); traceSettle()
+            check("held: both results are written to History before either pastes",
+                  rig.pastes == 0 && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two."
+                    && rig.heldCount() == 2)
+            rig.newTakeSpeaks()
+            check("held: the last take pastes first", rig.hook.finals == [traceNewText])
+            rig.clock.advance(by: 1)
+            check("held: then the earlier detached result, alone", rig.hook.finals == [traceNewText, "Held one."] && rig.heldCount() == 1)
+            rig.clock.advance(by: 1)
+            check("held: then the later one, in order", rig.hook.finals == [traceNewText, "Held one.", "Held two."] && rig.heldCount() == 0)
+            rig.clock.advance(by: 5)
+            check("held: two held results paste one each, no doubles", rig.pastes == 3 && rig.entries(first).count == 1 && rig.entries(second).count == 1)
+        }
+        do {
+            // The first detached write fails: nothing pastes for it, History says write failed, the line moves on.
+            let rig = TraceRig(); defer { rig.close() }
+            let (first, second) = twoDetached(rig)
+            rig.writes[0].done(.timedOut); traceSettle()
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            check("held: a failed detached write says write failed in History and waits for nothing",
+                  rig.entries(first).first?.status == "write failed" && rig.heldCount() == 1 && rig.pastes == 0)
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 2)
+            check("held: the failed result pastes nothing and the next result pastes in its turn",
+                  rig.hook.finals == [traceNewText, "Held two."] && rig.heldCount() == 0
+                    && rig.entries(second).first?.status == "done")
+        }
+        do {
+            // Option+P: its detached result stays History only. The controller has no Option+P detach path yet
+            // (slice 7 adds it), so no controller row can reach it; the rule is pinned where it lives
+            // (AskBackDetachedJob.holdsResult, oracle rows and mutant H-option-p-held).
+            let rec = AskBackRecord(provider: "claude", reviewModel: "m", tier: "careful", reviewMs: 1, writeProvider: nil,
+                                    writeModel: nil, writeMs: nil, spots: [], questions: [])
+            func job(_ source: AskBackSource) -> AskBackDetachedJob {
+                AskBackDetachedJob(historyID: UUID(), transcript: "t", level: .summarize, levelRaw: 2, questions: [], answers: [],
+                                   record: rec, writeProvider: "claude", writeModel: "m", generation: 1, source: source)
+            }
+            check("held: only a dictation take's detached job holds its result; an Option+P job stays History only",
+                  job(.dictation).holdsResult && !job(.selection).holdsResult)
         }
 
         // ---------------------------------------------------------------- S4, S5, S6 and tap wiring that no headless row reaches
