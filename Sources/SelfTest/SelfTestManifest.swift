@@ -271,7 +271,9 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         if let reproExit = CloudDrainDeadlockSelfTest.reproExit(arguments: arguments) {
             return reproExit
         }
-        return TextTransformSelfTest.run() ? 0 : 1
+        let transformOK = TextTransformSelfTest.run()
+        let askBackOK = AskBackReviewSelfTest.run()   // VDASK-2
+        return transformOK && askBackOK ? 0 : 1
     },
     .codexProviderSelftest: .init(tier: .deterministic) { _ in
         CodexProviderSelfTest.run() ? 0 : 1

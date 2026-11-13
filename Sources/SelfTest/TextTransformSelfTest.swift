@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Darwin
 import CoreGraphics
 import ApplicationServices
@@ -1174,6 +1175,31 @@ enum TextTransformSelfTest {
               DictationController.makeCleanupRequest(
                 route: .cleanupL1, input: "I", selected: cleanupBundle,
                 systemPrompt: fidelityBase, timeout: 1).systemPrompt == fidelityBase)
+        // VDASK-1 judge follow-ups. S1: source-shape guard, read from the worktree root, comments stripped.
+        func fidelitySource(_ name: String) -> String {
+            let text = (try? String(contentsOfFile: "Sources/App/\(name)", encoding: .utf8)) ?? ""
+            return text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+                guard let comment = line.range(of: "//") else { return String(line) }
+                return String(line[..<comment.lowerBound])
+            }.joined(separator: "\n")
+        }
+        let fidelityCall = "CleanupFidelity.appending(to: providerPrompt, routeKey: route.rawValue)"
+        let fidelityDictation = fidelitySource("DictationController.swift")
+        check("fidelity wiring: DictationController applies CleanupFidelity.appending exactly once",
+              fidelityDictation.components(separatedBy: fidelityCall).count == 2)
+        let fidelityStrays = ["OneShotRegistry.swift", "CustomModeClient.swift", "SearchClient.swift"]
+            .filter { fidelitySource($0).contains("CleanupFidelity") }
+        check("fidelity wiring: OneShotRegistry, CustomModeClient and SearchClient never reference CleanupFidelity",
+              fidelityStrays.isEmpty && !fidelitySource("OneShotRegistry.swift").isEmpty
+                && !fidelitySource("CustomModeClient.swift").isEmpty && !fidelitySource("SearchClient.swift").isEmpty,
+              fidelityStrays.joined(separator: ", "))
+        // S2: the rules text is pinned by hash, and the append shape is exact.
+        let fidelityRulesHash = SHA256.hash(data: Data(CleanupFidelity.rules.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        check("fidelity rules: sha256 of CleanupFidelity.rules is pinned",
+              fidelityRulesHash == "010f757c7587d8ebdbb294e2146ca3331bc0bf2807edeb96664eea913d83fafa", fidelityRulesHash)
+        check("fidelity rules: appending(to: B, routeKey: cleanupL1) == B + blank line + rules",
+              CleanupFidelity.appending(to: "B", routeKey: "cleanupL1") == "B\n\n" + CleanupFidelity.rules)
 
         let prepBundle = LLMProviderBundle.codex("prep-codex", effort: "high")
         let prepRequest = OneShotRegistry.makeCleanupSelectionRequest(

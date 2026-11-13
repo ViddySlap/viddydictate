@@ -478,6 +478,35 @@ enum TextTransformClient {
         }
     }
 
+    /// VDASK-2 call seam: one single-turn completion on the resolved provider with the fixed ask-back
+    /// review model (never the route's selected bundle). It reaches the same private Claude and Codex
+    /// adapters as `transform`, but it never arms or touches cleanup retry, landing, history or the HUD.
+    /// A local or off resolution completes `.unavailable` without dispatching anything.
+    static func complete(system: String, input: String,
+                         resolution: LLMRouteResolution,
+                         timeout: TimeInterval = CloudCleanupClient.defaultTimeout,
+                         claude: @escaping AsyncAdapter = claudeTransform,
+                         codex: @escaping AsyncAdapter = codexTransform,
+                         completion: @escaping Completion) {
+        guard let selected = resolution.bundle else {
+            completion(.unavailable(resolution.offReason ?? "No provider is available"))
+            return
+        }
+        guard let model = AskBackReview.model(for: AskBackProvider(selected.provider)) else {
+            completion(.unavailable("Ask-back needs Claude or Codex"))
+            return
+        }
+        let bundle: LLMProviderBundle = selected.provider == .codex
+            ? .codex(model.modelID, effort: model.effort)
+            : .claude(model.modelID, effort: model.effort)
+        let request = TextTransformRequest(route: .custom("askBackReview"), bundle: bundle,
+                                           sourceText: input, systemPrompt: system,
+                                           userMessage: input, timeout: timeout)
+        dispatch(request,
+                 local: { _, done in done(.unavailable("Ask-back needs Claude or Codex")) },
+                 claude: claude, codex: codex, completion: completion)
+    }
+
     private static func dispatch(_ request: TextTransformRequest,
                                  local: @escaping AsyncAdapter,
                                  claude: @escaping AsyncAdapter,

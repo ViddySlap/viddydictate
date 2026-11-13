@@ -30,6 +30,9 @@ enum Settings {
         // is red precisely because nothing is wired); this registers the real UserDefaults key so the
         // arm can flip it deterministically rather than mocking a Bool.
         static let tailCheckEnabled = "tailCheckEnabled"    // Bool
+        // VDASK-2 ask-back review. No UI yet; nothing reads these until the card flow lands.
+        static let askBackEnabled = "askBackEnabled"        // Bool
+        static let askBackTier = "askBackTier"              // "careful" | "fast"
         // Local-model residency and capacity controls. LM Studio owns eviction; the app supplies the
         // one idle TTL at load time. The budget position is the Setup slider's visible 0…100 value.
         static let modelIdleUnloadSeconds = "modelIdleUnloadSeconds"
@@ -151,6 +154,8 @@ enum Settings {
         static let reactivity = 0.72
         static let reduceRepeats = true
         static let tailCheckEnabled = true
+        static let askBackEnabled = true
+        static let askBackTier = AskBackTier.careful.rawValue
         static let modelIdleUnloadSeconds = 600
         static let modelMemoryBudgetSliderPosition = 54.0
         // Cleanup model: qwen3-coder-30b-a3b is the on-disk pick that clears the golden green
@@ -223,6 +228,8 @@ enum Settings {
             K.reactivity: Defaults.reactivity,
             K.reduceRepeats: Defaults.reduceRepeats,
             K.tailCheckEnabled: Defaults.tailCheckEnabled,
+            K.askBackEnabled: Defaults.askBackEnabled,
+            K.askBackTier: Defaults.askBackTier,
             K.modelIdleUnloadSeconds: Defaults.modelIdleUnloadSeconds,
             K.modelMemoryBudgetSliderPosition: Defaults.modelMemoryBudgetSliderPosition,
             K.cleanupModel: Defaults.cleanupModel,
@@ -653,6 +660,18 @@ enum Settings {
     static var tailCheckEnabled: Bool {
         get { d.bool(forKey: K.tailCheckEnabled) }
         set { d.set(newValue, forKey: K.tailCheckEnabled); notify() }
+    }
+
+    /// Ask-back (review call before a Summarize or Tighten write). Default on; no settings UI yet.
+    static var askBackEnabled: Bool {
+        get { d.bool(forKey: K.askBackEnabled) }
+        set { d.set(newValue, forKey: K.askBackEnabled); notify() }
+    }
+
+    /// Careful (default) or Fast review rules. An unknown stored string reads as Careful.
+    static var askBackTier: AskBackTier {
+        get { AskBackTier(rawValue: d.string(forKey: K.askBackTier) ?? "") ?? .careful }
+        set { d.set(newValue.rawValue, forKey: K.askBackTier); notify() }
     }
 
     /// The persisted checkbox setting for eligible Hotkeys rows. Stable descriptor ids keep a rebind
