@@ -137,6 +137,81 @@ enum AskBackReview {
         return t.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
+    /// Byte-identical copy of `CleanupClient.asciiPunctuationNormalized` (that type is not Foundation-only);
+    /// the Mac self-test checks the two agree. Both adapters run every reply through it, so the transcript
+    /// and the quote are folded with it before they are compared.
+    static func asciiPunctuationNormalized(_ s: String) -> String {
+        var out = s
+        let map: [(String, String)] = [
+            ("\u{2014}", " - "),  // em dash -> spaced hyphen
+            ("\u{2015}", " - "),  // horizontal bar -> spaced hyphen
+            ("\u{2013}", "-"),    // en dash -> hyphen
+            ("\u{2012}", "-"),    // figure dash -> hyphen
+            ("\u{2018}", "'"),    // left single quote
+            ("\u{2019}", "'"),    // right single quote / apostrophe
+            ("\u{201A}", "'"),    // single low-9 quote
+            ("\u{201C}", "\""),   // left double quote
+            ("\u{201D}", "\""),   // right double quote
+            ("\u{201E}", "\""),   // double low-9 quote
+            ("\u{2026}", "..."),  // ellipsis
+            ("\u{00A0}", " "),    // non-breaking space
+            ("\u{2022}", "-"),    // bullet
+            ("`", ""),            // markdown backtick -> removed (no-markdown guard; ` is never wanted)
+        ]
+        for (k, v) in map { out = out.replacingOccurrences(of: k, with: v) }
+        while out.contains("  ") { out = out.replacingOccurrences(of: "  ", with: " ") }
+        return out
+    }
+
+    /// The transcript in match form (ASCII-folded, lowercase, collapsed whitespace), each folded character
+    /// remembering the span of the original it came from, so a match returns the speaker's own words.
+    struct FoldedTranscript {
+        private let source: String
+        private var chars: [Character] = []
+        private var starts: [String.Index] = []
+        private var ends: [String.Index] = []
+
+        init(_ transcript: String) {
+            source = transcript
+            var pendingSpace: (String.Index, String.Index)?
+            var i = transcript.startIndex
+            while i < transcript.endIndex {
+                let next = transcript.index(after: i)
+                let c = transcript[i]
+                // Fold this one character exactly as the quote is folded, keeping the spaces a dash adds.
+                for ch in AskBackReview.asciiPunctuationNormalized(String(c)) {
+                    if ch.isWhitespace {
+                        if !chars.isEmpty { pendingSpace = (pendingSpace?.0 ?? i, next) }
+                    } else {
+                        if let (s0, e0) = pendingSpace { chars.append(" "); starts.append(s0); ends.append(e0); pendingSpace = nil }
+                        for f in AskBackReview.normalizedForMatch(String(ch)) { chars.append(f); starts.append(i); ends.append(next) }
+                    }
+                }
+                i = next
+            }
+        }
+
+        private static func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "'" }
+
+        /// The transcript's own text for the first whole-word occurrence of `needle` (already in match form).
+        func find(_ needle: String) -> String? {
+            let n = Array(needle)
+            guard !n.isEmpty, n.count <= chars.count else { return nil }
+            let startsWord = Self.isWordChar(n[0]), endsWord = Self.isWordChar(n[n.count - 1])
+            var i = 0
+            while i + n.count <= chars.count {
+                if chars[i] == n[0] && Array(chars[i..<(i + n.count)]) == n {
+                    let leftOK = !startsWord || i == 0 || !Self.isWordChar(chars[i - 1])
+                    let j = i + n.count
+                    let rightOK = !endsWord || j == chars.count || !Self.isWordChar(chars[j])
+                    if leftOK && rightOK { return String(source[starts[i]..<ends[j - 1]]) }
+                }
+                i += 1
+            }
+            return nil
+        }
+    }
+
     /// The body of the first ``` fence, without its language line, or nil when there is no fence.
     static func fencedBody(in s: String) -> String? {
         guard let open = s.range(of: "```") else { return nil }
@@ -147,9 +222,13 @@ enum AskBackReview {
     }
 
     /// The first balanced top-level `{...}` in `s`, honoring JSON strings and escapes; nil if none.
-    static func firstBalancedObject(in s: String) -> String? {
+    /// `lenient` repairs the bare `"` the adapters leave when the model copied curly double quotes inside a
+    /// string (CleanupClient.asciiPunctuationNormalized maps them to `"`): inside a string, a `"` closes it
+    /// only when the next non-blank byte is one of `, } ] :`; any other `"` is escaped and kept as text.
+    static func firstBalancedObject(in s: String, lenient: Bool = false) -> String? {
         let bytes = Array(s.utf8)
         guard let start = bytes.firstIndex(of: UInt8(ascii: "{")) else { return nil }
+        var out: [UInt8] = []
         var depth = 0
         var inString = false
         var escaped = false
@@ -157,17 +236,28 @@ enum AskBackReview {
         while i < bytes.count {
             let b = bytes[i]
             if inString {
-                if escaped { escaped = false }
-                else if b == UInt8(ascii: "\\") { escaped = true }
-                else if b == UInt8(ascii: "\"") { inString = false }
+                if escaped { escaped = false; out.append(b) }
+                else if b == UInt8(ascii: "\\") { escaped = true; out.append(b) }
+                else if b == UInt8(ascii: "\"") {
+                    if lenient {
+                        var j = i + 1
+                        while j < bytes.count, bytes[j] == 0x20 || bytes[j] == 0x09 || bytes[j] == 0x0A || bytes[j] == 0x0D { j += 1 }
+                        let closes = j >= bytes.count || [UInt8(ascii: ","), UInt8(ascii: "}"),
+                                                           UInt8(ascii: "]"), UInt8(ascii: ":")].contains(bytes[j])
+                        if closes { inString = false; out.append(b) }
+                        else { out.append(UInt8(ascii: "\\")); out.append(b) }
+                    } else {
+                        inString = false; out.append(b)
+                    }
+                } else { out.append(b) }
             } else if b == UInt8(ascii: "\"") {
-                inString = true
+                inString = true; out.append(b)
             } else if b == UInt8(ascii: "{") {
-                depth += 1
+                depth += 1; out.append(b)
             } else if b == UInt8(ascii: "}") {
-                depth -= 1
-                if depth == 0 { return String(decoding: bytes[start...i], as: UTF8.self) }
-            }
+                depth -= 1; out.append(b)
+                if depth == 0 { return String(decoding: out, as: UTF8.self) }
+            } else { out.append(b) }
             i += 1
         }
         return nil
@@ -175,12 +265,16 @@ enum AskBackReview {
 
     /// nil on anything invalid. A missing `questions` or `spots` key is an empty list, not nil.
     static func parse(_ reply: String, transcript: String, level: AskBackLevel) -> AskBackReviewResult? {
-        var object: String?
-        if let body = fencedBody(in: reply) { object = firstBalancedObject(in: body) }
-        if object == nil { object = firstBalancedObject(in: reply) }
-        guard let json = object,
-              let parsed = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
-              let root = parsed as? [String: Any] else { return nil }
+        func extract(lenient: Bool) -> String? {
+            if let body = fencedBody(in: reply) { if let o = firstBalancedObject(in: body, lenient: lenient) { return o } }
+            return firstBalancedObject(in: reply, lenient: lenient)
+        }
+        func decode(_ object: String?) -> [String: Any]? {
+            guard let json = object,
+                  let parsed = try? JSONSerialization.jsonObject(with: Data(json.utf8)) else { return nil }
+            return parsed as? [String: Any]
+        }
+        guard let root = decode(extract(lenient: false)) ?? decode(extract(lenient: true)) else { return nil }
 
         var spots: [AskBackSpot] = []
         if let rawSpots = root["spots"] {
@@ -193,7 +287,7 @@ enum AskBackReview {
             }
         }
 
-        let haystack = normalizedForMatch(transcript)
+        let folded = FoldedTranscript(transcript)
         var kept: [AskBackQuestion] = []
         var keptQuotes: [String] = []
         if let rawQuestions = root["questions"] {
@@ -203,8 +297,8 @@ enum AskBackReview {
                       let question = d["question"] as? String,
                       !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       let quote = d["quote"] as? String else { continue }
-                let needle = normalizedForMatch(quote)
-                guard !needle.isEmpty, haystack.range(of: needle) != nil else { continue }
+                let needle = normalizedForMatch(asciiPunctuationNormalized(quote))
+                guard !needle.isEmpty, let spoken = folded.find(needle) else { continue }
                 let options = ((d["options"] as? [Any]) ?? [])
                     .compactMap { $0 as? String }
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -212,7 +306,7 @@ enum AskBackReview {
                 guard options.count >= 2 else { continue }
                 guard !keptQuotes.contains(needle) else { continue }
                 keptQuotes.append(needle)
-                kept.append(AskBackQuestion(question: question, quote: quote,
+                kept.append(AskBackQuestion(question: question, quote: spoken,
                                             why: d["why"] as? String ?? "",
                                             options: Array(options.prefix(4))))
             }
@@ -264,6 +358,9 @@ final class AskBackReviewRunner {
     private var pending: [ReviewID: Pending] = [:]
     private var cancels: [ReviewID: Cancel] = [:]
     private var used: Set<ReviewID> = []
+    /// A review in flight keeps its runner alive (released by `finish`), so a caller that drops its
+    /// reference still gets exactly one outcome.
+    private var retainers: [ReviewID: AskBackReviewRunner] = [:]
 
     init(timeout: TimeInterval = 90, schedule: @escaping Schedule,
          provider: @escaping Provider, deliver: @escaping Deliver) {
@@ -281,6 +378,7 @@ final class AskBackReviewRunner {
         guard !used.contains(id) else { lock.unlock(); return false }
         used.insert(id)
         pending[id] = Pending(transcript: text, level: level)
+        retainers[id] = self
         lock.unlock()
 
         let cancel = schedule(timeout) { [weak self] in self?.finish(id, .timedOut) }
@@ -318,8 +416,10 @@ final class AskBackReviewRunner {
         lock.lock()
         guard pending.removeValue(forKey: id) != nil else { lock.unlock(); return }
         let cancel = cancels.removeValue(forKey: id)
+        let keepAlive = retainers.removeValue(forKey: id)
         lock.unlock()
         cancel?()
         deliver(id, outcome)
+        withExtendedLifetime(keepAlive) {}
     }
 }

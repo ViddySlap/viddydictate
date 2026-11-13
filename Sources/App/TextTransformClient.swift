@@ -486,7 +486,7 @@ enum TextTransformClient {
                          resolution: LLMRouteResolution,
                          timeout: TimeInterval = CloudCleanupClient.defaultTimeout,
                          claude: @escaping AsyncAdapter = claudeTransform,
-                         codex: @escaping AsyncAdapter = codexTransform,
+                         codex: @escaping AsyncAdapter = codexReviewTransform,
                          completion: @escaping Completion) {
         guard let selected = resolution.bundle else {
             completion(.unavailable(resolution.offReason ?? "No provider is available"))
@@ -687,7 +687,21 @@ enum TextTransformClient {
         }
     }
 
+    /// The review's Codex adapter: same run as `codexTransform`, but its outcome never writes the app-wide
+    /// Codex availability (the review model is not the route's model).
+    private static func codexReviewTransform(_ request: TextTransformRequest,
+                                             completion: @escaping Completion) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(runCodex(request, updatesAvailability: false))
+        }
+    }
+
     private static func codexTransformSync(_ request: TextTransformRequest) -> CleanupClient.Result {
+        runCodex(request, updatesAvailability: true)
+    }
+
+    private static func runCodex(_ request: TextTransformRequest,
+                                 updatesAvailability: Bool) -> CleanupClient.Result {
         guard !request.bundle.modelID.isEmpty else {
             return .unavailable("Codex model ID is required")
         }
@@ -706,6 +720,6 @@ enum TextTransformClient {
             images: request.images.map {
                 CodexRuntimeImage(data: $0.data, mediaType: $0.mediaType, label: $0.label)
             }))
-        return CodexTransformResult.resolve(outcome, request: request)
+        return CodexTransformResult.resolve(outcome, request: request, updatesAvailability: updatesAvailability)
     }
 }

@@ -119,6 +119,54 @@ check("cap: dropped questions do not use up the cap",
     AskBackReview.parse(reply([q("X?", "never said", ["a", "b"])] + Array(four.prefix(3))),
                         transcript: T, level: .summarize)?.questions.count == 3)
 
+// MARK: judge round 1: S3 adapter-normalized replies, S5 word boundaries, S6 escapes and blank question
+func reply2(_ qs: [String]) -> String { "{\"spots\":[],\"questions\":[" + qs.joined(separator: ",") + "]}" }
+let TD = "We ship Friday\u{2014}no, Monday. Earlier\u{2026} I think we wait. She said \u{201C}keep the blue one\u{201D} and left."
+// What the adapters hand parse: every reply already went through asciiPunctuationNormalized.
+let emRep = reply2([q("Which?", AskBackReview.asciiPunctuationNormalized("We ship Friday\u{2014}no, Monday"), ["a", "b"])])
+let emRes = AskBackReview.parse(emRep, transcript: TD, level: .summarize)
+check("S3 parse: an em dash quote after adapter normalization keeps the question, quote as spoken",
+    emRes?.questions.count == 1 && emRes?.questions.first?.quote == "We ship Friday\u{2014}no, Monday")
+let elRes = AskBackReview.parse(reply2([q("Which?", AskBackReview.asciiPunctuationNormalized("Earlier\u{2026} I think"), ["a", "b"])]),
+                                transcript: TD, level: .summarize)
+check("S3 parse: an ellipsis quote after adapter normalization keeps the question",
+    elRes?.questions.count == 1 && elRes?.questions.first?.quote == "Earlier\u{2026} I think"
+    && AskBackReview.parse(reply2([q("Which?", "Earlier\u{2026} I think", ["a", "b"])]), transcript: TD, level: .summarize)?.questions.count == 1)
+let curlyJSON = AskBackReview.asciiPunctuationNormalized(
+    "{\"spots\":[{\"quote\":\"She said \u{201C}keep the blue one\u{201D}\",\"issue\":\"i\",\"impact\":\"high\"}],\"questions\":[{\"question\":\"Which one?\",\"quote\":\"She said \u{201C}keep the blue one\u{201D} and left\",\"why\":\"w\",\"options\":[\"Blue\",\"Other\"]}]}")
+let curlyRes = AskBackReview.parse(curlyJSON, transcript: TD, level: .summarize)
+check("S3 parse: curly double quotes inside a string become bare quotes and the review survives",
+    curlyRes != nil && curlyRes?.questions.count == 1 && curlyRes?.questions.first?.options == ["Blue", "Other"]
+    && curlyRes?.questions.first?.quote == "She said \u{201C}keep the blue one\u{201D} and left"
+    && curlyRes?.spots.count == 1)
+let fenceCurly = AskBackReview.parse("```json\n" + curlyJSON + "\n```", transcript: TD, level: .summarize)
+check("S3 parse: a fenced reply with bare quotes inside a string survives", fenceCurly == curlyRes)
+let TW = "I think we should wait until the launch."
+let frag = AskBackReview.parse(reply2([q("Q?", "ink we sh", ["a", "b"])]), transcript: TW, level: .summarize)
+check("S5 parse: a mid-word fragment is dropped", frag?.questions.isEmpty == true
+    && AskBackReview.parse(reply2([q("Q?", "hink we should", ["a", "b"])]), transcript: TW, level: .summarize)?.questions.isEmpty == true)
+let half = AskBackReview.parse(reply2([q("Q?", "think we should wai", ["a", "b"])]), transcript: TW, level: .summarize)
+check("S5 parse: a quote cut inside its last word is dropped", half?.questions.isEmpty == true)
+let recase = AskBackReview.parse(reply2([q("Q?", "I THINK   we", ["a", "b"])]), transcript: TW, level: .summarize)
+check("S5 parse: a recased quote is shown as the transcript has it", recase?.questions.first?.quote == "I think we")
+let whole = AskBackReview.parse(reply2([q("Q?", "wait until the", ["a", "b"])]), transcript: TW, level: .summarize)
+check("S5 parse: a whole-word span in the middle is kept", whole?.questions.first?.quote == "wait until the")
+let TB = "He said it was {done} and \"ready\" now, then left."
+let escRep = "{\"spots\":[],\"questions\":[{\"question\":\"Is it done?\",\"quote\":\"it was {done} and \\\"ready\\\" now\",\"why\":\"w\",\"options\":[\"Yes\",\"No\"]}]}"
+let escRes = AskBackReview.parse(escRep, transcript: TB, level: .summarize)
+check("S6 parse: escaped quotes and braces inside a string parse and the quote is kept",
+    escRes?.questions.count == 1 && escRes?.questions.first?.quote == "it was {done} and \"ready\" now"
+    && AskBackReview.parse("{\"questions\":[{\"question\":\"Set?\",\"quote\":\"the \\\"{done} flag\",\"options\":[\"Yes\",\"No\"]}]}",
+                           transcript: "Mark the \"{done} flag as set.", level: .summarize)?.questions.count == 1)
+let blankQ = AskBackReview.parse(reply2([q("   ", "ship on Friday", ["a", "b"]), q("", "ship on Monday", ["a", "b"]), q("Real?", "tell the client", ["a", "b"])]),
+                                 transcript: T, level: .summarize)
+check("S6 parse: a blank or whitespace question is dropped", blankQ?.questions.map { $0.question } == ["Real?"])
+
+check("S3 fold: AskBackReview.asciiPunctuationNormalized agrees with CleanupClient's on every typographic glyph",
+    ["We ship Friday\u{2014}no", "earlier\u{2026} I think", "\u{201C}keep\u{201D} \u{201E}x\u{201F}", "it\u{2019}s \u{2018}a\u{2019} \u{201A}b",
+     "a\u{2013}b\u{2012}c\u{2015}d", "x\u{00A0}\u{00A0}y   z", "bullet \u{2022} `code`", "plain text", ""].allSatisfy {
+        AskBackReview.asciiPunctuationNormalized($0) == CleanupClient.asciiPunctuationNormalized($0) })
+
 // MARK: gate
 var gateOK = true
 for words in [24, 25, 49, 50] {
@@ -231,6 +279,36 @@ do {
     check("runner: reusing an id is refused", first && !second)
 }
 
+// S4: the caller drops its reference; the runner keeps itself alive until it delivers.
+do {
+    let clock = AskBackFakeClock(), prov = AskBackFakeProvider()
+    var delivered: [AskBackOutcome] = []
+    weak var weakRunner: AskBackReviewRunner?
+    do {
+        let r = AskBackReviewRunner(timeout: 90, schedule: clock.schedule, provider: prov.call,
+                                    deliver: { delivered.append($1) })
+        weakRunner = r
+        r.start(id: UUID(), text: T, level: .summarize, tier: .careful, source: .dictation)
+    }
+    check("S4 runner: a review in flight keeps the runner alive after the caller drops it", weakRunner != nil)
+    prov.calls[0].done(.text(goodReply))
+    check("S4 runner: a dropped reference still gets exactly one result outcome",
+        delivered.count == 1 && delivered[0] == .result(valid!))
+    check("S4 runner: the runner is released once it has delivered", weakRunner == nil)
+}
+do {
+    let clock = AskBackFakeClock(), prov = AskBackFakeProvider()
+    var delivered: [AskBackOutcome] = []
+    do {
+        let r = AskBackReviewRunner(timeout: 90, schedule: clock.schedule, provider: prov.call,
+                                    deliver: { delivered.append($1) })
+        r.start(id: UUID(), text: T, level: .summarize, tier: .careful, source: .dictation)
+    }
+    clock.advance(90)
+    prov.calls[0].done(.text(goodReply))
+    check("S4 runner: a dropped reference still gets exactly one timed-out outcome", delivered == [.timedOut])
+}
+
 
         // MARK: call seam (fake adapters: nothing is spawned)
         func seam(_ resolution: LLMRouteResolution) -> (claude: [TextTransformRequest], codex: [TextTransformRequest], result: CleanupClient.Result?) {
@@ -270,6 +348,45 @@ do {
               AskBackProvider(.claude) == .claude && AskBackProvider(.codex) == .codex && AskBackProvider(.local) == .local
                 && AskBackLevel(.tighten) == .tighten && AskBackLevel(.summarize) == .summarize
                 && AskBackLevel(.cleanup) == .cleanup)
+
+        // S1: a review's Codex outcome never writes app-wide Codex availability.
+        func settleMain() {
+            if Thread.isMainThread { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15)) }
+            else { DispatchQueue.main.sync {} }
+        }
+        let priorCodex = Settings.modelsPower.availabilityState(for: .codex)
+        Settings.modelsPower.setAvailabilityState(.available, for: .codex)
+        let reviewReq = TextTransformRequest(route: .custom("askBackReview"), bundle: .codex("gpt-6.1-sol", effort: "medium"),
+                                             sourceText: "IN", systemPrompt: "SYS", userMessage: "IN", timeout: 5)
+        let reviewOutcomes: [CodexRuntimeOutcome] = [.unavailable("synthetic"), .disconnected,
+            .processFailure(exitCode: 1, stderrBytes: 0, stderrHead: "")]
+        for outcome in reviewOutcomes { _ = CodexTransformResult.resolve(outcome, request: reviewReq, updatesAvailability: false) }
+        settleMain()
+        check("S1 codex: a review outcome (unavailable, disconnected, process failure) leaves Codex availability unchanged",
+              Settings.modelsPower.availabilityState(for: .codex) == .available)
+        _ = CodexTransformResult.resolve(.unavailable("synthetic"), request: reviewReq)
+        settleMain()
+        check("S1 codex: the default (every existing caller) still writes availability",
+              Settings.modelsPower.availabilityState(for: .codex) == .unavailable("synthetic"))
+        Settings.modelsPower.setAvailabilityState(priorCodex, for: .codex)
+
+        // S7: the seam leaves a pending cleanup Retry (and its epoch) alone.
+        let retryCenter = TextTransformRetryCenter.shared
+        let retryEpoch = retryCenter.beginNewRequest()
+        let failedReq = TextTransformRequest(route: .promptPrep, bundle: .local("failed-local"), sourceText: "SYN",
+                                             systemPrompt: "SYN", userMessage: "SYN", timeout: 5)
+        let retryDescriptor = TextTransformClient.retryDescriptor(for: failedReq, after: .unavailable("x"))!
+        retryCenter.capture(retryDescriptor, expectedEpoch: retryEpoch) { _, _ in }
+        let pendingBefore = retryCenter.summary
+        _ = seam(.pinned(.claude("claude-haiku-5-5", effort: "low")))
+        _ = seam(.pinned(.codex("gpt-6-luna", effort: "low")))
+        _ = seam(.pinned(.local("some-local-model")))
+        check("S7 seam: complete leaves a pending cleanup retry unchanged", pendingBefore != nil
+              && retryCenter.summary == pendingBefore)
+        retryCenter.capture(retryDescriptor, expectedEpoch: retryEpoch) { _, _ in }
+        check("S7 seam: complete leaves the retry epoch unchanged (a capture at the old epoch still lands)",
+              retryCenter.summary != nil && retryCenter.summary != pendingBefore)
+        retryCenter.invalidate()
 
         // MARK: settings
         defaults.removeObject(forKey: "askBackEnabled")

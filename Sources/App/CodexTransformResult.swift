@@ -1,8 +1,11 @@
 import Foundation
 
 enum CodexTransformResult {
+    /// `updatesAvailability: false` is for a call that is not on the route's own model (the ask-back review
+    /// runs a fixed model): its outcome must not flip the app-wide Codex availability. Default is unchanged.
     static func resolve(_ outcome: CodexRuntimeOutcome,
-                        request: TextTransformRequest) -> CleanupClient.Result {
+                        request: TextTransformRequest,
+                        updatesAvailability: Bool = true) -> CleanupClient.Result {
         let result: CleanupClient.Result
         var diagnosticSuffix = ""
         switch outcome {
@@ -29,7 +32,7 @@ enum CodexTransformResult {
             diagnosticSuffix = " stderrBytes=\(stderrBytes)"
             if !stderrHead.isEmpty { diagnosticSuffix += " stderrHead=\(stderrHead)" }
         }
-        updateAvailability(after: outcome)
+        if updatesAvailability { updateAvailability(after: outcome) }
         if case .ok = result {} else {
             let classification: String
             switch result {
