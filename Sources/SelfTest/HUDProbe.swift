@@ -39,6 +39,7 @@ enum HUDProbe {
 
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
+        probeAskBackChip(hud, visibleFrame: vf)
         probeInfoSide(hud, visibleFrame: vf)
         probeInfoEdges(hud, visibleFrame: vf)
         probeLowPowerToast(hud, visibleFrame: vf)
@@ -191,6 +192,90 @@ enum HUDProbe {
               "afterDisarm=\(hud.infoPillFrameForTesting.width) lockOnly=\(infoLockOnly.width)")
         check("info-no-stray-after-bullseye-disarm", hud.infoPillStrayVisibleContentForTesting.isEmpty,
               "stray=\(hud.infoPillStrayVisibleContentForTesting) expect [] (disarmed on a shown pill)")
+    }
+
+    /// VDASK-5 repair round 1 (M1): the ? chip beside the info pill, driven through the real HUD. It shows exactly
+    /// when the info pill shows (each content set), sits at the pill's right end, follows a width change, ignores
+    /// nothing a click should do, and always shows the same state as the full-box ?.
+    private static func probeAskBackChip(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        Settings.hudUIScale = 1.0
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.hide()
+        hud.setBullseyeArmed(false)
+        hud.setArmedMode(glyph: nil)
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.setCleanup(enabled: false, level: 0)
+        hud.show()
+        // Each info-pill content set: the chip is shown exactly when the pill is.
+        check("chip-hidden-when-pill-hidden (Raw, nothing locked)",
+              !hud.infoPillShownForTesting && !hud.askBackChipShownForTesting,
+              "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting) expect false, false")
+        hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
+        check("chip-shown-when-locked", hud.infoPillShownForTesting && hud.askBackChipShownForTesting,
+              "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting)")
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.setCleanup(enabled: true, level: 1)
+        check("chip-shown-when-cleanup", hud.infoPillShownForTesting && hud.askBackChipShownForTesting,
+              "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting)")
+        let capCleanup = hud.infoPillFrameForTesting
+        let chipCleanup = hud.askBackChipFrameForTesting
+        check("chip-at-pill-right-end-after-level-word",
+              chipCleanup.minX >= capCleanup.maxX + 2 && chipCleanup.minX <= capCleanup.maxX + 8
+                && approx(chipCleanup.midY, capCleanup.midY),
+              "chip=\(chipCleanup) capsule=\(capCleanup) expect chip just right of the capsule, centred on it")
+        hud.setCleanup(enabled: false, level: 0)
+        hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
+        hud.setBullseyeArmed(true)
+        let capWide = hud.infoPillFrameForTesting
+        check("chip-follows-a-width-change",
+              capWide.width != capCleanup.width && approx(hud.askBackChipFrameForTesting.minX - capWide.maxX,
+                                                          chipCleanup.minX - capCleanup.maxX),
+              "chip=\(hud.askBackChipFrameForTesting) capsule=\(capWide) (was \(chipCleanup) / \(capCleanup))")
+        hud.setBullseyeArmed(false)
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.setArmedMode(glyph: "A")
+        check("chip-shown-when-a-one-shot-is-armed", hud.infoPillShownForTesting && hud.askBackChipShownForTesting,
+              "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting)")
+        hud.setArmedMode(glyph: nil)
+        check("chip-hidden-again-with-the-pill", !hud.infoPillShownForTesting && !hud.askBackChipShownForTesting,
+              "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting)")
+        hud.setCleanup(enabled: true, level: 2)
+        hud.hide()
+        check("chip-hidden-when-the-HUD-hides", !hud.askBackChipShownForTesting, "chip=\(hud.askBackChipShownForTesting)")
+
+        // The chip and the full-box ? always show the same state; a greyed chip is not clickable.
+        let states: [AskBackToggleState] = [
+            AskBackToggleRules.state(enabled: true, level: .tighten, provider: .claude),
+            AskBackToggleRules.state(enabled: false, level: .summarize, provider: .codex),
+            AskBackToggleRules.state(enabled: true, level: .cleanup, provider: .claude),
+            AskBackToggleRules.state(enabled: true, level: .tighten, provider: .local),
+        ]
+        var same = true
+        for st in states {
+            hud.setAskBackToggle(st)
+            if hud.askBackChipStateForTesting != st || hud.askBackButtonStateForTesting != st { same = false }
+        }
+        check("chip-and-full-box-show-the-same-state", same, "pushed \(states.count) states")
+
+        // A click reaches the HUD's onToggleAskBack, which the controller turns into the one setting flip.
+        var clicks = 0
+        hud.onToggleAskBack = { clicks += 1 }
+        hud.clickAskBackChipForTesting()
+        check("chip-click-reaches-onToggleAskBack", clicks == 1, "clicks=\(clicks)")
+        hud.onToggleAskBack = nil
+
+        // Pill on the LEFT of the scope (pointer at the right edge): the chip goes on the capsule's left end, inside
+        // the screen and clear of the scope pill.
+        hud.setCleanup(enabled: true, level: 1)
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.pointerProviderForTesting = { NSPoint(x: vf.maxX - 20, y: vf.maxY - 200) }
+        hud.show()
+        let sc = hud.frameForTesting, cap = hud.infoPillFrameForTesting, chip = hud.askBackChipFrameForTesting
+        check("chip-left-of-the-capsule-when-the-pill-flips-left",
+              hud.askBackChipShownForTesting && chip.maxX <= cap.minX && chip.minX >= vf.minX && chip.maxX <= sc.minX,
+              "chip=\(chip) capsule=\(cap) scope=\(sc)")
+        hud.hide()
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
     }
 
     private static func probeInfoSide(_ hud: HUDPanel, visibleFrame vf: NSRect) {

@@ -171,6 +171,9 @@ final class AskBackToggleButton: NSButton {
 
     var appliedState: AskBackToggleState { toggleState }
 
+    /// A click works while another app is frontmost (the chip panel never activates the app).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     func apply(_ s: AskBackToggleState) {
         toggleState = s
         isEnabled = s.clickable
@@ -200,7 +203,7 @@ final class AskBackToggleButton: NSButton {
         layer?.borderColor = border.cgColor
         if lit || (hovering && toggleState.clickable) {
             layer?.shadowColor = Phosphor.green.cgColor; layer?.shadowRadius = 7
-            layer?.shadowOpacity = lit ? 0.5 : 0.35; layer?.shadowOffset = .zero; layer?.masksToBounds = false
+            layer?.shadowOpacity = 0.5; layer?.shadowOffset = .zero; layer?.masksToBounds = false
         } else {
             layer?.shadowOpacity = 0
         }
@@ -274,6 +277,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// The low-power INFO PILL (Item B): a separate content-gated capsule beside the scope pill on its
     /// row, holding the lock glyph + `?` keycap + labeled slider. Its own panel, so the scope pill never moves.
     private let infoPill = InfoPillPanel()
+    /// VDASK-5 repair round 1: the clickable ? beside the info pill (the pill's own panel ignores the mouse).
+    private let askBackChip = AskBackToggleChip()
     /// The spinning green-phosphor wheel that replaces the whole HUD during the cleanup wait.
     private let spinner = ThinkingSpinner()
     /// Forwarded when the user drags the HUD slider, so the controller can set the level.
@@ -391,6 +396,8 @@ final class HUDPanel: NSObject, HUDPresenting {
         lockButton.target = self; lockButton.action = #selector(lockClicked)
         stopButton.target = self; stopButton.action = #selector(stopClicked)
         askBackButton.target = self; askBackButton.action = #selector(askBackClicked)
+        askBackChip.onClick = { [weak self] in self?.onToggleAskBack?() }
+        infoPill.onPlacement = { [weak self] placement in self?.askBackChip.place(placement) }
         // The scope only ever shows live mic input now; the cleanup wait is a separate spinner that
         // replaces the whole HUD (see setThinking), not a sine in this box.
         wave.samplesProvider = { [weak self] in self?.samplesProvider?() ?? [] }
@@ -439,7 +446,10 @@ final class HUDPanel: NSObject, HUDPresenting {
     @objc private func askBackClicked() { onToggleAskBack?() }
 
     /// VDASK-5: the controller pushes the ? button's look whenever the setting, the level or the route changes.
-    func setAskBackToggle(_ state: AskBackToggleState) { askBackButton.apply(state) }
+    func setAskBackToggle(_ state: AskBackToggleState) {
+        askBackButton.apply(state)
+        askBackChip.apply(state)   // the chip and the full-box ? always show the same state
+    }
 
     private func toastClicked() {
         let action = toastAction
@@ -1084,6 +1094,11 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// capsule's on-screen frame (so the probe can assert more active elements ⇒ a wider pill). Both
     /// are synchronous logical targets, valid even mid-animation.
     var infoPillShownForTesting: Bool { infoPill.isShown }
+    var askBackChipShownForTesting: Bool { askBackChip.isShown }
+    var askBackChipFrameForTesting: NSRect { askBackChip.frame }
+    var askBackChipStateForTesting: AskBackToggleState { askBackChip.appliedState }
+    var askBackButtonStateForTesting: AskBackToggleState { askBackButton.appliedState }
+    func clickAskBackChipForTesting() { askBackChip.onClick?() }
     var infoPillFrameForTesting: NSRect { infoPill.capsuleTargetFrame }
     /// GUI-render seam: both HUD paths must consume the same rebound cleanup glyph.
     /// Offscreen render seam for `--hud-render` (V1): the pop-up mode badge, which is the keycap

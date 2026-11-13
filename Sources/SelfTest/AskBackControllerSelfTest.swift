@@ -1614,6 +1614,37 @@ enum AskBackControllerSelfTest {
             check("pill: and with the setting back on, the next take reviews again", again.reviews.count == 1 && again.state == "reviewing")
         }
 
+        do {
+            // VDASK-5 repair round 1 (M1): the ? chip beside the pill is clickable WHILE RECORDING. The click flips
+            // the one setting; the take being recorded reads it when it ends (the gate in deliver), not at its start.
+            Settings.askBackEnabled = true
+            let savedLevel3 = CleanupState.shared.cleanupLevel
+            CleanupState.shared.setLevel(.summarize)
+            defer { CleanupState.shared.setLevel(savedLevel3); Settings.askBackEnabled = true; Settings.isDictationActive = false }
+            let rig = TraceRig(); defer { rig.close() }
+            rig.pressDown()
+            check("chip: the take is recording when the ? is clicked", rig.state == "recording" && rig.hotkey.takeActive)
+            let gen = rig.ctl.traceGeneration
+            rig.ctl.toggleAskBackFromHUD()
+            check("chip: a click while recording flips the setting and the take keeps recording (nothing started, ended or cancelled)",
+                  Settings.askBackEnabled == false && rig.state == "recording" && rig.hotkey.takeActive
+                    && rig.ctl.traceGeneration == gen && rig.reviews.isEmpty && rig.writes.isEmpty
+                    && rig.hud.toggles.last?.bright == false)
+            rig.startTake()   // the take ends and its transcript arrives
+            check("chip: that take's ask flow follows the new value: off, so no review and the write starts at once",
+                  rig.reviews.isEmpty && rig.writes.count == 1 && rig.ctl.traceAskFlow == nil)
+            rig.finishWrite()
+            Settings.isDictationActive = false
+
+            let on = TraceRig(); defer { on.close() }
+            on.pressDown()
+            on.ctl.toggleAskBackFromHUD()   // off
+            on.ctl.toggleAskBackFromHUD()   // and on again before the take ends
+            on.startTake()
+            check("chip: clicked back on while recording, that take reviews", Settings.askBackEnabled == true
+                  && on.reviews.count == 1 && on.state == "reviewing")
+        }
+
         print(check.summaryLine(prefix: "[askback-controller-selftest]"))
         return check.passed
     }

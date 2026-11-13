@@ -85,6 +85,39 @@ enum AskBackPillSelfTest {
               settingsView.contains("askCheck.state = Settings.askBackEnabled ? .on : .off")
                 && settingsView.contains("forName: Settings.didChange, object: nil, queue: .main\n        ) { [weak self] _ in self?.rebuild() }"))
 
+        // VDASK-5 repair round 1 (M1): the ? chip beside the info pill. Pure geometry here; the shown/hidden, position,
+        // click and same-state rows that need the real HUD are in HUDProbe (probeAskBackChip).
+        let vis = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let cap = CGRect(x: 600, y: 300, width: 150, height: 34)
+        let sz = CGSize(width: 40, height: 28)
+        check("chip: no frame (hidden) when the info pill is not shown, a frame when it is",
+              AskBackChipRules.frame(for: nil, size: sz) == nil
+                && AskBackChipRules.frame(for: AskBackChipPlacement(capsule: cap, visible: vis, onRight: true), size: sz) != nil)
+        let rf = AskBackChipRules.frame(for: AskBackChipPlacement(capsule: cap, visible: vis, onRight: true), size: sz)
+        check("chip: sits at the pill's right end after a few points of gap, centred on the pill",
+              rf?.minX == cap.maxX + AskBackChipRules.gap && rf?.midY == cap.midY)
+        let wide = CGRect(x: 600, y: 300, width: 210, height: 34)
+        check("chip: follows the pill's right edge after a width change",
+              AskBackChipRules.frame(for: AskBackChipPlacement(capsule: wide, visible: vis, onRight: true), size: sz)?.minX
+                == wide.maxX + AskBackChipRules.gap)
+        let lf = AskBackChipRules.frame(for: AskBackChipPlacement(capsule: cap, visible: vis, onRight: false), size: sz)
+        check("chip: with the pill left of the scope the chip goes on the capsule's left end",
+              lf?.maxX == cap.minX - AskBackChipRules.gap)
+        let edge = AskBackChipRules.frame(for: AskBackChipPlacement(
+            capsule: CGRect(x: 1380, y: 300, width: 50, height: 34), visible: vis, onRight: true), size: sz)
+        check("chip: stays inside the screen's visible frame", (edge?.maxX ?? 9999) <= vis.maxX)
+        let chipSrc = src("AskBackToggleChip.swift")
+        check("wiring (chip panel): non-activating, never key, mouse-taking, holds the shared AskBackToggleButton, only reports a click",
+              chipSrc.contains("override var canBecomeKey: Bool { false }") && chipSrc.contains("styleMask: [.borderless, .nonactivatingPanel]")
+                && chipSrc.contains("panel.ignoresMouseEvents = false") && chipSrc.contains("private let button = AskBackToggleButton()")
+                && chipSrc.contains("@objc private func clicked() { onClick?() }") && !chipSrc.contains("Settings."))
+        check("wiring (HUD and info pill): the chip follows the pill's placement, its click goes to onToggleAskBack, and one state call feeds both ?s",
+              hud.contains("infoPill.onPlacement = { [weak self] placement in self?.askBackChip.place(placement) }")
+                && hud.contains("askBackChip.onClick = { [weak self] in self?.onToggleAskBack?() }")
+                && hud.contains("askBackChip.apply(state)")
+                && src("InfoPill.swift").contains("onPlacement?(isShown ? AskBackChipPlacement(")
+                && src("InfoPill.swift").contains("panel.ignoresMouseEvents = true"))
+
         print(check.summaryLine(prefix: "[askback-pill-selftest]"))
         return check.passed
     }

@@ -44,6 +44,9 @@ final class InfoPillPanel: NSObject {
     private(set) var isShown = false
     /// The capsule's final on-screen frame for the current state (synchronous target, animation aside).
     private(set) var capsuleTargetFrame = NSRect.zero
+    /// Called whenever the pill's placement may have changed (`apply`, `hide`): nil when it is not shown. The
+    /// clickable ? chip beside it follows this, so it shows, hides and moves with the pill.
+    var onPlacement: ((AskBackChipPlacement?) -> Void)?
 
     /// Which elements the capsule currently holds ("lock" / "keycap" / "slider"), for animation diffing.
     private var curSet: Set<String> = []
@@ -274,6 +277,7 @@ final class InfoPillPanel: NSObject {
         isShown = !newSet.isEmpty
         capsuleTargetFrame = NSRect(x: pf.minX + capLocal.minX, y: pf.minY + capLocal.minY,
                                     width: capLocal.width, height: capLocal.height)
+        onPlacement?(isShown ? AskBackChipPlacement(capsule: capsuleTargetFrame, visible: visible, onRight: side == .right) : nil)
 
         // Empty state — hide.
         if newSet.isEmpty {
@@ -393,6 +397,7 @@ final class InfoPillPanel: NSObject {
     func hide() {
         applyGen += 1
         isShown = false
+        onPlacement?(nil)
         curSet = []
         // Reset per-element visual state so a toast→pill return (or any re-show) starts from a clean
         // slate. Without this, a tear-down mid-animation leaves stale isHidden/alpha on the glyphs, and
