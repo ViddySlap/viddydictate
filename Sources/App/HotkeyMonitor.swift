@@ -101,6 +101,17 @@ final class HotkeyMonitor {
     var takeActive = false
     var onCancelTake: (() -> Void)?
 
+    /// VDASK-3 ask-back. `askCardActive`: a question card is up. The tap then swallows up / down / Return / Esc
+    /// (Option+Esc too) and routes them to `onAskBackKey`, and sends the wakeup key's press and release to
+    /// `onAskCardOptionDown` / `onAskCardOptionUp` (tap counting and hold detection live in `AskBackFlow`)
+    /// instead of `onRightOptionDown` / `onRightOptionUp`. `askReviewActive`: the review call is running; only
+    /// plain Esc is taken (it skips the review). With both false nothing here swallows or reroutes anything.
+    var askCardActive = false
+    var askReviewActive = false
+    var onAskBackKey: ((AskBackKeyAction) -> Void)?
+    var onAskCardOptionDown: (() -> Void)?
+    var onAskCardOptionUp: (() -> Void)?
+
     private(set) var wakeupHeld = false
     /// Set true once a regular-key wakeup's keyDown latched, so autorepeat keyDowns are swallowed
     /// silently and only the first one fires `onRightOptionDown`.
@@ -201,7 +212,7 @@ final class HotkeyMonitor {
                 wakeupHeld = false
                 regularWakeupLatched = false
                 Log.write("wakeup (regular) UP")
-                DispatchQueue.main.async { self.onRightOptionUp?() }
+                fireWakeup(down: false)
                 return nil   // consumed
             }
             return Unmanaged.passUnretained(event)
@@ -224,7 +235,7 @@ final class HotkeyMonitor {
             if held != wakeupHeld {
                 wakeupHeld = held
                 Log.write("wakeup (mod) \(held ? "DOWN" : "UP")")
-                DispatchQueue.main.async { held ? self.onRightOptionDown?() : self.onRightOptionUp?() }
+                fireWakeup(down: held)
             }
         }
         // Modifier-as-chord: a newly-pressed modifier (other than the wakeup) while the wakeup is held.
@@ -266,6 +277,13 @@ final class HotkeyMonitor {
         // keys are swallowed so they never reach the focused field.
         if dispatchModalPickerKey(keyCode) { return nil }
 
+        // VDASK-3: the ask-back card (and, for plain Esc, the review wait). Nothing is taken when neither is up.
+        if let action = AskBackKeyRouter.route(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate),
+                                               cardUp: askCardActive, reviewing: askReviewActive) {
+            DispatchQueue.main.async { self.onAskBackKey?(action) }
+            return nil
+        }
+
         // BT5: Option+Esc aborts an in-progress take. Only while a take is active (recording / locked / final
         // processing) AND Option is held; otherwise Esc is a normal key and passes through. Placed AFTER the
         // picker blocks so an Esc during the A/B / level pick cancels the pick (handled above), not the whole take.
@@ -281,7 +299,7 @@ final class HotkeyMonitor {
                 regularWakeupLatched = true
                 wakeupHeld = true
                 Log.write("wakeup (regular) DOWN")
-                DispatchQueue.main.async { self.onRightOptionDown?() }
+                fireWakeup(down: true)
             }
             return nil   // consumed — a regular wakeup key never types while the app runs
         }
@@ -301,6 +319,16 @@ final class HotkeyMonitor {
             return nil   // swallow so the bare key never types into the field
         }
         return Unmanaged.passUnretained(event)
+    }
+
+    /// The wakeup key went down or up. While a card is up the press belongs to the card (decided now, on the tap
+    /// thread, so a press that starts a card gesture is always released into the same gesture).
+    private func fireWakeup(down: Bool) {
+        let toCard = askCardActive
+        DispatchQueue.main.async {
+            if toCard { down ? self.onAskCardOptionDown?() : self.onAskCardOptionUp?() }
+            else { down ? self.onRightOptionDown?() : self.onRightOptionUp?() }
+        }
     }
 
     private enum ChordHit {

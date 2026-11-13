@@ -273,7 +273,8 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         }
         let transformOK = TextTransformSelfTest.run()
         let askBackOK = AskBackReviewSelfTest.run()   // VDASK-2
-        return transformOK && askBackOK ? 0 : 1
+        let askFlowOK = AskBackFlowSelfTest.run()     // VDASK-3
+        return transformOK && askBackOK && askFlowOK ? 0 : 1
     },
     .codexProviderSelftest: .init(tier: .deterministic) { _ in
         CodexProviderSelfTest.run() ? 0 : 1

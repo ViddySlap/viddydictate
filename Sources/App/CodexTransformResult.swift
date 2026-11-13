@@ -5,12 +5,14 @@ enum CodexTransformResult {
     /// runs a fixed model): its outcome must not flip the app-wide Codex availability. Default is unchanged.
     static func resolve(_ outcome: CodexRuntimeOutcome,
                         request: TextTransformRequest,
-                        updatesAvailability: Bool = true) -> CleanupClient.Result {
+                        updatesAvailability: Bool = true,
+                        normalizesPunctuation: Bool = true) -> CleanupClient.Result {
         let result: CleanupClient.Result
         var diagnosticSuffix = ""
         switch outcome {
         case .success(let success):
-            let normalized = CleanupClient.asciiPunctuationNormalized(success.result)
+            let normalized = (normalizesPunctuation
+                    ? CleanupClient.asciiPunctuationNormalized(success.result) : success.result)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else { return .badOutput("empty Codex output") }
             Log.write(

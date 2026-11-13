@@ -25,11 +25,16 @@ struct TextTransformRequest: Equatable {
     let timeout: TimeInterval
     let images: [TextTransformImage]
     let timeoutDetail: LocalStreamTimeoutDetail
+    /// VDASK-3 F1: true hands the provider adapters' reply back WITHOUT `asciiPunctuationNormalized`. Only the
+    /// ask-back review sets it (its JSON may hold curly quotes the folding would turn into bare `"`); every
+    /// other request keeps the default, so cleanup output is folded exactly as before.
+    let rawPunctuation: Bool
 
     init(route: LLMRouteID, bundle: LLMProviderBundle, sourceText: String,
          systemPrompt: String, userMessage: String, timeout: TimeInterval,
          images: [TextTransformImage] = [],
-         timeoutDetail: LocalStreamTimeoutDetail = LocalStreamTimeoutDetail()) {
+         timeoutDetail: LocalStreamTimeoutDetail = LocalStreamTimeoutDetail(),
+         rawPunctuation: Bool = false) {
         self.route = route
         self.bundle = bundle
         self.sourceText = sourceText
@@ -38,6 +43,7 @@ struct TextTransformRequest: Equatable {
         self.timeout = timeout
         self.images = images
         self.timeoutDetail = timeoutDetail
+        self.rawPunctuation = rawPunctuation
     }
 
     /// The request identity is the route/prompt/envelope/timeout/images contract, never the
@@ -50,13 +56,15 @@ struct TextTransformRequest: Equatable {
             && lhs.userMessage == rhs.userMessage
             && lhs.timeout == rhs.timeout
             && lhs.images == rhs.images
+            && lhs.rawPunctuation == rhs.rawPunctuation
     }
 
     func explicitlyRetrying(with bundle: LLMProviderBundle,
                             timeout: TimeInterval) -> TextTransformRequest {
         TextTransformRequest(route: route, bundle: bundle, sourceText: sourceText,
                              systemPrompt: systemPrompt, userMessage: userMessage, timeout: timeout,
-                             images: images, timeoutDetail: timeoutDetail)
+                             images: images, timeoutDetail: timeoutDetail,
+                             rawPunctuation: rawPunctuation)
     }
 }
 
@@ -501,7 +509,8 @@ enum TextTransformClient {
             : .claude(model.modelID, effort: model.effort)
         let request = TextTransformRequest(route: .custom("askBackReview"), bundle: bundle,
                                            sourceText: input, systemPrompt: system,
-                                           userMessage: input, timeout: timeout)
+                                           userMessage: input, timeout: timeout,
+                                           rawPunctuation: true)
         dispatch(request,
                  local: { _, done in done(.unavailable("Ask-back needs Claude or Codex")) },
                  claude: claude, codex: codex, completion: completion)
@@ -668,6 +677,7 @@ enum TextTransformClient {
                                      model: request.bundle.modelID,
                                      effort: request.bundle.effort,
                                      timeout: request.timeout,
+                                     normalizesPunctuation: !request.rawPunctuation,
                                      completion: completion)
     }
 
@@ -677,7 +687,8 @@ enum TextTransformClient {
                                      images: request.images,
                                      model: request.bundle.modelID,
                                      effort: request.bundle.effort,
-                                     timeout: request.timeout)
+                                     timeout: request.timeout,
+                                     normalizesPunctuation: !request.rawPunctuation)
     }
 
     private static func codexTransform(_ request: TextTransformRequest,
@@ -700,6 +711,10 @@ enum TextTransformClient {
         runCodex(request, updatesAvailability: true)
     }
 
+    /// The Codex runtime entry. A seam for the self-test only (a fake runtime outcome reaching the real
+    /// adapters); production never reassigns it.
+    static var codexRuntime: (CodexRuntimeRequest) -> CodexRuntimeOutcome = { CodexProviderRuntime.execute($0) }
+
     private static func runCodex(_ request: TextTransformRequest,
                                  updatesAvailability: Bool) -> CleanupClient.Result {
         guard !request.bundle.modelID.isEmpty else {
@@ -710,7 +725,7 @@ enum TextTransformClient {
             return .unavailable("Codex effort is required")
         }
         let envelope = request.bundle.envelopeVersion ?? CodexIsolationFoundation.envelopeVersion
-        let outcome = CodexProviderRuntime.execute(CodexRuntimeRequest(
+        let outcome = codexRuntime(CodexRuntimeRequest(
             model: request.bundle.modelID,
             effort: effort,
             developerInstructions: request.systemPrompt,
@@ -720,6 +735,7 @@ enum TextTransformClient {
             images: request.images.map {
                 CodexRuntimeImage(data: $0.data, mediaType: $0.mediaType, label: $0.label)
             }))
-        return CodexTransformResult.resolve(outcome, request: request, updatesAvailability: updatesAvailability)
+        return CodexTransformResult.resolve(outcome, request: request, updatesAvailability: updatesAvailability,
+                                            normalizesPunctuation: !request.rawPunctuation)
     }
 }

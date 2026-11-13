@@ -298,7 +298,7 @@ final class ModelsPowerSettingsView: NSView {
     private func addProviderAndBulkCard(at originY: CGFloat) -> CGFloat {
         addSubview(sectionHeader("PROVIDERS & GLOBAL ROUTING", y: originY))
         let cardY = originY + 22
-        let card = cardView(y: cardY, height: 274, id: "card.providers")
+        let card = cardView(y: cardY, height: 340, id: "card.providers")
         let colW = (card.bounds.width - 28) / 3
         let latest = CloudUpdateRuntimeState.shared.latest
         for (index, provider) in LLMProvider.allCases.enumerated() {
@@ -395,7 +395,47 @@ final class ModelsPowerSettingsView: NSView {
         autoCheck.font = .systemFont(ofSize: 10.5)
         autoCheck.frame = NSRect(x: 14, y: 240, width: 340, height: 22)
         card.addSubview(autoCheck)
+
+        // VDASK-3: ask-back before Tighten and Summarize. Two controls: the on/off checkbox and the tier.
+        let askDivider = NSBox(frame: NSRect(x: 14, y: 272, width: card.bounds.width - 28, height: 1))
+        askDivider.boxType = .separator
+        card.addSubview(askDivider)
+        let askCheck = NSButton(checkboxWithTitle: "Ask before Tighten and Summarize",
+                                target: self, action: #selector(askBackEnabledChanged(_:)))
+        askCheck.identifier = NSUserInterfaceItemIdentifier("ask-back-enabled")
+        askCheck.state = Settings.askBackEnabled ? .on : .off
+        askCheck.font = .systemFont(ofSize: 10.5)
+        askCheck.frame = NSRect(x: 14, y: 282, width: 340, height: 22)
+        card.addSubview(askCheck)
+        card.addSubview(text("Ask-back questions", x: 14, y: 312, width: 130,
+                             size: 11, weight: .semibold, color: .labelColor))
+        let tierPopup = NSPopUpButton(frame: NSRect(x: 150, y: 307, width: 320, height: 25), pullsDown: false)
+        tierPopup.identifier = NSUserInterfaceItemIdentifier("ask-back-tier")
+        tierPopup.font = .systemFont(ofSize: 10.5)
+        tierPopup.addItems(withTitles: [Self.askBackTierTitle(.careful), Self.askBackTierTitle(.fast)])
+        tierPopup.selectItem(at: Settings.askBackTier == .careful ? 0 : 1)
+        tierPopup.isEnabled = Settings.askBackEnabled
+        tierPopup.target = self
+        tierPopup.action = #selector(askBackTierChanged(_:))
+        card.addSubview(tierPopup)
         return cardY + card.frame.height + 14
+    }
+
+    static func askBackTierTitle(_ tier: AskBackTier) -> String {
+        switch tier {
+        case .careful: return "Careful (asks more)"
+        case .fast: return "Fast (asks only when you contradict yourself)"
+        }
+    }
+
+    @objc private func askBackEnabledChanged(_ sender: NSButton) {
+        Settings.askBackEnabled = sender.state == .on
+        status("Ask before Tighten and Summarize \(Settings.askBackEnabled ? "on" : "off").")
+    }
+
+    @objc private func askBackTierChanged(_ sender: NSPopUpButton) {
+        Settings.askBackTier = sender.indexOfSelectedItem == 1 ? .fast : .careful
+        status("Ask-back questions: \(Self.askBackTierTitle(Settings.askBackTier)).")
     }
 
     private func addRouteCard(_ spec: RouteCard, at originY: CGFloat) -> CGFloat {

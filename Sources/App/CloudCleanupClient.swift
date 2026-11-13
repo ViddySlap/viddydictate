@@ -207,7 +207,8 @@ enum CloudCleanupClient {
     }
 
     static func parseResult(stdout: String, exitCode: Int32 = 0, stderrText: String = "",
-                            sensitiveValues: [String] = []) -> CleanupClient.Result {
+                            sensitiveValues: [String] = [],
+                            normalizesPunctuation: Bool = true) -> CleanupClient.Result {
         guard let json = resultObject(stdout) else {
             Log.write("claude: no parseable JSON (exit \(exitCode), "
                 + "stderrBytes=\(stderrText.utf8.count))"
@@ -222,7 +223,8 @@ enum CloudCleanupClient {
             return .unavailable("Claude returned an error")
         }
         let raw = (json["result"] as? String) ?? ""
-        let cleaned = CleanupClient.asciiPunctuationNormalized(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = (normalizesPunctuation ? CleanupClient.asciiPunctuationNormalized(raw) : raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.isEmpty {
             Log.write("claude: produced empty output")
             return .badOutput("empty output")
@@ -292,7 +294,8 @@ enum CloudCleanupClient {
     static func spawnSync(systemPrompt: String, userMessage: String,
                           images: [TextTransformImage] = [],
                           model: String = ModeModelCatalog.claudeId, effort: String? = nil,
-                          timeout: TimeInterval) -> CleanupClient.Result {
+                          timeout: TimeInterval,
+                          normalizesPunctuation: Bool = true) -> CleanupClient.Result {
         guard let bin = resolveBinary() else {
             Log.write("claude: CLI not found (~/.local/bin, homebrew, /usr/local/bin, ~/.claude/local)")
             return .unavailable("claude CLI not found")
@@ -366,7 +369,7 @@ enum CloudCleanupClient {
         let dt = Date().timeIntervalSince(t0)
         let result = parseResult(
             stdout: stdout, exitCode: run.exitCode, stderrText: stderrText,
-            sensitiveValues: [systemPrompt, userMessage])
+            sensitiveValues: [systemPrompt, userMessage], normalizesPunctuation: normalizesPunctuation)
         if case .ok(let out) = result {
             let eff = (effort?.isEmpty == false) ? " effort=\(effort!)" : ""
             Log.write("claude OK [\(model)\(eff)] \(userMessage.count)->\(out.count) chars in \(String(format: "%.2f", dt))s")
@@ -733,11 +736,13 @@ enum CloudCleanupClient {
                           images: [TextTransformImage] = [],
                           model: String = ModeModelCatalog.claudeId, effort: String? = nil,
                           timeout: TimeInterval = defaultTimeout,
+                          normalizesPunctuation: Bool = true,
                           completion: @escaping (CleanupClient.Result) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             completion(spawnSync(systemPrompt: systemPrompt, userMessage: userMessage,
                                  images: images,
-                                 model: model, effort: effort, timeout: timeout))
+                                 model: model, effort: effort, timeout: timeout,
+                                 normalizesPunctuation: normalizesPunctuation))
         }
     }
 }

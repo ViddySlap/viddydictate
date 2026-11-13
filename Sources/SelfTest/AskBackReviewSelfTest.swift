@@ -388,6 +388,78 @@ do {
               retryCenter.summary != nil && retryCenter.summary != pendingBefore)
         retryCenter.invalidate()
 
+        // MARK: VDASK-3 follow-ups F1 (raw punctuation reaches the review), F2 (default Codex adapter), F3 (parser)
+        let curly = "He said \u{201C}yes\u{201D}, then left."
+        check("F1 seam: rawPunctuation defaults to false and survives an explicit retry copy",
+              TextTransformRequest(route: .promptPrep, bundle: .local("m"), sourceText: "s", systemPrompt: "s",
+                                   userMessage: "s", timeout: 5).rawPunctuation == false
+                && TextTransformRequest(route: .promptPrep, bundle: .local("m"), sourceText: "s", systemPrompt: "s",
+                                        userMessage: "s", timeout: 5, rawPunctuation: true)
+                    .explicitlyRetrying(with: .local("n"), timeout: 5).rawPunctuation == true)
+        var seamRaw: [Bool] = []
+        TextTransformClient.complete(system: "S", input: "I", resolution: .pinned(.claude("claude-haiku-5-5", effort: "low")),
+                                     claude: { req, done in seamRaw.append(req.rawPunctuation); done(.ok("c")) },
+                                     codex: { req, done in seamRaw.append(req.rawPunctuation); done(.ok("x")) },
+                                     completion: { _ in })
+        TextTransformClient.complete(system: "S", input: "I", resolution: .pinned(.codex("gpt-6-luna", effort: "low")),
+                                     claude: { req, done in seamRaw.append(req.rawPunctuation); done(.ok("c")) },
+                                     codex: { req, done in seamRaw.append(req.rawPunctuation); done(.ok("x")) },
+                                     completion: { _ in })
+        check("F1 seam: complete builds its request with rawPunctuation on, for both providers", seamRaw == [true, true])
+        let claudeJSON = "{\"result\":\"" + curly.replacingOccurrences(of: "\"", with: "\\\"") + "\"}"
+        check("F1 claude: parseResult keeps curly quotes when normalization is off",
+              CloudCleanupClient.parseResult(stdout: claudeJSON, normalizesPunctuation: false) == .ok(curly))
+        check("F1 claude: parseResult still normalizes by default (every existing caller)",
+              CloudCleanupClient.parseResult(stdout: claudeJSON) == .ok("He said \"yes\", then left."))
+        let codexSuccess = CodexRuntimeOutcome.success(CodexRuntimeSuccess(result: curly, profileHash: "p", stdoutBytes: 1, stderrBytes: 0, elapsed: 0))
+        let rawReq = TextTransformRequest(route: .custom("askBackReview"), bundle: .codex("gpt-6.1-sol", effort: "medium"),
+                                          sourceText: "I", systemPrompt: "S", userMessage: "I", timeout: 5, rawPunctuation: true)
+        check("F1 codex: resolve keeps curly quotes when normalization is off",
+              CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false, normalizesPunctuation: false) == .ok(curly))
+        check("F1 codex: resolve normalizes by default",
+              CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false) == .ok("He said \"yes\", then left."))
+        let yesTranscript = "He said \u{201C}yes\u{201D}, then changed his mind. We ship Monday."
+        let yesReply = "{\"spots\":[],\"questions\":[{\"question\":\"Which day?\",\"quote\":\"\u{201C}yes\u{201D}, then changed his mind\",\"why\":\"w\",\"options\":[\"a\",\"b\"]}]}"
+        let yesParsed = AskBackReview.parse(yesReply, transcript: yesTranscript, level: .summarize)
+        check("F1 parse: a curly-quoted yes then comma inside a quote keeps the question, quote as spoken",
+              yesParsed?.questions.count == 1 && yesParsed?.questions.first?.quote == "\u{201C}yes\u{201D}, then changed his mind")
+        let yesQ = "{\"spots\":[],\"questions\":[{\"question\":\"Did \u{201C}yes\u{201D}, mean ship?\",\"quote\":\"We ship Monday\",\"why\":\"w\",\"options\":[\"a\",\"b\"]}]}"
+        check("F1 parse: a curly-quoted yes then comma inside a question keeps the question text",
+              AskBackReview.parse(yesQ, transcript: yesTranscript, level: .summarize)?.questions.first?.question == "Did \u{201C}yes\u{201D}, mean ship?")
+
+        // F2: the real default Codex adapter (not a fake) with a fake runtime outcome `.unavailable`.
+        let priorRuntime = TextTransformClient.codexRuntime
+        let priorAvail = Settings.modelsPower.availabilityState(for: .codex)
+        Settings.modelsPower.setAvailabilityState(.available, for: .codex)
+        TextTransformClient.codexRuntime = { _ in .unavailable("synthetic runtime outage") }
+        var f2Result: CleanupClient.Result?
+        let f2Done = DispatchSemaphore(value: 0)
+        TextTransformClient.complete(system: "SYS", input: "IN", resolution: .pinned(.codex("gpt-6-luna", effort: "low")),
+                                     claude: { _, done in done(.ok("c")) },
+                                     completion: { f2Result = $0; f2Done.signal() })
+        let f2Waited = f2Done.wait(timeout: .now() + 5) == .success
+        settleMain()
+        TextTransformClient.codexRuntime = priorRuntime
+        check("F2 codex: the default review adapter returns the runtime's unavailable and leaves Codex availability unchanged",
+              f2Waited && { if case .unavailable("synthetic runtime outage")? = f2Result { return true } else { return false } }()
+                && Settings.modelsPower.availabilityState(for: .codex) == .available)
+        Settings.modelsPower.setAvailabilityState(priorAvail, for: .codex)
+
+        // F3: three parser mutants.
+        let apT = "Don't tell the client yet."
+        func f3(_ body: String, _ spots: String = "[]") -> AskBackReviewResult? {
+            AskBackReview.parse("{\"spots\":" + spots + ",\"questions\":[" + body + "]}", transcript: apT, level: .summarize)
+        }
+        func f3q(_ quote: String, _ options: String) -> String {
+            "{\"question\":\"Q?\",\"quote\":\"" + quote + "\",\"why\":\"w\",\"options\":" + options + "}"
+        }
+        check("F3 parse: a quote cut at an apostrophe (don from don't) is dropped", f3(f3q("Don", "[\"a\",\"b\"]"))?.questions.isEmpty == true)
+        check("F3 parse: a whole-word quote with an apostrophe is kept", f3(f3q("Don't tell", "[\"a\",\"b\"]"))?.questions.count == 1)
+        let mixedSpots = f3(f3q("tell the client", "[\"a\",\"b\"]"), "[1,\"x\",null,[2],{\"quote\":\"q\",\"issue\":\"i\",\"impact\":\"high\"}]")
+        check("F3 parse: a non-object spot entry does not kill the review", mixedSpots != nil && mixedSpots?.spots.count == 1 && mixedSpots?.questions.count == 1)
+        check("F3 parse: a whitespace-only option is dropped", f3(f3q("tell the client", "[\"a\",\"   \",\"\\n\\t\",\"b\"]"))?.questions.first?.options == ["a", "b"])
+        check("F3 parse: options are trimmed", f3(f3q("tell the client", "[\"  a  \",\" b\\n\"]"))?.questions.first?.options == ["a", "b"])
+
         // MARK: settings
         defaults.removeObject(forKey: "askBackEnabled")
         defaults.removeObject(forKey: "askBackTier")

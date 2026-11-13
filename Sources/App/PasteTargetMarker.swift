@@ -48,12 +48,18 @@ final class PasteTargetMarker {
     /// START (the setting is ON). Frozen for the whole run, exactly like the take's landing route (VDLAND1).
     private var followsLive = true
 
+    /// VDASK-3: the last placement the marker computed (a target point, or the pointer when no field could be
+    /// read), kept after `stop()` so the ask card can anchor to where this take's text will land. Read-only;
+    /// reset by the next `start`. Main thread only.
+    private(set) var lastPlacement: PasteTargetPlacement.Result?
+
     /// Main thread only; idempotent (a start while running restarts cleanly). `followsLive` is the take's frozen
     /// route: true reads live focus as before, false pins the marker to the captured element's own frame/caret so
     /// it cannot drift away from the field the text will land in.
     func start(captured: DictationTarget?, followsLive: Bool) {
         self.captured = captured
         self.followsLive = followsLive
+        lastPlacement = nil
         timer?.invalidate()
         runGeneration += 1
         inFlightGeneration = nil
@@ -138,6 +144,7 @@ final class PasteTargetMarker {
         } else {
             fallback = 0
         }
+        lastPlacement = result
         let origin = PasteTargetPlacement.windowOrigin(center: result.center, diameter: d,
                                                        screens: screens, fallback: fallback)
         panel?.setFrame(NSRect(origin: origin, size: NSSize(width: d, height: d)), display: true)

@@ -33,7 +33,9 @@ final class DictationController {
     /// `hotkey.takeActive`, not this enum, is authoritative for whether Esc can cancel. `setActive(_:)`
     /// keeps the two aligned for the main flow; one-shot finishing re-arms the tap after dropping the
     /// app-wide active flag because its transcribe / client / landing pipeline is still abortable.
-    private enum State { case idle, recording, locked, finishing, oneShotFinishing }
+    ///   reviewing / asking / writing (VDASK-3): a Tighten or Summarize take with ask-back on, between
+    ///   `.finishing` (transcribe) and the paste: the review call runs, a question card waits, the write runs.
+    private enum State { case idle, recording, locked, finishing, oneShotFinishing, reviewing, asking, writing }
     private var state: State = .idle {
         didSet {
             // BUG 1 take-liveness: push the HUD a single "is a take live" signal on EVERY state change, so a
@@ -177,6 +179,13 @@ final class DictationController {
     /// awaiting the user's Left/Right/Return choice (driven via `hotkey.abPickerActive`).
     // Built lazily: ABPickerPanel.init touches AppKit; built on first use so a headless controller can be made.
     private lazy var abPicker = ABPickerPanel()
+
+    /// VDASK-3 ask-back. The flow for the take in progress (nil when the take never asked), its review runner,
+    /// the card panel (built on first use) and the point the card anchors to, frozen when the take ends.
+    private var askFlow: AskBackFlow?
+    private var askRunner: AskBackReviewRunner?
+    private var askCardPanel: AskCardPanel?
+    private var askAnchor = CGPoint.zero
     private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
@@ -268,6 +277,9 @@ final class DictationController {
         offers.onNotice = { [weak self] message in self?.hud.toast(message) }
         hotkey.onPasteWhileArmed = { [weak self] in self?.restoreParkedClipboard() }
         hotkey.onCancelTake = { [weak self] in self?.cancelTake() }   // BT5: Esc aborts the in-progress take
+        hotkey.onAskBackKey = { [weak self] action in self?.askFlow?.key(action) }
+        hotkey.onAskCardOptionDown = { [weak self] in self?.askFlow?.optionDown() }
+        hotkey.onAskCardOptionUp = { [weak self] in self?.askFlow?.optionUp() }
         let liveHotkeyMap = HotkeyMap.load()
         hotkey.map = liveHotkeyMap
         hud.setHotkeyMap(liveHotkeyMap)
@@ -581,7 +593,7 @@ final class DictationController {
         switch state {
         case .recording: return .recording
         case .locked:    return .locked
-        case .idle, .finishing, .oneShotFinishing: return .other
+        case .idle, .finishing, .oneShotFinishing, .reviewing, .asking, .writing: return .other
         }
     }
 
@@ -666,6 +678,7 @@ final class DictationController {
         // Only a take whose gesture is also over may drop the snapshot; see TeardownScope.
         if case .full = scope { notesDelivery.noteTarget = nil }
         notesDelivery.teardownReplaceHighlight()   // BT4: always clear any tint the take armed
+        if case .stateOnly = scope {} else { endAskFlowUI() }
         switch scope {
         case .full, .gestureContinues:
             logRecordingStop(takeID: nil)
@@ -700,8 +713,11 @@ final class DictationController {
     /// state and bumps `takeGeneration` to invalidate any pending completion for the aborted take. The target
     /// selection is left untouched (we never delivered), and the BT4 replace highlight is cleared.
     private func cancelTake() {
-        guard state == .recording || state == .locked || state == .finishing || state == .oneShotFinishing else { return }
+        guard state == .recording || state == .locked || state == .finishing || state == .oneShotFinishing
+            || state == .reviewing || state == .writing else { return }
         Log.write("take canceled (Esc) state=\(state)")
+        // VDASK-3: a review or write in flight is cancelled with the take; its late answer pastes nothing.
+        askFlow?.cancel()
         if let arm = TransformArmState.shared.cancelPerTakeArm() {
             Log.write("\(arm.id) per-take arm cleared by cancel")
             hud.setArmedMode(glyph: nil)
@@ -830,7 +846,7 @@ final class DictationController {
     /// the coordinator (the transient picker counts as busy — a dictation is then mid-review). Adding a
     /// one-shot mode means adding its in-flight state to the registry's latch, not editing this predicate.
     private var oneShotBusy: Bool {
-        oneShot.isBusy || pendingPick != nil || hotkey.abPickerActive
+        oneShot.isBusy || pendingPick != nil || hotkey.abPickerActive || hotkey.askCardActive
     }
 
     /// Reject a one-shot entry when another flow owns the stage (log + return true). The caller then
@@ -1083,6 +1099,10 @@ final class DictationController {
         cleanupAtRelease = CleanupState.shared.cleanupEnabled
         levelAtRelease = CleanupState.shared.cleanupLevel
         Log.write("finish → final transcribe (cleanup=\(cleanupAtRelease) level=\(levelAtRelease.label))")
+        // VDASK-3: freeze where the ask card would open BEFORE `state` changes and the marker clears: the paste
+        // target the marker last placed, else the pointer (the HUD rides with it).
+        if let placed = pasteMarker.lastPlacement, placed.kind != .pointer { askAnchor = placed.center }
+        else { askAnchor = NSEvent.mouseLocation }
         state = .finishing
         let spoke = audio.detectedSpeech
         let takeID = spoke ? UUID() : nil
@@ -1267,15 +1287,14 @@ final class DictationController {
         let timeoutDetail = LocalStreamTimeoutDetail()
         var fallbackReceipt: CleanupFallbackReceipt?
         var deferredRetryResult: CleanupClient.Result?
-        let onResult: (CleanupClient.Result) -> Void = { [weak self] result in
-            DispatchQueue.main.async {
+        // VDASK-3: the ask-back flow of this take (nil when the take never asks) and its current write id.
+        weak var flowRef: AskBackFlow?
+        var askWriteID: UUID?
+        // What a finished write does (main thread, take still current). The ask-back flow admits the
+        // take's one write result and then calls this; every other take reaches it directly from `onResult`.
+        let handleResult: (CleanupClient.Result) -> Void = { [weak self] result in
+            do {
                 guard let self = self else { return }
-                // BT5: an Esc-cancel during the cleanup pass bumped `takeGeneration`; drop this landing so nothing
-                // lands for the aborted take.
-                guard generation == self.takeGeneration else {
-                    Log.write("cleanup result: dropped — take was canceled (gen \(generation) != \(self.takeGeneration))")
-                    return
-                }
                 self.hud.setThinking(false)
                 switch result {
                 case .ok(let cleaned):
@@ -1313,9 +1332,28 @@ final class DictationController {
                         if let deferred = deferredRetryResult {
                             deferredRetryResult = nil
                             self.landCleanupRetry(deferred, raw: raw, level: effectiveLevel,
-                                                  receipt: receipt, timeoutDetail: timeoutDetail)
+                                                  receipt: receipt, timeoutDetail: timeoutDetail,
+                                                  historyID: flowRef?.record != nil ? takeID : nil)
                         }
                     }
+                }
+            }
+        }
+        let onResult: (CleanupClient.Result) -> Void = { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                // BT5: an Esc-cancel during the cleanup pass bumped `takeGeneration`; drop this landing so nothing
+                // lands for the aborted take.
+                guard generation == self.takeGeneration else {
+                    Log.write("cleanup result: dropped — take was canceled (gen \(generation) != \(self.takeGeneration))")
+                    return
+                }
+                if let flow = flowRef, let writeID = askWriteID {
+                    var ok = false
+                    if case .ok = result { ok = true }
+                    flow.writeFinished(writeID, ok: ok) { handleResult(result) }
+                } else {
+                    handleResult(result)
                 }
             }
         }
@@ -1324,7 +1362,8 @@ final class DictationController {
                 guard let self = self, generation == self.takeGeneration else { return }
                 if let receipt = fallbackReceipt {
                     self.landCleanupRetry(result, raw: raw, level: effectiveLevel,
-                                          receipt: receipt, timeoutDetail: timeoutDetail)
+                                          receipt: receipt, timeoutDetail: timeoutDetail,
+                                          historyID: flowRef?.record != nil ? takeID : nil)
                 } else {
                     // Locked captured-target landing is completion-based. Preserve a fast explicit retry
                     // until its first-attempt destination receipt exists instead of guessing a destination.
@@ -1333,28 +1372,150 @@ final class DictationController {
                 }
             }
         }
-        let requestForBundle: TextTransformClient.RetryRequestBuilder = { bundle in
+        // VDASK-3: the answers block rides in the request this closure builds, so the first write, an explicit
+        // retry and the A/B picker all send the same answers. Zero questions (or no review) adds nothing.
+        var askQuestions: [AskBackQuestion] = []
+        var askAnswers: [AskBackAnswer?] = []
+        let makeRequest: (LLMProviderBundle, [AskBackQuestion], [AskBackAnswer?], LocalStreamTimeoutDetail)
+            -> TextTransformRequest = { bundle, questions, answers, detail in
             let providerPrompt = Settings.modelsPower.effectiveDeveloperInstructions(
                 for: route, provider: bundle.provider,
                 glossarySuffix: CorrectionDictionary.shared.contextGlossarySuffix())
             let retryTimeout = Settings.timeout(
                 local: Settings.cleanupTimeout, provider: bundle.provider)
+            let withFidelity = CleanupFidelity.appending(to: providerPrompt, routeKey: route.rawValue)
             return Self.makeCleanupRequest(
                 route: route, input: raw, selected: bundle,
-                systemPrompt: CleanupFidelity.appending(to: providerPrompt, routeKey: route.rawValue), timeout: retryTimeout,
-                timeoutDetail: timeoutDetail)
+                systemPrompt: AskBackAnswersBlock.appending(
+                    to: withFidelity, level: AskBackLevel(effectiveLevel), questions: questions, answers: answers),
+                timeout: retryTimeout, timeoutDetail: detail)
         }
-        TextTransformClient.transformResolved(
-            resolution, route: route, requestForBundle: requestForBundle,
-            local: CleanupClient.localAdapter(surface: .cleanup), capacityStepDown: capacityStepDown,
-            retryCompletion: onRetryResult, completion: onResult)
+        let requestForBundle: TextTransformClient.RetryRequestBuilder = { bundle in
+            makeRequest(bundle, askQuestions, askAnswers, timeoutDetail)
+        }
+        let runWrite: () -> Void = {
+            TextTransformClient.transformResolved(
+                resolution, route: route, requestForBundle: requestForBundle,
+                local: CleanupClient.localAdapter(surface: .cleanup), capacityStepDown: capacityStepDown,
+                retryCompletion: onRetryResult, completion: onResult)
+        }
+
+        // The review gate: ask-back on, Tighten or Summarize, a Claude or Codex route, at least 50 words, and a
+        // live take (a late retained-clip recovery has no card to ask on). Otherwise the write runs as before.
+        guard !recovered, let askProvider = resolution.bundle.map({ AskBackProvider($0.provider) }),
+              AskBackReview.gate(wordCount: wordCount, level: AskBackLevel(effectiveLevel),
+                                 provider: askProvider, enabled: Settings.askBackEnabled)
+        else { runWrite(); return }
+        let tier = Settings.askBackTier
+        let context = AskBackFlow.Context(
+            historyID: takeID, transcript: raw, level: AskBackLevel(effectiveLevel),
+            levelRaw: effectiveLevel.rawValue, tier: tier, provider: askProvider,
+            writeModel: resolution.bundle?.modelID ?? "", generation: generation)
+        let hooks = AskBackFlow.Hooks(
+            phaseChanged: { [weak self] phase in self?.askPhaseChanged(phase) },
+            readingCue: { [weak self] on in self?.askReadingCue(on) },
+            startReview: { [weak self] id in
+                let runner = AskBackReviewRunner.live(resolution: resolution) { reviewID, outcome in
+                    DispatchQueue.main.async { flowRef?.reviewOutcome(reviewID, outcome) }
+                }
+                self?.askRunner = runner
+                runner.start(id: id, text: raw, level: AskBackLevel(effectiveLevel), tier: tier, source: .dictation)
+            },
+            skipReview: { [weak self] id in self?.askRunner?.skip(id) },
+            showCard: { [weak self] card in self?.askShowCard(card) },
+            highlight: { [weak self] id, index in self?.askCardPanel?.setHighlight(cardID: id, index: index) },
+            closeCard: { [weak self] _ in self?.hotkey.askCardActive = false },
+            startWrite: { [weak self] spec in
+                askQuestions = spec.questions
+                askAnswers = spec.answers
+                askWriteID = spec.writeID
+                self?.hud.update(state: "Cleaning…", target: self?.target?.label, text: "", locked: false)
+                self?.hud.setThinking(true)
+                self?.note("cleaning")
+                runWrite()
+            },
+            history: { [weak self] event in TranscriptionHistory.shared.apply(event, app: self?.target?.label ?? "") },
+            saveDetached: { job in
+                // Touches nothing of the controller: a write with the old take's own request and a History update.
+                AskBackDetached.run(job, now: { ProcessInfo.processInfo.systemUptime }, write: { _, done in
+                    guard let bundle = resolution.bundle else { done(nil); return }
+                    let request = makeRequest(bundle, job.questions, job.answers, LocalStreamTimeoutDetail())
+                    TextTransformClient.transform(request, local: CleanupClient.localAdapter(surface: .cleanup),
+                                                  arming: .inert) { result in
+                        DispatchQueue.main.async { if case .ok(let text) = result { done(text) } else { done(nil) } }
+                    }
+                }, history: { event in TranscriptionHistory.shared.apply(event) })
+            },
+            startNewTake: { [weak self] in self?.askStartNewTake() })
+        let flow = AskBackFlow(context: context, schedule: Self.mainSchedule,
+                               now: { ProcessInfo.processInfo.systemUptime }, hooks: hooks)
+        flowRef = flow
+        askFlow = flow
+        flow.start()
+    }
+
+    // MARK: ask-back glue (VDASK-3). The rules live in `AskBackFlow`; these are its hands.
+
+    private static let mainSchedule: AskBackFlow.Schedule = { after, fire in
+        let item = DispatchWorkItem(block: fire)
+        DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: item)
+        return { item.cancel() }
+    }
+
+    private func askPhaseChanged(_ phase: AskBackFlow.Phase) {
+        hotkey.askReviewActive = phase == .reviewing
+        if phase != .asking { hotkey.askCardActive = false }
+        switch phase {
+        case .reviewing: state = .reviewing
+        case .asking: state = .asking
+        case .writing: state = .writing
+        case .notStarted, .finished, .cancelled, .detached: break
+        }
+        if phase != .asking { askCardPanel?.hide() }
+    }
+
+    private func askReadingCue(_ on: Bool) {
+        if on {
+            hud.update(state: AskCardText.readingCue, target: target?.label, text: "", locked: false)
+            hud.setThinking(true)
+            note("reading your take")
+        } else {
+            hud.setThinking(false)
+        }
+    }
+
+    private func askShowCard(_ card: AskCardModel) {
+        let panel = askCardPanel ?? AskCardPanel()
+        askCardPanel = panel
+        panel.onChoose = { [weak self] id, index in self?.askFlow?.click(cardID: id, option: index) }
+        hud.setThinking(false)
+        hud.hide()
+        panel.show(card, anchor: askAnchor)
+        hotkey.askCardActive = true
+        note("answer the question")
+    }
+
+    /// A hold while a card is up: the flow has already closed the card and handed the old take to its detached
+    /// save-only job. The new take starts as if right Option had just gone down on an idle controller.
+    private func askStartNewTake() {
+        askFlow = nil
+        endAskFlowUI()
+        state = .idle
+        beginRecording()
+    }
+
+    private func endAskFlowUI() {
+        hotkey.askCardActive = false
+        hotkey.askReviewActive = false
+        askCardPanel?.hide()
     }
 
     /// Replace the first attempt's raw fallback at its captured destination. A retry failure only refreshes
     /// the exact safe classification and re-arms Retry; raw is never pasted a second time.
     private func landCleanupRetry(_ result: CleanupClient.Result, raw: String, level: CleanupLevel,
                                   receipt: CleanupFallbackReceipt?,
-                                  timeoutDetail: LocalStreamTimeoutDetail) {
+                                  timeoutDetail: LocalStreamTimeoutDetail,
+                                  historyID: UUID? = nil) {
         switch result {
         case .ok(let cleaned):
             let landed: Bool
@@ -1368,14 +1529,14 @@ final class DictationController {
                         guard let self = self else { return }
                         self.completeForeignCleanupRetryLanding(
                             outcome, cleaned: cleaned, raw: raw, level: level,
-                            targetLabel: captured.label)
+                            targetLabel: captured.label, historyID: historyID)
                     }
                     return
                 } else {
                     TargetResolver.copyToClipboard(cleaned)
                     completeForeignCleanupRetryLanding(
                         .clipboardOnly(.destinationUnverifiable),
-                        cleaned: cleaned, raw: raw, level: level, targetLabel: "")
+                        cleaned: cleaned, raw: raw, level: level, targetLabel: "", historyID: historyID)
                     return
                 }
             case .pastePark:
@@ -1396,7 +1557,7 @@ final class DictationController {
                 Log.write("cleanup explicit retry landed (\(raw.count)->\(cleaned.count) chars, level=\(level.label))")
                 TranscriptionHistory.shared.record(
                     delivered: cleaned, raw: raw, cleaned: cleaned, mode: .cleanup,
-                    level: level.rawValue, app: target?.label ?? "")
+                    level: level.rawValue, app: target?.label ?? "", id: historyID ?? UUID())
                 hud.hide()
             } else {
                 Log.write("cleanup explicit retry output could not restore captured landing")
@@ -1424,7 +1585,8 @@ final class DictationController {
         cleaned: String,
         raw: String,
         level: CleanupLevel,
-        targetLabel: String
+        targetLabel: String,
+        historyID: UUID? = nil
     ) {
         guard Self.shouldRecordForeignRetryLanding(outcome) else {
             Log.write("cleanup explicit retry classification=\(outcome.logToken) — raw unchanged")
@@ -1437,7 +1599,7 @@ final class DictationController {
         Log.write("cleanup explicit retry landed (\(raw.count)->\(cleaned.count) chars, level=\(level.label))")
         TranscriptionHistory.shared.record(
             delivered: cleaned, raw: raw, cleaned: cleaned, mode: .cleanup,
-            level: level.rawValue, app: targetLabel)
+            level: level.rawValue, app: targetLabel, id: historyID ?? UUID())
         hud.hide()
     }
 
