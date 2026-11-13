@@ -37,8 +37,11 @@ private final class TraceHUD: HUDPresenting {
 
 private final class TraceHook: TailCheckDictationHook {
     private(set) var finals: [String] = []
+    /// Called after each landing with the number of landings so far; a row uses it to hold a delivery open.
+    var onCall: ((Int) -> Void)?
     func call(finalText: String, rawText: String, segments: [TailCheck.Segment], cleanupLevel: String) {
         finals.append(finalText)
+        onCall?(finals.count)
     }
 }
 
@@ -209,6 +212,13 @@ private final class TraceRig {
         finishWrite(result)
     }
     func heldCount() -> Int { ctl.traceHeldCount }
+    /// The card is reached, held on, and the old take detached: its write is `writes[0]` (not finished).
+    func detachedOne() -> UUID {
+        toCard()
+        let old = holdOnCard()
+        ctl.traceParkedFlow?.parkedRelease()
+        return old
+    }
 }
 
 enum AskBackControllerSelfTest {
@@ -551,9 +561,9 @@ enum AskBackControllerSelfTest {
             rig.newTakeSpeaks()
             check("held: the new take pastes first, and only its own text",
                   rig.pastes == 1 && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
-            rig.clock.advance(by: 0.5)
-            check("held: the held result waits out the settle after the new take's paste", rig.hook.finals == [traceNewText])
-            rig.clock.advance(by: 0.5)
+            check("held: the held result does not paste inside the call that ended the new take (it waits a turn)",
+                  rig.hook.finals == [traceNewText])
+            rig.clock.advance(by: 0)
             check("held: then it pastes once, after the new take's paste, through the normal delivery",
                   rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0 && rig.state == "idle")
             rig.clock.advance(by: 5)
@@ -599,10 +609,9 @@ enum AskBackControllerSelfTest {
             rig.ctl.traceParkedFlow?.parkedRelease()
             rig.writes.first?.done(.ok(traceCleaned)); traceSettle()
             rig.newTakeSpeaks()
-            rig.clock.advance(by: 0.4)
-            rig.pressDown()                                    // a take starts before the settle has passed
+            rig.pressDown()                                    // a take starts before the held result's turn comes
             rig.clock.advance(by: 3)
-            check("held: a take started inside the settle window keeps the held result waiting",
+            check("held: a take started before the held result's turn keeps it waiting",
                   rig.state == "recording" && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
             rig.release()
             rig.clock.advance(by: 1)
@@ -615,7 +624,7 @@ enum AskBackControllerSelfTest {
             rig.holdOnCard()
             rig.release()                                      // detaches the old take; the new take heard nothing
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
-            check("held: a new take that heard nothing does not drop the held result, which waits out the settle",
+            check("held: a new take that heard nothing does not drop the held result, which waits",
                   rig.pastes == 0 && rig.state == "idle" && rig.heldCount() == 1)
             rig.clock.advance(by: 1)
             check("held: it pastes after the nothing-heard take", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
@@ -654,11 +663,17 @@ enum AskBackControllerSelfTest {
             check("held: both results are written to History before either pastes",
                   rig.pastes == 0 && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two."
                     && rig.heldCount() == 2)
+            var firstHeldCompletes: (() -> Void)?
+            rig.hook.onCall = { n in if n == 2 { firstHeldCompletes = rig.ctl.traceBeginDelivery() } }   // its paste is still verifying
             rig.newTakeSpeaks()
             check("held: the last take pastes first", rig.hook.finals == [traceNewText])
             rig.clock.advance(by: 1)
             check("held: then the earlier detached result, alone", rig.hook.finals == [traceNewText, "Held one."] && rig.heldCount() == 1)
-            rig.clock.advance(by: 1)
+            rig.clock.advance(by: 5)
+            check("held: the second held result waits for the first one's delivery to complete, however long that takes",
+                  rig.hook.finals == [traceNewText, "Held one."] && rig.heldCount() == 1)
+            firstHeldCompletes?()
+            rig.clock.advance(by: 0)
             check("held: then the later one, in order", rig.hook.finals == [traceNewText, "Held one.", "Held two."] && rig.heldCount() == 0)
             rig.clock.advance(by: 5)
             check("held: two held results paste one each, no doubles", rig.pastes == 3 && rig.entries(first).count == 1 && rig.entries(second).count == 1)
@@ -677,6 +692,145 @@ enum AskBackControllerSelfTest {
                   rig.hook.finals == [traceNewText, "Held two."] && rig.heldCount() == 0
                     && rig.entries(second).first?.status == "done")
         }
+        // ---------------------------------------------------------------- round 3: a held result waits for the delivery in front
+        do {
+            // M1: the new take has finished but its own paste check and clipboard restore have not.
+            let rig = TraceRig(); defer { rig.close() }
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            let inFront = rig.ctl.traceBeginDelivery()          // the new take's paste: verify and restore still pending
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            check("M1: the new take has finished, but its delivery has not completed: the held result does not paste, however long that takes",
+                  rig.state == "idle" && rig.hook.finals == [traceNewText] && rig.heldCount() == 1)
+            inFront()
+            check("M1: completing the delivery does not paste inside its own call", rig.hook.finals == [traceNewText])
+            rig.clock.advance(by: 0)
+            check("M1: when the delivery in front completes the held result pastes once, after it",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0 && rig.ctl.traceDeliveriesOpen == 0)
+        }
+        do {
+            // A delivery that never opened (nothing heard) releases the held result at once (a turn later), no settle.
+            let rig = TraceRig(); defer { rig.close() }
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.release()
+            rig.clock.advance(by: 0)
+            check("M1: with no delivery in front and no take live the held result pastes without a fixed wait",
+                  rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // The delivery in front parked its text on the clipboard for a manual Cmd+V: no paste, History kept, line moves on.
+            let rig = TraceRig(); defer { rig.close() }
+            let first = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.ctl.traceParkPaste()
+            rig.clock.advance(by: 5)
+            let e = rig.entries(first)
+            check("M1 park: a parked delivery in front means the held result does not paste",
+                  rig.hook.finals == [traceNewText] && rig.pasteboard.string(forType: .string) != traceCleaned)
+            check("M1 park: the held result stays in History (done, its text) and the queue has moved on",
+                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.heldCount() == 0)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.ctl.traceParkPaste()
+            rig.pasteboard.clearContents()                       // the user copied something since: nothing is parked any more
+            rig.clock.advance(by: 5)
+            check("M1 park: once the pasteboard has changed since the park the held result pastes as usual",
+                  rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // Two held results behind a parked delivery: both stay History only, in order, and the line ends empty.
+            let rig = TraceRig(); defer { rig.close() }
+            let (first, second) = twoDetached(rig)
+            rig.writes[0].done(.ok("Held one.")); traceSettle()
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            rig.newTakeSpeaks()
+            rig.ctl.traceParkPaste()
+            rig.clock.advance(by: 5)
+            check("M1 park: every held result behind a parked delivery stays History only and the queue is empty",
+                  rig.hook.finals == [traceNewText] && rig.heldCount() == 0
+                    && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two.")
+        }
+        do {
+            // M2: a selection one-shot holds the user's selection from capture to landing.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            _ = rig.detachedOne()
+            rig.release()                                        // the new take ends (nothing heard): controller idle
+            latch = true                                         // the one-shot has captured the selection
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.clock.advance(by: 3)
+            check("M2: a held result ready while a selection one-shot is busy waits, with no take live",
+                  rig.state == "idle" && rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            let landing = rig.ctl.traceBeginDelivery()           // the one-shot's own landing starts as its latch drops
+            latch = false
+            rig.clock.advance(by: 2)
+            check("M2: the one-shot's latch has dropped but its landing has not completed: the held result still waits",
+                  rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            landing()
+            rig.clock.advance(by: 0)
+            check("M2: it pastes only after the one-shot's landing completes", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // M2: nothing but the latch dropping releases it (the registry has no callback): the controller looks again.
+            let rig = TraceRig(); defer { rig.close() }
+            var latch = false
+            rig.ctl.askSeams.oneShotLatch = { latch }
+            _ = rig.detachedOne()
+            rig.release()
+            latch = true
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.clock.advance(by: 1)
+            latch = false                                        // the one-shot ended without a landing (cancelled)
+            rig.clock.advance(by: 0.5)
+            check("M2: when the latch drops with nothing else in the way a waiting held result pastes", rig.hook.finals == [traceCleaned])
+        }
+        do {
+            // M2: the gap between a one-shot discarding its incidental take and setting its latch (the selection copy).
+            let rig = TraceRig(); defer { rig.close() }
+            _ = rig.detachedOne()
+            rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            rig.ctl.discardIncidentalAudio()                     // Option+P on the new take's press: the take is thrown away
+            rig.clock.advance(by: 0.3)
+            check("M2: right after a one-shot throws its incidental take away (selection copy pending) the held result waits",
+                  rig.state == "idle" && rig.hook.finals.isEmpty && rig.heldCount() == 1)
+            rig.clock.advance(by: 0.6)
+            check("M2: if no one-shot latch follows, it pastes once the copy window is over",
+                  rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
+        }
+        do {
+            // S3: a held result the rogue-output check flags is not pasted unasked.
+            let rig = TraceRig(); defer { rig.close() }
+            let old = rig.detachedOne()
+            let rogue = String(repeating: "an answer instead of a summary ", count: 40)
+            rig.writes.last?.done(.ok(rogue)); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            let e = rig.entries(old)
+            check("S3: a held result that trips the cleanup-suspect check is not pasted, and no picker opens",
+                  rig.hook.finals == [traceNewText] && rig.abShown.isEmpty)
+            check("S3: it stays in History (done, its text) and the queue has moved on",
+                  e.count == 1 && e[0].status == "done" && e[0].text == rogue && rig.heldCount() == 0)
+        }
+        do {
+            // S3 and order: a suspect first result does not block the second one.
+            let rig = TraceRig(); defer { rig.close() }
+            let (first, _) = twoDetached(rig)
+            rig.writes[0].done(.ok(String(repeating: "an answer instead of a summary ", count: 40))); traceSettle()
+            rig.writes[1].done(.ok("Held two.")); traceSettle()
+            rig.newTakeSpeaks()
+            rig.clock.advance(by: 5)
+            check("S3: the queue moves on past a suspect result and pastes the next one",
+                  rig.hook.finals == [traceNewText, "Held two."] && rig.heldCount() == 0 && rig.entries(first).first?.status == "done")
+        }
+
         do {
             // Option+P: its detached result stays History only. The controller has no Option+P detach path yet
             // (slice 7 adds it), so no controller row can reach it; the rule is pinned where it lives

@@ -126,6 +126,10 @@ struct PasteVerifyDriver {
     let onGiveUp: () -> Void
     let log: (String) -> Void
     var userActed: () -> Bool = { false }
+    /// VDASK-3: called exactly once when this paste is finished with the pasteboard and the field: its clipboard
+    /// restore ran or was skipped, the check gave up, or it stopped. Not called when the first keystroke could
+    /// not be posted (`run()` returns false); the caller owns that case.
+    var onComplete: () -> Void = { }
 
     func run() -> Bool {
         var retries = 0
@@ -139,6 +143,7 @@ struct PasteVerifyDriver {
                 } else {
                     self.log("paste clipboard restore skipped: pasteboard changed")
                 }
+                self.onComplete()
             }
         }
 
@@ -152,6 +157,7 @@ struct PasteVerifyDriver {
             report(readable: true, landed: false, restoreAfter: false)
             log("paste verify: gave_up=true")
             onGiveUp()
+            onComplete()
         }
 
         func check(settled: Bool) {
@@ -211,6 +217,7 @@ struct PasteVerifyDriver {
             guard canContinue() else {
                 report(readable: true, landed: false, restoreAfter: false)
                 log("paste verify: stopped=true")
+                onComplete()
                 return
             }
             guard postPaste() else {
@@ -698,8 +705,10 @@ enum TargetResolver {
     /// restored ~0.35s after the paste (skipped if the pasteboard changed in between), so the dictated
     /// text is NOT left on the clipboard; its durable copy is the dictation-history entry recorded on
     /// delivery.
+    /// `onComplete` (VDASK-3) fires once when the paste has finished with the clipboard (restore ran or was
+    /// skipped, or the verify gave up or stopped), or at once when the keystroke could not be posted.
     @discardableResult
-    static func pasteIntoFocus(_ text: String) -> Bool {
+    static func pasteIntoFocus(_ text: String, onComplete: (() -> Void)? = nil) -> Bool {
         let pb = NSPasteboard.general
         let previous = PasteboardSnapshot.capture(from: pb)
         SyntheticPasteboard.write(text, to: pb)
@@ -726,23 +735,37 @@ enum TargetResolver {
             },
             onGiveUp: { },
             log: { Log.write($0) },
-            userActed: { HotkeyMonitor.realReturnCount != returnsAtPaste })
-        return driver.run()
+            userActed: { HotkeyMonitor.realReturnCount != returnsAtPaste },
+            onComplete: { onComplete?() })
+        let started = driver.run()
+        if !started { onComplete?() }
+        return started
     }
 
     /// Paste into the exact app/field/selection that owned a captured transform. Explicit retry is
     /// confirmed from Settings, so reactivate the target app and then validate its Accessibility identity
     /// before sending a global paste. A failed validation leaves the output on the clipboard and reports
     /// that recovery honestly through `completion`; it is never called a landing.
+    ///
+    /// `settled` (VDASK-3) fires once when the delivery has finished with the clipboard: the paste's verify and
+    /// restore ended, or the landing never pasted (clipboard fallback). `completion` still fires as before.
     static func pasteIntoCapturedTarget(
         _ text: String,
         target: DictationTarget,
+        settled: (() -> Void)? = nil,
         completion: @escaping (CapturedTargetLandingOutcome) -> Void
     ) {
+        var operationRan = false
         performCapturedTargetLanding(text, target: target, validateSelection: true,
                                      allowRelaxed: true,
-                                     operation: { done in done(pasteIntoFocus(text)) },
-                                     completion: completion)
+                                     operation: { done in
+                                         operationRan = true
+                                         done(pasteIntoFocus(text, onComplete: settled))
+                                     },
+                                     completion: { outcome in
+                                         completion(outcome)
+                                         if !operationRan { settled?() }
+                                     })
     }
 
     /// Deliver a late recovered take to its captured field without activating the target app. The app may
@@ -752,6 +775,7 @@ enum TargetResolver {
     static func pasteIntoCapturedTargetWithoutActivation(
         _ text: String,
         target: DictationTarget,
+        settled: (() -> Void)? = nil,
         completion: @escaping (CapturedTargetLandingOutcome) -> Void
     ) {
         let clipboardFallback: (CapturedTargetLandingOutcome.Failure) -> Void = { failure in
@@ -759,6 +783,7 @@ enum TargetResolver {
             let outcome = CapturedTargetLandingOutcome.clipboardOnly(failure)
             Log.write("late captured-target landing classification=\(outcome.logToken)")
             completion(outcome)
+            settled?()
         }
 
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated else {
@@ -822,7 +847,7 @@ enum TargetResolver {
             clipboardFallback(failure)
             return
         }
-        guard pasteIntoProcess(text, pid: target.pid) else {
+        guard pasteIntoProcess(text, pid: target.pid, settled: settled) else {
             clipboardFallback(.eventDispatchFailed)
             return
         }
@@ -831,7 +856,7 @@ enum TargetResolver {
 
     /// Clipboard-preserving Cmd+V directed to one process. Unlike `pasteIntoFocus`, this never changes the
     /// frontmost application or the user's current caret/focus.
-    private static func pasteIntoProcess(_ text: String, pid: pid_t) -> Bool {
+    private static func pasteIntoProcess(_ text: String, pid: pid_t, settled: (() -> Void)? = nil) -> Bool {
         let pb = NSPasteboard.general
         let previous = PasteboardSnapshot.capture(from: pb)
         SyntheticPasteboard.write(text, to: pb)
@@ -854,10 +879,12 @@ enum TargetResolver {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             guard pb.changeCount == temporaryChangeCount else {
                 Log.write("late paste clipboard restore skipped: pasteboard changed")
+                settled?()
                 return
             }
             SyntheticPasteboard.restore(previous, to: pb)
             Log.write("late paste clipboard restored")
+            settled?()
         }
         return true
     }

@@ -271,6 +271,83 @@ enum AskBackFlowSelfTest {
             check("history: each take has exactly one entry", ids.count == all.count && all.count == 3)
         }
 
+        // ---------------------------------------------------------------- the held-result queue (pure rules, run on the Mac)
+        do {
+            let a = UUID()
+            var q = AskBackHeldQueue()
+            _ = q.resultExpected(a)
+            var out = q.flowBusy(true)
+            out += q.resultReady(a, text: "held A")
+            check("held queue: a ready result waits while a card, picker or one-shot is busy, with no take live", out.isEmpty && q.count == 1)
+            out = q.flowBusy(false)
+            check("held queue: it pastes when the busy signal drops", out == [AskBackHeldQueue.Paste(id: a, text: "held A")] && q.isEmpty)
+        }
+        do {
+            let a = UUID(), b = UUID()
+            var q = AskBackHeldQueue()
+            _ = q.takeStarted()
+            _ = q.resultExpected(a); _ = q.resultExpected(b)
+            var out = q.resultReady(b, text: "held B")
+            out += q.resultReady(a, text: "held A")
+            check("held queue: nothing pastes while a take is live", out.isEmpty && q.count == 2)
+            out = q.takeFinished()
+            check("held queue: results paste in the order their takes were detached, one at a time",
+                  out == [AskBackHeldQueue.Paste(id: a, text: "held A")] && q.count == 1)
+            out = q.takeFinished()
+            check("held queue: the next one pastes after the one in front has finished",
+                  out == [AskBackHeldQueue.Paste(id: b, text: "held B")] && q.isEmpty)
+        }
+        do {
+            let a = UUID(), b = UUID()
+            var q = AskBackHeldQueue()
+            _ = q.takeStarted()
+            _ = q.resultExpected(a); _ = q.resultExpected(b)
+            _ = q.resultReady(b, text: "held B")
+            var out = q.resultFailed(a)
+            check("held queue: a failed result pastes nothing and does not block the next while a take is live", out.isEmpty && q.count == 1)
+            out = q.takeFinished()
+            check("held queue: the line moves on past a failed result", out == [AskBackHeldQueue.Paste(id: b, text: "held B")] && q.isEmpty)
+        }
+        do {
+            let a = UUID(), b = UUID()
+            var q = AskBackHeldQueue()
+            _ = q.takeStarted()
+            _ = q.resultExpected(a); _ = q.resultExpected(b)
+            _ = q.resultReady(a, text: "held A"); _ = q.resultReady(b, text: "held B")
+            _ = q.deliveryOpen(true)                                    // the new take's paste is still verifying
+            var out = q.takeFinished()
+            check("held queue: a take that has finished does not release a result while its delivery is open", out.isEmpty && q.count == 2)
+            out = q.deliveryOpen(false)
+            check("held queue: the result pastes when the delivery completes", out == [AskBackHeldQueue.Paste(id: a, text: "held A")] && q.count == 1)
+            _ = q.deliveryOpen(true)                                    // that paste's own verify and restore
+            out = q.takeFinished()
+            check("held queue: the second result waits for the first one's delivery to complete", out.isEmpty && q.count == 1)
+            out = q.deliveryOpen(false)
+            check("held queue: and then pastes", out == [AskBackHeldQueue.Paste(id: b, text: "held B")] && q.isEmpty)
+        }
+        do {
+            check("held policy: a selection one-shot's latch or its copy window counts as busy, as a card or a picker does",
+                  AskBackHeldPolicy.busy(pendingPick: false, abPicker: false, askCard: false, oneShotLatch: true, oneShotGrace: false)
+                    && AskBackHeldPolicy.busy(pendingPick: false, abPicker: false, askCard: false, oneShotLatch: false, oneShotGrace: true)
+                    && AskBackHeldPolicy.busy(pendingPick: true, abPicker: false, askCard: false, oneShotLatch: false, oneShotGrace: false)
+                    && AskBackHeldPolicy.busy(pendingPick: false, abPicker: true, askCard: false, oneShotLatch: false, oneShotGrace: false)
+                    && AskBackHeldPolicy.busy(pendingPick: false, abPicker: false, askCard: true, oneShotLatch: false, oneShotGrace: false)
+                    && !AskBackHeldPolicy.busy(pendingPick: false, abPicker: false, askCard: false, oneShotLatch: false, oneShotGrace: false))
+            check("held policy: a suspect result or a parked delivery in front means no paste; otherwise it pastes",
+                  AskBackHeldPolicy.turn(suspect: false, parked: false) == .paste
+                    && AskBackHeldPolicy.turn(suspect: true, parked: false) == .skipSuspect
+                    && AskBackHeldPolicy.turn(suspect: false, parked: true) == .skipParked)
+            let a = UUID()
+            var q = AskBackHeldQueue()
+            q.setInputs(takeLive: false, busy: true, delivering: false)
+            _ = q.resultExpected(a)
+            check("held queue: set inputs alone release nothing", q.resultReady(a, text: "held A").isEmpty && q.poke().isEmpty)
+            q.setInputs(takeLive: false, busy: false, delivering: true)
+            check("held queue: an open delivery holds it", q.poke().isEmpty)
+            q.setInputs(takeLive: false, busy: false, delivering: false)
+            check("held queue: with nothing in the way a poke releases it", q.poke().count == 1 && q.isEmpty)
+        }
+
         print(check.summaryLine(prefix: "[askback-flow-selftest]"))
         return check.passed
     }

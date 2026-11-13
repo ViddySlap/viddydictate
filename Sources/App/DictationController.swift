@@ -46,7 +46,7 @@ final class DictationController {
             // declaration, so this observer (which never fires for the .idle default) always has it available.
             hud.setTakeActive(state == .recording || state == .locked)
             if !(state == .recording || state == .locked) { pasteMarker.stop() }
-            heldTakeLiveChanged(wasLive: oldValue != .idle, isLive: state != .idle)
+            if oldValue != state { heldKick() }
         }
     }
 
@@ -206,17 +206,27 @@ final class DictationController {
         var beginNewTake: (() -> Void)?
         var cardPanel: AskCardPresenting?
         var abPickerShow: ((_ raw: String, _ cleaned: String) -> Void)?
+        /// Stands in for the one-shot registry's busy latch (`oneShot.isBusy`), which a headless row cannot set.
+        var oneShotLatch: (() -> Bool)?
     }
     var askSeams = AskBackSeams()
 
     /// The detached old takes' results, held until the take in front has finished (`AskBackHeldQueue`). In
     /// memory only: a result that has not pasted when the app quits is not pasted on relaunch.
     private var askHeld = AskBackHeldQueue()
-    private var askHeldSettle: (() -> Void)?
     private var askHeldInfo: [UUID: (raw: String, level: Int)] = [:]
-    /// How long a take must stay finished before a held result pastes: the take's own paste verifies and restores
-    /// the clipboard for a moment, and a second paste inside that window would race it. A new take cancels it.
-    static let heldPasteSettle: TimeInterval = 0.8
+    /// Deliveries (a take's paste, a one-shot's landing) that have not finished with the clipboard yet: their
+    /// paste check and clipboard restore are still pending. A held result never pastes while one is open.
+    private var askDeliveries = 0
+    private var askHeldKick: (() -> Void)?
+    private var askHeldPoll: (() -> Void)?
+    private var askGraceUntil: TimeInterval = -1
+    /// A selection one-shot throws its incidental take away (the controller goes idle) and only then copies the
+    /// selection (`TargetResolver.captureSelectionViaCopy`: a fixed 0.18 s) before it sets its busy latch. A held
+    /// result must not paste into that gap: this covers the 0.18 s copy plus slack on a congested main thread.
+    static let heldOneShotGrace: TimeInterval = 0.5
+    /// How often a waiting held result looks at the one-shot latch (the registry has no release callback).
+    static let heldPollInterval: TimeInterval = 0.25
     private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
@@ -742,6 +752,7 @@ final class DictationController {
         }
         // The gesture continues: OneShotRegistry.run() calls this, then captureSelection() reads the
         // take-START note snapshot back through authoritativeNoteTargetForGesture().
+        askGraceUntil = heldNow() + Self.heldOneShotGrace
         teardownTake(.gestureContinues)
         hud.hide()
     }
@@ -856,7 +867,7 @@ final class DictationController {
         hud.hide()
         if let show = askSeams.abPickerShow { show(raw, cleaned) } else { abPicker.show(raw: raw, cleaned: cleaned) }
         hotkey.abPickerActive = true
-        heldSyncBusy()
+        heldKick()
         note("pick raw or cleaned")
     }
 
@@ -866,7 +877,7 @@ final class DictationController {
         guard let pick = pendingPick else { return }
         pendingPick = nil
         hotkey.abPickerActive = false
-        heldSyncBusy()
+        heldKick()
         abPicker.hide()
         let chooseCleaned = !forceRaw && abPicker.selection == .cleaned
         if chooseCleaned {
@@ -925,28 +936,31 @@ final class DictationController {
         _ text: String,
         foreignTarget: DictationTarget?,
         lateRecovery: Bool,
+        settled: @escaping () -> Void,
         completion: @escaping (TargetResolver.CapturedTargetLandingOutcome) -> Void
     ) {
         if !lateRecovery, callbacks.notesWindowIsKey(),
            notesDelivery.insertIntoActiveNote(text) == .delivered {
             Log.write("selection-transform landed via sticky-note bridge (\(text.count) chars)")
             completion(.landed)
+            settled()
             return
         }
         if let foreignTarget = foreignTarget {
             if lateRecovery {
                 TargetResolver.pasteIntoCapturedTargetWithoutActivation(
-                    text, target: foreignTarget, completion: completion)
+                    text, target: foreignTarget, settled: settled, completion: completion)
             } else {
                 TargetResolver.pasteIntoCapturedTarget(
-                    text, target: foreignTarget, completion: completion)
+                    text, target: foreignTarget, settled: settled, completion: completion)
             }
         } else {
             if lateRecovery {
                 TargetResolver.copyToClipboard(text)
                 completion(.clipboardOnly(.destinationUnverifiable))
+                settled()
             } else {
-                completion(TargetResolver.pasteIntoFocus(text)
+                completion(TargetResolver.pasteIntoFocus(text, onComplete: settled)
                     ? .landed : .clipboardOnly(.eventDispatchFailed))
             }
         }
@@ -1011,8 +1025,11 @@ final class DictationController {
                 break
             }
 
+            // The one-shot's own landing is the delivery in front of any held result: open until its paste check
+            // and clipboard restore have finished (the registry's latch drops before this landing starts).
+            let settle = beginDelivery()
             landSelectionTransform(transformed, foreignTarget: foreignTarget,
-                                   lateRecovery: lateRecovery) {
+                                   lateRecovery: lateRecovery, settled: settle) {
                 [weak self] outcome in
                 guard let self = self else { return }
                 if outcome.didLand {
@@ -1535,53 +1552,96 @@ final class DictationController {
 
     // MARK: held results. The rules live in `AskBackHeldQueue`; these feed it events and do its pastes.
 
+    private func heldNow() -> TimeInterval { (askSeams.now ?? { ProcessInfo.processInfo.systemUptime })() }
+
+    /// A card, an A/B picker, or a selection one-shot (its latch from capture to landing, plus the gap before the
+    /// latch is set) holds the stage.
+    private func heldBusy() -> Bool {
+        AskBackHeldPolicy.busy(pendingPick: pendingPick != nil, abPicker: hotkey.abPickerActive,
+                               askCard: hotkey.askCardActive, oneShotLatch: heldOneShotLatch(),
+                               oneShotGrace: heldNow() < askGraceUntil)
+    }
+
+    private func heldOneShotLatch() -> Bool { askSeams.oneShotLatch?() ?? oneShot.isBusy }
+
+    private func heldOneShotHolds() -> Bool { heldOneShotLatch() || heldNow() < askGraceUntil }
+
+    /// Feeds the queue one event with its inputs freshly read (a take is live, something is busy, a delivery is
+    /// still open), then pastes what it releases. A waiting result that is held only by the one-shot latch is
+    /// looked at again on a timer, because the registry has no release callback.
     private func heldApply(_ event: (inout AskBackHeldQueue) -> [AskBackHeldQueue.Paste]) {
+        askHeld.setInputs(takeLive: state != .idle, busy: heldBusy(), delivering: askDeliveries > 0)
         for paste in event(&askHeld) { heldPaste(paste) }
-    }
-
-    /// The state left or entered idle. A take starting cancels a pending "finished"; a take ending reports it only
-    /// after `heldPasteSettle`, and only if the controller is still idle then (the idle moments inside a hold or an
-    /// Esc-resume last no longer than one run-loop turn and never reach it).
-    private func heldTakeLiveChanged(wasLive: Bool, isLive: Bool) {
-        if isLive && !wasLive {
-            askHeldSettle?(); askHeldSettle = nil
-            heldApply { $0.takeStarted() }
-        } else if !isLive && wasLive {
-            heldScheduleFinished()
+        if !askHeld.isEmpty, askHeldPoll == nil, heldOneShotHolds() {
+            askHeldPoll = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPollInterval) { [weak self] in
+                self?.askHeldPoll = nil
+                self?.heldApply { $0.poke() }
+            }
         }
     }
 
-    private func heldScheduleFinished() {
-        askHeldSettle?()
-        askHeldSettle = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPasteSettle) { [weak self] in
-            guard let self = self else { return }
-            self.askHeldSettle = nil
-            guard self.state == .idle else { return }
-            self.heldApply { $0.takeFinished() }
-            self.heldSyncBusy()
+    /// Something the queue waits on may have changed (a take ended, a delivery completed, a card closed): look
+    /// again one run-loop turn later, never inside the call that changed it (a teardown, a landing completion).
+    /// Level-triggered: the inputs are read when it fires, so a take that has started by then keeps the line waiting.
+    private func heldKick() {
+        guard !askHeld.isEmpty, askHeldKick == nil else { return }
+        askHeldKick = (askSeams.schedule ?? Self.mainSchedule)(0) { [weak self] in
+            self?.askHeldKick = nil
+            self?.heldApply { $0.poke() }
         }
     }
 
-    private func heldSyncBusy() {
-        let busy = pendingPick != nil || hotkey.abPickerActive || hotkey.askCardActive
-        heldApply { $0.flowBusy(busy) }
+    /// Opens a delivery: its paste check and clipboard restore have not finished. The returned closure closes it
+    /// (once) and gives a waiting held result its turn.
+    private func beginDelivery() -> () -> Void {
+        askDeliveries += 1
+        var closed = false
+        return { [weak self] in
+            guard !closed, let self = self else { return }
+            closed = true
+            self.askDeliveries -= 1
+            self.heldKick()
+        }
+    }
+
+    /// The delivery in front parked its text on the clipboard for a manual Cmd+V (`pastePark` armed) and the
+    /// pasteboard has not changed since: the held result must not overwrite it. (`clipboardPasteboard` is the
+    /// general pasteboard in the app; a self-test points it at a private one.)
+    private func heldDeliveryParked() -> Bool {
+        guard let park = pastePark else { return false }
+        return clipboardPasteboard.changeCount == park.changeCount
     }
 
     /// Pastes one held result through the normal delivery path (`finalize`: History by id, notes routing, the
-    /// frozen landing rule of the last take, paste or clipboard park). Only ever runs with no take live. Counts as
-    /// a take in front of the next held result until it has settled.
+    /// frozen landing rule of the last take, paste or clipboard park). Only ever runs with no take live, nothing
+    /// busy and no delivery open. It is itself a delivery: the next held result waits for its completion. A result
+    /// the rogue-output check flags, or one that would overwrite parked text, stays in History only (already
+    /// written) and the line moves on.
     private func heldPaste(_ paste: AskBackHeldQueue.Paste) {
-        Log.write("held result pastes afterwards (\(paste.text.count) chars)")
         let info = askHeldInfo.removeValue(forKey: paste.id)
+        let suspect = info.map { CleanupLogic.cleanupSuspect(rawCount: $0.raw.count, cleanedCount: paste.text.count) } ?? false
+        switch AskBackHeldPolicy.turn(suspect: suspect, parked: heldDeliveryParked()) {
+        case .skipSuspect:
+            Log.write("held result not pasted: cleanup suspect (\(info?.raw.count ?? 0)->\(paste.text.count) chars), History only")
+            heldKick()
+            return
+        case .skipParked:
+            Log.write("held result not pasted: the delivery in front is parked on the clipboard, History only")
+            heldKick()
+            return
+        case .paste:
+            break
+        }
+        Log.write("held result pastes afterwards (\(paste.text.count) chars)")
         finalize(delivered: paste.text, raw: info?.raw ?? paste.text, cleaned: paste.text, mode: .cleanup,
                  level: info?.level, historyID: paste.id)
-        heldScheduleFinished()
+        heldKick()
     }
 
     private func askPhaseChanged(_ phase: AskBackFlow.Phase) {
         hotkey.askReviewActive = phase == .reviewing
         if phase != .asking { hotkey.askCardActive = false }
-        heldSyncBusy()
+        heldKick()
         switch phase {
         case .reviewing: state = .reviewing
         case .asking: state = .asking
@@ -1609,7 +1669,7 @@ final class DictationController {
         hud.hide()
         panel.show(card, anchor: askAnchor)
         hotkey.askCardActive = true
-        heldSyncBusy()
+        heldKick()
         note("answer the question")
     }
 
@@ -1799,6 +1859,9 @@ final class DictationController {
                   level: Int? = nil, historyID: UUID, keepHUD: Bool = false,
                   lateRecovery: Bool = false, segments: [TailCheck.Segment] = [],
                   completion: ((CleanupFallbackReceipt) -> Void)? = nil) -> CleanupFallbackReceipt? {
+        // VDASK-3: this delivery is open until its paste check and clipboard restore have finished (or it never
+        // pasted); a held result waits for that. Every branch below closes it exactly once.
+        let settle = beginDelivery()
         let finish: (CleanupFallbackReceipt) -> CleanupFallbackReceipt = { receipt in
             // The tail-check hook (2026-10-06 scope addition, part D): every branch above this closure
             // already performed its real delivery (paste synth, clipboard write, or notes landing)
@@ -1839,6 +1902,7 @@ final class DictationController {
                                                 currentlyKey: notesWindowCurrentlyKey) {
         case .landed(let noteUndo):
             landDelivery(foreignUndo: nil, noteUndo: noteUndo, toast: nil, keepHUD: keepHUD)
+            defer { settle() }
             return finish(.note(noteUndo))
         case .parked(let toast, let refreshBullseye):
             // The info-pill push is a HUD call, so it stays here; it reads the post-drop armed state (false),
@@ -1846,6 +1910,7 @@ final class DictationController {
             if refreshBullseye { refreshBullseyeIndicator() }
             landDelivery(foreignUndo: makePendingUndo(raw: raw, delivered: delivered, revertable: revertable, canRevertInPlace: false),
                          noteUndo: nil, toast: toast, keepHUD: keepHUD)
+            defer { settle() }
             return finish(.clipboard(changeCount: NSPasteboard.general.changeCount))
         case .notNotes:
             break
@@ -1863,10 +1928,11 @@ final class DictationController {
                     noteUndo: nil,
                     toast: "Recovered take copied to clipboard; original field unavailable.",
                     keepHUD: true)
+                defer { settle() }
                 return finish(.clipboard(changeCount: NSPasteboard.general.changeCount))
             }
             TargetResolver.pasteIntoCapturedTargetWithoutActivation(
-                delivered, target: captured
+                delivered, target: captured, settled: settle
             ) { [weak self] outcome in
                 guard let self else { return }
                 if outcome.didLand {
@@ -1902,22 +1968,23 @@ final class DictationController {
         case .live:
             let receipt = deliverPushToTalk(
                 delivered: delivered, raw: raw, mode: mode,
-                revertable: revertable, keepHUD: keepHUD)
+                revertable: revertable, keepHUD: keepHUD, settled: settle)
             return finish(receipt)
 
         case .pinned:
             // `.pinned` means the route saw `target != nil`, so this guard never fires; it keeps the compiler
             // honest without a second no-target delivery call in this function.
-            guard let captured = target else { return nil }
+            guard let captured = target else { settle(); return nil }
             deliverLocked(
                 delivered: delivered, raw: raw, mode: mode, captured: captured,
-                revertable: revertable, keepHUD: keepHUD, finish: finish)
+                revertable: revertable, keepHUD: keepHUD, settled: settle, finish: finish)
             return nil
 
         case .pinnedNoTarget:
             let receipt = deliverLockedNoTarget(
                 delivered: delivered, raw: raw, mode: mode,
                 revertable: revertable, keepHUD: keepHUD)
+            defer { settle() }
             return finish(receipt)
         }
     }
@@ -1927,7 +1994,8 @@ final class DictationController {
     /// NOT use AX insert here: Electron returns "success" for an AX set while silently dropping
     /// the text, so paste is both more reliable and consistent across apps.
     private func deliverPushToTalk(delivered: String, raw: String, mode: HistoryMode,
-                                   revertable: Bool, keepHUD: Bool) -> CleanupFallbackReceipt {
+                                   revertable: Bool, keepHUD: Bool,
+                                   settled: @escaping () -> Void) -> CleanupFallbackReceipt {
         // Re-check focus at delivery. Push-to-talk normally lands by synthesizing Cmd+V into the
         // field you dictated into, but if you clicked away first, that paste lands nowhere AND the
         // clipboard-preservation restore then wipes the text back off the clipboard, so it survives
@@ -1943,7 +2011,7 @@ final class DictationController {
         let canPaste = sameField || (current?.isTextLike ?? false)
         if canPaste {
             Log.write("deliver: paste-synth into focus (\(delivered.count) chars, mode=\(mode), sameField=\(sameField))")
-            TargetResolver.pasteIntoFocus(delivered)
+            TargetResolver.pasteIntoFocus(delivered, onComplete: settled)
             // BT5: foreign-app landing - Option+Z uses the in-place foreign tier (noteUndo nil).
             landDelivery(foreignUndo: makePendingUndo(raw: raw, delivered: delivered, revertable: revertable, canRevertInPlace: true),
                          noteUndo: nil, toast: nil, keepHUD: keepHUD)
@@ -1960,16 +2028,18 @@ final class DictationController {
             hotkey.pasteRestoreArmed = true
             landDelivery(foreignUndo: makePendingUndo(raw: raw, delivered: delivered, revertable: revertable, canRevertInPlace: false),
                          noteUndo: nil, toast: "📋 Couldn't reach your field. ⌘V once to paste; your clipboard then restores.", keepHUD: keepHUD)
+            settled()   // nothing pastes now; `pastePark` itself tells a held result the text waits for a manual paste
             return .pastePark
         }
     }
 
     private func deliverLocked(delivered: String, raw: String, mode: HistoryMode,
                                captured: DictationTarget, revertable: Bool, keepHUD: Bool,
+                               settled: @escaping () -> Void,
                                finish: @escaping (CleanupFallbackReceipt) -> CleanupFallbackReceipt) {
         // Locked mode: focus may have moved, so reactivate and validate the specific captured field before
         // synthesizing Cmd+V. The completion distinguishes a real landing from durable clipboard recovery.
-        TargetResolver.pasteIntoCapturedTarget(delivered, target: captured) { [weak self] outcome in
+        TargetResolver.pasteIntoCapturedTarget(delivered, target: captured, settled: settled) { [weak self] outcome in
             guard let self = self else { return }
             let resolution = Self.lockedDeliveryResolution(targetAvailable: true, outcome: outcome)
             switch resolution.receipt {
@@ -2125,6 +2195,14 @@ extension DictationController {
     var traceAskAnchor: CGPoint { askAnchor }
     var traceGeneration: Int { takeGeneration }
     var traceHeldCount: Int { askHeld.count }
+    /// A delivery the rig cannot run for real (a paste with its verify and restore): open until the closure runs.
+    func traceBeginDelivery() -> () -> Void { beginDelivery() }
+    /// Arms `pastePark` as a delivery that could not reach its field does, on the controller's own pasteboard.
+    func traceParkPaste() {
+        pastePark = PastePark(previous: PasteboardSnapshot.capture(from: clipboardPasteboard),
+                              changeCount: clipboardPasteboard.changeCount)
+    }
+    var traceDeliveriesOpen: Int { askDeliveries }
 
     /// Put the controller where `finish()` leaves it just before the transcript arrives: a take that ended with
     /// its cleanup setting and level frozen at release.

@@ -623,7 +623,10 @@ final class AskBackFlow {
 /// - `resultReady(id, text)` / `resultFailed(id)`: its write ended. A failed write pastes nothing and the line
 ///   moves on.
 /// - `takeStarted` / `takeFinished`: a take (or the paste of the result in front) began / ended.
-/// - `flowBusy(Bool)`: a card or an A/B picker is up.
+/// - `deliveryOpen(Bool)`: a delivery is still running its paste check and clipboard restore (or a one-shot is
+///   landing). A result never pastes while one is open, so "finished" means the take is over AND its delivery
+///   completed.
+/// - `flowBusy(Bool)`: a card, an A/B picker or a selection one-shot holds the stage.
 /// Nothing is persisted: a result that has not pasted when the app quits is not pasted on relaunch.
 struct AskBackHeldQueue {
     struct Paste: Equatable { let id: UUID; let text: String }
@@ -632,6 +635,7 @@ struct AskBackHeldQueue {
     private var slots: [(id: UUID, slot: Slot)] = []
     private var takeLive = false
     private var busy = false
+    private var delivering = false
 
     var isEmpty: Bool { slots.isEmpty }
     var count: Int { slots.count }
@@ -660,20 +664,51 @@ struct AskBackHeldQueue {
 
     mutating func flowBusy(_ on: Bool) -> [Paste] { busy = on; return drain() }
 
-    /// Pastes the head of the line when it is ready and nothing is live or busy. A paste counts as a take in
-    /// front of the next result: the caller reports `takeFinished` once it has settled.
+    mutating func deliveryOpen(_ on: Bool) -> [Paste] { delivering = on; return drain() }
+
+    /// Level-triggered form for the controller: set all three inputs from what is true now, without releasing.
+    /// Every event it feeds is preceded by this, so the queue never acts on a stale "no take is live".
+    mutating func setInputs(takeLive: Bool, busy: Bool, delivering: Bool) {
+        self.takeLive = takeLive; self.busy = busy; self.delivering = delivering
+    }
+
+    /// Looks at the head of the line again with the inputs as last set.
+    mutating func poke() -> [Paste] { drain() }
+
+    /// Pastes the head of the line when it is ready and nothing is live, busy or delivering. A paste counts as a
+    /// take in front of the next result: the caller reports `takeFinished` once it has run, and the next result
+    /// then also waits for that paste's own delivery to complete (`deliveryOpen`).
     private mutating func drain() -> [Paste] {
         while let head = slots.first {
             switch head.slot {
             case .failed: slots.removeFirst()
             case .expected: return []
             case .ready(let text):
-                guard !takeLive, !busy else { return [] }
+                guard !takeLive, !busy, !delivering else { return [] }
                 slots.removeFirst()
                 takeLive = true
                 return [Paste(id: head.id, text: text)]
             }
         }
         return []
+    }
+}
+
+/// The two decisions the controller makes around a held paste, pure so the Linux oracle pins them.
+enum AskBackHeldPolicy {
+    /// Something holds the stage: a card, an A/B picker, or a selection one-shot (its busy latch from capture to
+    /// landing, and the short gap before the latch is set while its selection copy runs).
+    static func busy(pendingPick: Bool, abPicker: Bool, askCard: Bool, oneShotLatch: Bool, oneShotGrace: Bool) -> Bool {
+        pendingPick || abPicker || askCard || oneShotLatch || oneShotGrace
+    }
+
+    enum Turn: Equatable { case paste, skipSuspect, skipParked }
+
+    /// What a held result does when its turn comes. A result the rogue-output check flags, or one that would
+    /// overwrite text the delivery in front parked on the clipboard for a manual Cmd+V, stays in History only.
+    static func turn(suspect: Bool, parked: Bool) -> Turn {
+        if suspect { return .skipSuspect }
+        if parked { return .skipParked }
+        return .paste
     }
 }
