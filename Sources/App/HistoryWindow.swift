@@ -385,6 +385,11 @@ private final class TranscriptionHistoryRowView: HistoryRowView, AVAudioPlayerDe
 
     private let timeLabel = NSTextField(labelWithString: "")
     private let tagLabel = NSTextField(labelWithString: "")
+    /// VDASK-6: the questions and answers, only while the row is expanded (hidden and zero height collapsed).
+    private let answersLabel = NSTextField(wrappingLabelWithString: "")
+    private var displayBody: (text: String, isTranscriptFallback: Bool) {
+        AskBackHistoryFormat.body(delivered: entry.text, transcript: entry.raw)
+    }
     // Single "Copy" for Raw-mode entries; "Original" + "Cleaned" when both versions exist.
     private let copyButton = NSButton(title: "Copy", target: nil, action: nil)
     private let copyCleanedButton = NSButton(title: "Cleaned", target: nil, action: nil)
@@ -409,17 +414,27 @@ private final class TranscriptionHistoryRowView: HistoryRowView, AVAudioPlayerDe
         let modeTag = entry.hasBothVersions ? "cleaned" : nil
         let levelTag = entry.level.flatMap { CleanupLevel(rawValue: $0)?.label }
         let intoTag = entry.app.isEmpty ? nil : "into \(entry.app)"
-        tagLabel.stringValue = [modeTag, levelTag, intoTag].compactMap { $0 }.joined(separator: " · ")
+        tagLabel.stringValue = AskBackHistoryFormat.tagLine(
+            record: entry.askBack, status: entry.status,
+            existing: [modeTag, levelTag, intoTag].compactMap { $0 })
         addSubview(tagLabel)
 
         textLabel.font = textFont
-        textLabel.textColor = .labelColor
+        textLabel.textColor = displayBody.isTranscriptFallback ? .secondaryLabelColor : .labelColor
         textLabel.maximumNumberOfLines = 0
         textLabel.lineBreakMode = .byWordWrapping
-        textLabel.stringValue = entry.text
+        textLabel.stringValue = displayBody.text
         textLabel.wantsLayer = true
         textLabel.layer?.masksToBounds = true
         addSubview(textLabel)
+
+        answersLabel.font = .systemFont(ofSize: 11)
+        answersLabel.textColor = .secondaryLabelColor
+        answersLabel.maximumNumberOfLines = 0
+        answersLabel.lineBreakMode = .byWordWrapping
+        answersLabel.stringValue = entry.askBack.map { AskBackHistoryFormat.answersText($0) } ?? ""
+        answersLabel.isHidden = true
+        addSubview(answersLabel)
 
         copyButton.bezelStyle = .rounded
         copyButton.controlSize = .small
@@ -479,7 +494,7 @@ private final class TranscriptionHistoryRowView: HistoryRowView, AVAudioPlayerDe
                                 width: max((buttonsLeft - 8) - tagX, 0), height: headerH)
 
         let textW = max(width - 2 * padX, 1)
-        let fullH = HistoryFormat.textHeight(entry.text, font: textFont, width: textW)
+        let fullH = HistoryFormat.textHeight(displayBody.text, font: textFont, width: textW)
         let lineH = NSLayoutManager().defaultLineHeight(for: textFont)
         let collapsedH = ceil(lineH * 3)
         let overflowing = fullH > collapsedH + 1
@@ -488,7 +503,18 @@ private final class TranscriptionHistoryRowView: HistoryRowView, AVAudioPlayerDe
         let textY = padTop + headerH + gap
         textLabel.frame = NSRect(x: padX, y: textY, width: textW, height: shownH)
         applyFadeMask(active: overflowing && !expanded)
-        return textY + shownH + padBottom
+        var bottom = textY + shownH
+        // The answers block is never visible (and adds no height) while the row is collapsed.
+        if expanded, entry.askBack != nil {
+            let answersFont = tagLabel.font ?? .systemFont(ofSize: 11)
+            let answersH = HistoryFormat.textHeight(answersLabel.stringValue, font: answersFont, width: textW)
+            answersLabel.frame = NSRect(x: padX, y: bottom + gap, width: textW, height: answersH)
+            answersLabel.isHidden = false
+            bottom += gap + answersH
+        } else {
+            answersLabel.isHidden = true
+        }
+        return bottom + padBottom
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
