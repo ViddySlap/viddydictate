@@ -17,6 +17,8 @@ private final class TraceHUD: HUDPresenting {
     var onSettings: (() -> Void)?
     var samplesProvider: (() -> [Float])?
     var onSetLevel: ((Int) -> Void)?
+    var onToggleAskBack: (() -> Void)?
+    var toggles: [AskBackToggleState] = []
     var log: [String] = []
 
     func show() { log.append("show") }
@@ -33,6 +35,7 @@ private final class TraceHUD: HUDPresenting {
     func update(state: String, target: String?, text: String, locked: Bool) { log.append("update:\(state)") }
     func toast(_ message: String, duration: TimeInterval, forceFull: Bool, action: (() -> Void)?) { log.append("toast:\(message)") }
     func answer(_ text: String) {}
+    func setAskBackToggle(_ state: AskBackToggleState) { toggles.append(state) }
 }
 
 private final class TraceHook: TailCheckDictationHook {
@@ -1494,6 +1497,121 @@ enum AskBackControllerSelfTest {
                     && down.contains("autorepeat: autorepeat")
                     && (hot.range(of: "tap DISABLED")
                         .map { String(hot[$0.lowerBound...].prefix(400)) } ?? "").contains("releaseAskVoiceKeyIfTaken()"))
+        }
+
+        // ---------------------------------------------------------------- VDASK-5: the ? toggle on the HUD
+        do {
+            let savedLevel = CleanupState.shared.cleanupLevel
+            defer { CleanupState.shared.setLevel(savedLevel); Settings.askBackEnabled = true }
+            let rig = TraceRig(); defer { rig.close() }
+            // The ? state through the real controller: the setting, the level and the route's provider.
+            var matrixOK = true
+            let levelCases: [(String, CleanupLevel)] = [("cleanup", .cleanup), ("tighten", .tighten), ("summarize", .summarize)]
+            let providerCases: [(String, LLMProviderBundle)] = [("claude", .claude("m")), ("codex", .codex("m")), ("local", .local("m"))]
+            for (levelName, level) in levelCases {
+                CleanupState.shared.setLevel(level)
+                for (providerName, bundle) in providerCases {
+                    for enabled in [true, false] {
+                        Settings.askBackEnabled = enabled
+                        rig.ctl.askSeams.resolve = { _ in .pinned(bundle) }
+                        let s = rig.ctl.askBackToggleState()
+                        let cloud = providerName != "local"
+                        let want = AskBackToggleState(
+                            clickable: cloud, bright: cloud && enabled && levelName != "cleanup",
+                            outlined: cloud && levelName == "cleanup",
+                            tooltip: !cloud ? "Ask-back needs Claude or Codex"
+                                : (enabled ? "Ask-back on: questions before Tighten and Summarize" : "Ask-back off"))
+                        if s != want { matrixOK = false; print("  matrix miss: \(levelName) \(providerName) enabled=\(enabled) got \(s)") }
+                    }
+                }
+            }
+            check("pill: the ? state for every setting x level x provider (Claude, Codex, local) matches the rules, through the controller", matrixOK)
+            rig.ctl.askSeams.resolve = { _ in .off(reason: "no provider") }
+            check("pill: a route that is off greys the ? like a local route", !rig.ctl.askBackToggleState().clickable)
+
+            CleanupState.shared.setLevel(.tighten)
+            Settings.askBackEnabled = true
+            rig.ctl.askSeams.resolve = { _ in .pinned(.claude("claude-trace-model")) }
+            rig.ctl.refreshAskBackToggle()
+            check("pill: refreshing pushes the current state to the HUD", rig.hud.toggles.last == rig.ctl.askBackToggleState()
+                  && rig.hud.toggles.last?.bright == true)
+            rig.ctl.askSeams.resolve = { _ in .pinned(.local("m")) }
+            rig.ctl.refreshAskBackToggle()
+            check("pill: a route change to local, once refreshed, pushes a greyed ?", rig.hud.toggles.last?.clickable == false)
+            CleanupState.shared.setLevel(.cleanup)
+            rig.ctl.askSeams.resolve = { _ in .pinned(.claude("claude-trace-model")) }
+            rig.ctl.refreshAskBackToggle()
+            check("pill: a level change to Cleanup, once refreshed, pushes a clickable dim-outlined ?",
+                  rig.hud.toggles.last?.clickable == true && rig.hud.toggles.last?.bright == false && rig.hud.toggles.last?.outlined == true)
+
+            // A click flips the one setting the Settings checkbox writes, and it reads back.
+            CleanupState.shared.setLevel(.tighten)
+            Settings.askBackEnabled = true
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: a click flips the setting on to off and it reads back (Settings and UserDefaults)",
+                  Settings.askBackEnabled == false && UserDefaults.standard.bool(forKey: "askBackEnabled") == false
+                    && rig.hud.toggles.last?.bright == false && rig.hud.toggles.last?.tooltip == "Ask-back off")
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: a second click flips it back on", Settings.askBackEnabled == true && rig.hud.toggles.last?.bright == true)
+            CleanupState.shared.setLevel(.cleanup)
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: on Cleanup the ? still flips the setting", Settings.askBackEnabled == false)
+            Settings.askBackEnabled = true
+            CleanupState.shared.setLevel(.tighten)
+            rig.ctl.askSeams.resolve = { _ in .pinned(.local("m")) }
+            rig.ctl.toggleAskBackFromHUD()
+            Settings.askBackEnabled = false
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: a greyed ? ignores a click, whether the setting is on or off", Settings.askBackEnabled == false)
+            Settings.askBackEnabled = true
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: a greyed ? ignores a click while the setting is on", Settings.askBackEnabled == true)
+            check("pill: a click on an idle controller starts, ends or cancels nothing", rig.state == "idle" && rig.reviews.isEmpty && rig.writes.isEmpty)
+        }
+        do {
+            // A click during reviewing, asking and writing changes the setting for the NEXT take only.
+            Settings.askBackEnabled = true
+            let savedLevel2 = CleanupState.shared.cleanupLevel
+            CleanupState.shared.setLevel(.summarize)
+            defer { CleanupState.shared.setLevel(savedLevel2); Settings.askBackEnabled = true; Settings.isDictationActive = false }
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            let gen = rig.ctl.traceGeneration
+            rig.ctl.toggleAskBackFromHUD()
+            check("pill: a click while reviewing flips the setting and leaves the review, its state and the generation alone",
+                  Settings.askBackEnabled == false && rig.state == "reviewing" && rig.reviews.count == 1 && rig.writes.isEmpty
+                    && rig.ctl.traceGeneration == gen && rig.hotkey.askReviewActive)
+            rig.ctl.toggleAskBackFromHUD()   // back on
+            rig.answerReview()
+            check("pill: the review that was running still opens its card after a click", rig.state == "asking" && rig.card.shown.count == 1)
+            let phase = rig.ctl.traceAskFlow?.phase
+            rig.ctl.toggleAskBackFromHUD()   // off, while the card is up
+            check("pill: a click while asking leaves the card up, the flow phase, the generation and the HUD alone",
+                  Settings.askBackEnabled == false && rig.state == "asking" && rig.hotkey.askCardActive
+                    && rig.card.shown.count == 1 && rig.card.hides == 0 && rig.ctl.traceAskFlow?.phase == phase
+                    && rig.ctl.traceGeneration == gen && rig.writes.isEmpty && rig.newTakeStates.isEmpty)
+            _ = rig.key(TKey.ret)
+            check("pill: the running flow carries on after the click: the answer is written into its one write",
+                  rig.state == "writing" && rig.writes.count == 1 && rig.reviews.count == 1
+                    && rig.writes[0].request.systemPrompt.contains("already answered"))
+            rig.ctl.toggleAskBackFromHUD()   // on again, while writing
+            rig.ctl.toggleAskBackFromHUD()   // off again
+            check("pill: a click while writing changes the setting only: still writing, one write",
+                  Settings.askBackEnabled == false && rig.state == "writing" && rig.writes.count == 1 && rig.ctl.traceGeneration == gen)
+            rig.finishWrite()
+            check("pill: the take that was running pastes once, as it would have", rig.pastes == 1 && rig.state == "idle")
+
+            let next = TraceRig(); defer { next.close() }
+            next.startTake()
+            check("pill: the NEXT take reads the new setting: ask-back off, so no review and its write starts at once",
+                  next.reviews.isEmpty && next.writes.count == 1 && next.ctl.traceAskFlow == nil
+                    && next.writes[0].request.systemPrompt.contains("already answered") == false)
+            next.finishWrite()
+            Settings.askBackEnabled = true
+            Settings.isDictationActive = false
+            let again = TraceRig(); defer { again.close() }
+            again.startTake()
+            check("pill: and with the setting back on, the next take reviews again", again.reviews.count == 1 && again.state == "reviewing")
         }
 
         print(check.summaryLine(prefix: "[askback-controller-selftest]"))

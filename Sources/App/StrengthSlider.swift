@@ -1,5 +1,20 @@
 import Cocoa
 
+// BEGIN compact-pill-word
+/// VDASK-5: the info pill shows only the active level's word. This is the one list of words and the one rule
+/// for which of them get drawn, so the oracle and the self-test read the same code the slider draws with.
+enum CompactPillWord {
+    /// The three stop labels, ALL CAPS. This ONE array is what gets measured and what gets drawn.
+    static let words = ["CLEANUP", "TIGHTEN", "SUMMARIZE"]
+    /// The word for a level (0 Cleanup, 1 Tighten, 2 Summarize); out-of-range levels clamp to the ends.
+    static func word(forLevel level: Int) -> String { words[max(0, min(words.count - 1, level))] }
+    /// Which stop labels are painted: just the active one when compact, all three otherwise.
+    static func drawnIndices(level: Int, compact: Bool) -> [Int] {
+        compact ? [max(0, min(words.count - 1, level))] : Array(words.indices)
+    }
+}
+// END compact-pill-word
+
 /// Compact 3-stop cleanup-strength slider for the HUD. Level 0 = Cleanup, 1 = Tighten, 2 = Summarize.
 ///
 /// Two layouts, chosen by `threeLabels`:
@@ -17,6 +32,9 @@ final class StrengthSlider: NSView {
     var level: Int = 0 { didSet { needsDisplay = true } }
     var enabled: Bool = true { didSet { needsDisplay = true } }
     var onSetLevel: ((Int) -> Void)?
+    /// VDASK-5: in the three-label layout, paint only the active level's word. The layout (width, track,
+    /// label frames) is unchanged, so the pill does not move; only the other two words are not drawn.
+    var compactWord: Bool = false { didSet { needsDisplay = true } }
     /// Label all three stops in a two-row layout (info pill). Default false = the compact end-labeled
     /// single row used by the full HUD, which stays pixel-for-pixel unchanged.
     var threeLabels: Bool = false { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
@@ -29,7 +47,7 @@ final class StrengthSlider: NSView {
     /// The three stop labels, ALL CAPS. This ONE array is what gets measured and what gets drawn: the
     /// trap here is uppercasing at draw time only, which leaves `trackW3` sized for the lowercase
     /// strings and makes the painted labels overlap.
-    static let threeStopLabels = ["CLEANUP", "TIGHTEN", "SUMMARIZE"]
+    static let threeStopLabels = CompactPillWord.words
 
     private var phosphor: NSColor { Phosphor.green }   // live theme accent
     private let labelSize: CGFloat = 8.5
@@ -129,8 +147,9 @@ final class StrengthSlider: NSView {
 
         if threeLabels {
             // Three labels centered under their stops, on the bottom row.
-            for (i, f) in labelFrames.enumerated() {
-                (Self.threeStopLabels[i] as NSString).draw(at: f.origin, withAttributes: attrs)
+            let frames = labelFrames
+            for i in CompactPillWord.drawnIndices(level: CleanupLevel.clamped(level).rawValue, compact: compactWord) {
+                (Self.threeStopLabels[i] as NSString).draw(at: frames[i].origin, withAttributes: attrs)
             }
         } else {
             // left label "cleanup"

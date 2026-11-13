@@ -1,5 +1,41 @@
 import Cocoa
 
+// BEGIN askback-toggle-rules
+/// VDASK-5: what the HUD's ? button shows and whether it takes a click. A pure function of the ask-back setting,
+/// the active level and the provider the level's route resolves to (nil: the route is off). Foundation only.
+struct AskBackToggleState: Equatable {
+    /// False means greyed: the button ignores a click.
+    let clickable: Bool
+    /// Drawn in the active (bright) colour. Only when the setting is on and it applies to this level.
+    let bright: Bool
+    /// Drawn dim with an outline: Cleanup never asks, so the setting does not apply to it.
+    let outlined: Bool
+    let tooltip: String
+}
+
+enum AskBackToggleRules {
+    static let greyedTooltip = "Ask-back needs Claude or Codex"
+    static let onTooltip = "Ask-back on: questions before Tighten and Summarize"
+    static let offTooltip = "Ask-back off"
+
+    static func state(enabled: Bool, level: AskBackLevel, provider: AskBackProvider?) -> AskBackToggleState {
+        guard let provider, provider != .local else {
+            return AskBackToggleState(clickable: false, bright: false, outlined: false, tooltip: greyedTooltip)
+        }
+        let tip = enabled ? onTooltip : offTooltip
+        if level == .cleanup {
+            return AskBackToggleState(clickable: true, bright: false, outlined: true, tooltip: tip)
+        }
+        return AskBackToggleState(clickable: true, bright: enabled, outlined: false, tooltip: tip)
+    }
+
+    /// The setting after a click: flipped when the button is clickable, otherwise unchanged (nil).
+    static func settingAfterClick(enabled: Bool, state: AskBackToggleState) -> Bool? {
+        state.clickable ? !enabled : nil
+    }
+}
+// END askback-toggle-rules
+
 // MARK: - HUD presenting (vdtpwg4 repair, master ruling item iv)
 
 /// The HUD surface `DictationController` drives, abstracted away from the concrete `HUDPanel` class.
@@ -23,6 +59,8 @@ protocol HUDPresenting: AnyObject {
     var onSettings: (() -> Void)? { get set }
     var samplesProvider: (() -> [Float])? { get set }
     var onSetLevel: ((Int) -> Void)? { get set }
+    /// VDASK-5: the ? button was clicked. Defaulted below so a conformer that has no such button needs nothing.
+    var onToggleAskBack: (() -> Void)? { get set }
 
     func show()
     func hide()
@@ -40,9 +78,13 @@ protocol HUDPresenting: AnyObject {
     /// extension below restores the shorthand call shapes every real call site already uses.
     func toast(_ message: String, duration: TimeInterval, forceFull: Bool, action: (() -> Void)?)
     func answer(_ text: String)
+    /// VDASK-5: the ? button's look and whether it takes a click. Defaulted to a no-op below.
+    func setAskBackToggle(_ state: AskBackToggleState)
 }
 
 extension HUDPresenting {
+    var onToggleAskBack: (() -> Void)? { get { nil } set {} }
+    func setAskBackToggle(_ state: AskBackToggleState) {}
     /// Mirrors `HUDPanel.toast`'s own defaults so every existing shorthand `hud.toast(...)` call site
     /// (message-only, message+duration, or message+duration+forceFull -- the three shapes real call
     /// sites in `AppDelegate`/`OneShotRegistry` actually use; nothing calls `action:` outside
@@ -101,6 +143,81 @@ struct HUDThinkingActivity {
     }
 }
 
+// MARK: - The ? (ask-back) button
+
+/// VDASK-5: the HUD's ask-back toggle, in the same frosted style as Lock and Stop (`GlassButton`, which this
+/// file may not change, so the look is repeated here). Bright phosphor when on, dim when off, dim with an
+/// outline for Cleanup, and greyed (disabled, so it ignores a click) when the route is local. Like Lock and
+/// Stop it sits on the non-activating HUD panel; it also refuses first responder, so a click can never move
+/// key focus off the paste target.
+final class AskBackToggleButton: NSButton {
+    private var toggleState = AskBackToggleState(clickable: false, bright: false, outlined: false,
+                                           tooltip: AskBackToggleRules.greyedTooltip)
+    private var hovering = false { didSet { updateStyle() } }
+    private var tracking: NSTrackingArea?
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        wantsLayer = true
+        bezelStyle = .regularSquare
+        imagePosition = .noImage
+        refusesFirstResponder = true
+        layer?.cornerRadius = 8
+        layer?.borderWidth = 1
+        apply(toggleState)
+    }
+    required init?(coder: NSCoder) { fatalError("no coder") }
+
+    var appliedState: AskBackToggleState { toggleState }
+
+    func apply(_ s: AskBackToggleState) {
+        toggleState = s
+        isEnabled = s.clickable
+        toolTip = s.tooltip
+        if !s.clickable { hovering = false }
+        updateStyle()
+    }
+
+    private func updateStyle() {
+        let lit = toggleState.clickable && toggleState.bright
+        let color: NSColor = lit || (hovering && toggleState.clickable) ? Phosphor.green : NSColor(white: 1, alpha: 0.65)
+        let alpha: CGFloat = !toggleState.clickable ? 0.3 : (lit ? 1.0 : 0.55)
+        let para = NSMutableParagraphStyle(); para.alignment = .center
+        attributedTitle = NSAttributedString(string: "?", attributes: [
+            .font: NSFont(name: Phosphor.font, size: 11) ?? .systemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: color.withAlphaComponent(alpha), .kern: 2.0, .paragraphStyle: para,
+        ])
+        let bg = hovering && toggleState.clickable
+            ? Phosphor.themed(NSColor(srgbRed: 0, green: 0.08, blue: 0.03, alpha: 0.7))
+            : NSColor(white: 0, alpha: 0.55)
+        let border: NSColor
+        if lit { border = Phosphor.green.withAlphaComponent(0.4) }
+        else if toggleState.outlined { border = NSColor(white: 1, alpha: 0.35) }
+        else if hovering && toggleState.clickable { border = Phosphor.green.withAlphaComponent(0.4) }
+        else { border = NSColor(white: 1, alpha: 0.10) }
+        layer?.backgroundColor = bg.cgColor
+        layer?.borderColor = border.cgColor
+        if lit || (hovering && toggleState.clickable) {
+            layer?.shadowColor = Phosphor.green.cgColor; layer?.shadowRadius = 7
+            layer?.shadowOpacity = lit ? 0.5 : 0.35; layer?.shadowOffset = .zero; layer?.masksToBounds = false
+        } else {
+            layer?.shadowOpacity = 0
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(t); tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = toggleState.clickable }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: super.intrinsicContentSize.width + 26, height: 28) }
+}
+
 // MARK: - HUD panel
 
 /// The panel's content view. Its ONLY job is to turn a click on a toast that carries an action into
@@ -122,6 +239,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     var onLock: (() -> Void)?
     var onStop: (() -> Void)?
     var onSettings: (() -> Void)?
+    var onToggleAskBack: (() -> Void)?
     var samplesProvider: (() -> [Float])?
 
     private let panel: NSPanel
@@ -145,6 +263,8 @@ final class HUDPanel: NSObject, HUDPresenting {
     private(set) var pillToastTruncatedForTesting = false
     private let lockButton: GlassButton
     private let stopButton: GlassButton
+    /// VDASK-5: the ask-back on/off button beside Lock and Stop.
+    private let askBackButton = AskBackToggleButton()
 
     private let badge = ModeBadgePanel()
     /// The universal transform-slot indicators in the info bar: one reused KeycapView for Cleanup or
@@ -270,6 +390,7 @@ final class HUDPanel: NSObject, HUDPresenting {
 
         lockButton.target = self; lockButton.action = #selector(lockClicked)
         stopButton.target = self; stopButton.action = #selector(stopClicked)
+        askBackButton.target = self; askBackButton.action = #selector(askBackClicked)
         // The scope only ever shows live mic input now; the cleanup wait is a separate spinner that
         // replaces the whole HUD (see setThinking), not a sine in this box.
         wave.samplesProvider = { [weak self] in self?.samplesProvider?() ?? [] }
@@ -305,6 +426,7 @@ final class HUDPanel: NSObject, HUDPresenting {
         root.addSubview(display)
         root.addSubview(lockButton)
         root.addSubview(stopButton)
+        root.addSubview(askBackButton)
         root.addSubview(spinner)
         panel.contentView = root
         setHotkeyMap(.defaults())
@@ -314,6 +436,10 @@ final class HUDPanel: NSObject, HUDPresenting {
     @objc private func lockClicked() { onLock?() }
     @objc private func stopClicked() { onStop?() }
     @objc private func settingsClicked() { onSettings?() }
+    @objc private func askBackClicked() { onToggleAskBack?() }
+
+    /// VDASK-5: the controller pushes the ? button's look whenever the setting, the level or the route changes.
+    func setAskBackToggle(_ state: AskBackToggleState) { askBackButton.apply(state) }
 
     private func toastClicked() {
         let action = toastAction
@@ -515,15 +641,17 @@ final class HUDPanel: NSObject, HUDPresenting {
         }
 
         let lw = lockButton.intrinsicContentSize.width, sw = stopButton.intrinsicContentSize.width
-        let total = lw + 12 + sw
+        let aw = askBackButton.intrinsicContentSize.width
+        let total = lw + 12 + sw + 12 + aw
         let startX = (W - total) / 2
         lockButton.frame = NSRect(x: startX, y: 0, width: lw, height: buttonsH)
         stopButton.frame = NSRect(x: startX + lw + 12, y: 0, width: sw, height: buttonsH)
+        askBackButton.frame = NSRect(x: startX + lw + 12 + sw + 12, y: 0, width: aw, height: buttonsH)
 
         spinner.isHidden = true
         statusLabel.isHidden = false; settingsButton.isHidden = false
         wave.isHidden = false; transcription.isHidden = false
-        lockButton.isHidden = false; stopButton.isHidden = false
+        lockButton.isHidden = false; stopButton.isHidden = false; askBackButton.isHidden = false
     }
 
     // MARK: public API (unchanged shape for DictationController)
@@ -675,7 +803,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     private func setRecordingChrome(hidden: Bool) {
         statusLabel.isHidden = hidden; settingsButton.isHidden = hidden
         wave.isHidden = hidden; transcription.isHidden = hidden; keycap.isHidden = hidden
-        lockButton.isHidden = hidden; stopButton.isHidden = hidden
+        lockButton.isHidden = hidden; stopButton.isHidden = hidden; askBackButton.isHidden = hidden
         pillToastLabel.isHidden = true   // never part of the recording chrome; the pill-toast shows it explicitly
         slider.isHidden = hidden || !cleanupEnabled
     }

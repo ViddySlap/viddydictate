@@ -191,6 +191,8 @@ final class DictationController {
     /// Esc under the same press resumes it), and the old take's own target fields, restored on a resume because
     /// the new take's start overwrote them.
     private var askParkedFlow: AskBackFlow?
+    /// VDASK-5: the observers that keep the HUD's ? button current when the setting or a route changes.
+    private var askToggleObservers: [NSObjectProtocol] = []
     private var askParkedTake: (target: DictationTarget?, wasNotes: Bool, landAtStart: Bool, noteTarget: NotesDictationTarget?)?
 
     /// Test seams for the headless controller trace test (AskBackControllerSelfTest). Production leaves every
@@ -314,6 +316,13 @@ final class DictationController {
         hud.onSettings = { [weak self] in self?.callbacks.onOpenSettings() }
         hud.samplesProvider = { [weak self] in self?.audio.scopeSamples ?? [] }
         hud.onSetLevel = { [weak self] lvl in self?.setLevelFromSlider(lvl) }
+        hud.onToggleAskBack = { [weak self] in self?.toggleAskBackFromHUD() }
+        let nc = NotificationCenter.default
+        askToggleObservers = [
+            nc.addObserver(forName: Settings.didChange, object: nil, queue: .main) { [weak self] _ in self?.refreshAskBackToggle() },
+            nc.addObserver(forName: ModelsPowerSettingsStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.refreshAskBackToggle() },
+        ]
+        refreshAskBackToggle()
         // B13/B14's panel, on the same keyboard-over-the-tap contract as the two pickers below.
         let offers = PointOfUseOfferPresenter.shared
         hotkey.onInstallOfferLeft = { offers.moveLeft() }
@@ -551,6 +560,7 @@ final class DictationController {
                   : "\(descriptor.id) armed for current take")
 
         hud.setCleanup(enabled: false, level: CleanupState.shared.cleanupLevel.rawValue)
+        refreshAskBackToggle()
         hud.setArmedMode(glyph: glyph)
         hud.flashModeBadge(glyph: glyph, label: descriptor.label)
         if cleanupWasEnabled {
@@ -569,6 +579,7 @@ final class DictationController {
         let restored = CleanupState.shared.badgeMode(forEnabled: cleanupEnabled)
         hud.setArmedMode(glyph: nil)
         hud.setCleanup(enabled: cleanupEnabled, level: CleanupState.shared.cleanupLevel.rawValue)
+        refreshAskBackToggle()
         callbacks.onCleanupModeChange(cleanupEnabled)
         notesDelivery.refreshReplaceHighlightLevel()
         if announce {
@@ -704,6 +715,7 @@ final class DictationController {
         hud.setArmedMode(glyph: nil)
         hud.flashCleanupBadge(label: mode.label)
         hud.setCleanup(enabled: enabled, level: CleanupState.shared.cleanupLevel.rawValue)
+        refreshAskBackToggle()
         callbacks.onCleanupModeChange(enabled)
         notesDelivery.refreshReplaceHighlightLevel()   // BT4: a mid-take Raw<->Cleanup flip recolors the replace highlight
     }
@@ -718,7 +730,37 @@ final class DictationController {
         guard level != before else { return }
         hud.flashCleanupBadge(label: level.label)
         hud.setCleanup(enabled: true, level: level.rawValue)
+        refreshAskBackToggle()
         notesDelivery.refreshReplaceHighlightLevel()   // BT4: a mid-take level step recolors the replace highlight
+    }
+
+    // MARK: VDASK-5 — the ? toggle on the HUD
+
+    /// The ? button's state now: the setting, the active level and the provider that level's route resolves to
+    /// (nil when the route is off). The same route resolution `deliver` uses, so the button and the review gate
+    /// agree on what "local" means.
+    func askBackToggleState() -> AskBackToggleState {
+        let cleanupLevel = CleanupState.shared.cleanupLevel
+        let route = LLMRouteID.cleanupRoute(for: cleanupLevel)
+        let resolution = askSeams.resolve?(route) ?? Settings.modelsPower.resolveRoute(
+            route, fallback: .local(Settings.cleanupModel))
+        return AskBackToggleRules.state(enabled: Settings.askBackEnabled, level: AskBackLevel(cleanupLevel),
+                                        provider: resolution.bundle.map { AskBackProvider($0.provider) })
+    }
+
+    /// Push the ? button's look to the HUD. Called when the level, the setting or a route changes.
+    func refreshAskBackToggle() {
+        hud.setAskBackToggle(askBackToggleState())
+    }
+
+    /// The ? button was clicked: flip the same setting the Settings checkbox writes, unless the button is greyed.
+    /// It touches the setting only: no take starts, ends or is cancelled, and a flow already running keeps the
+    /// context it froze when it began, so a click mid-take counts from the NEXT take.
+    func toggleAskBackFromHUD() {
+        guard let next = AskBackToggleRules.settingAfterClick(enabled: Settings.askBackEnabled, state: askBackToggleState())
+        else { return }
+        Settings.askBackEnabled = next
+        refreshAskBackToggle()
     }
 
     /// The HUD strength slider was dragged with the mouse — set the level directly (no-op when off).
@@ -728,6 +770,7 @@ final class DictationController {
         guard level != CleanupState.shared.cleanupLevel else { return }
         CleanupState.shared.setLevel(level)
         hud.setCleanup(enabled: true, level: level.rawValue)
+        refreshAskBackToggle()
         notesDelivery.refreshReplaceHighlightLevel()   // BT4: a mid-take slider drag recolors the replace highlight
     }
 
@@ -1161,6 +1204,7 @@ final class DictationController {
         hud.show()
         if hud is HUDPanel && !targetWasNotesWindow { pasteMarker.start(captured: target, followsLive: LandingRoute.markerFollowsLive(bullseyeOn: takeLandAtStart)) }
         hud.setCleanup(enabled: CleanupState.shared.cleanupEnabled, level: CleanupState.shared.cleanupLevel.rawValue)
+        refreshAskBackToggle()
         hud.setArmedMode(glyph: TransformArmState.shared.armedOneShot?.glyph)
         note("recording")
     }

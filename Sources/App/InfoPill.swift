@@ -102,6 +102,7 @@ final class InfoPillPanel: NSObject {
         keycap.tint = phosphor
         keycap.lit = true
         slider.threeLabels = true
+        slider.compactWord = true      // VDASK-5: only the active level's word
         slider.enabled = true
 
         display.borderColor = phosphor.withAlphaComponent(0.5)
