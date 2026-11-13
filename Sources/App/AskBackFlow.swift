@@ -121,8 +121,13 @@ struct AskCardModel: Equatable {
 }
 
 enum AskCardText {
-    static let footer = "Tap right \u{2325} 1-4\u{00D7} \u{B7} \u{2191}\u{2193} \u{23CE} \u{B7} esc: you decide"
+    static let footer = "Tap right \u{2325} 1-4\u{00D7} \u{B7} \u{2191}\u{2193} \u{23CE} \u{B7} hold / to speak \u{B7} esc: you decide"
     static let readingCue = "Reading your take\u{2026}"
+    // VDASK-4: the one-line status under the options while a voice answer is in progress or has just failed.
+    static let voiceListening = "Listening\u{2026} release / to send"
+    static let voiceTranscribing = "Transcribing\u{2026}"
+    static let voiceDidntCatch = "Didn't catch that. Hold / to try again."
+    static let voiceMicUnavailable = "Mic unavailable."
 
     /// "1 of 3" for a multi-question review, nil for a single question.
     static func progress(index: Int, total: Int) -> String? {
@@ -131,6 +136,20 @@ enum AskCardText {
     static func youSaid(_ quote: String) -> String { "You said: \"\(quote)\"" }
     static func optionLine(number: Int, text: String, highlighted: Bool) -> String {
         (highlighted ? "\u{25B8} " : "  ") + "\(number)  " + text
+    }
+}
+
+/// The card's voice status line (VDASK-4). nil on the card means no line.
+enum AskVoiceStatus: Equatable {
+    case listening, transcribing, didntCatch, micUnavailable
+
+    var text: String {
+        switch self {
+        case .listening: return AskCardText.voiceListening
+        case .transcribing: return AskCardText.voiceTranscribing
+        case .didntCatch: return AskCardText.voiceDidntCatch
+        case .micUnavailable: return AskCardText.voiceMicUnavailable
+        }
     }
 }
 
@@ -299,10 +318,26 @@ final class AskBackFlow {
         var history: (AskBackHistoryEvent) -> Void
         var saveDetached: (AskBackDetachedJob) -> Void
         var startNewTake: () -> Void
+        // VDASK-4 voice answer. Defaults let a caller that never hears a voice answer leave them out.
+        /// Starts the take's audio capture; false when the mic is busy or not permitted.
+        var voiceStart: () -> Bool = { false }
+        /// Stops capture and drops the audio, nothing is transcribed.
+        var voiceDiscard: () -> Void = {}
+        /// Stops capture and transcribes; the caller later hands the text to `voiceTranscript` with this id.
+        var voiceStop: (UUID) -> Void = { _ in }
+        /// The status line under the card's options (nil clears it).
+        var voiceStatus: (UUID, AskVoiceStatus?) -> Void = { _, _ in }
     }
+
+    /// The voice answer's sub-state of `.asking`: `/` pressed (not yet a hold), recording, then transcribing.
+    enum VoicePhase: Equatable { case idle, pressed, recording, transcribing }
 
     static let holdThreshold: TimeInterval = 0.300
     static let tapWindow: TimeInterval = 0.400
+    /// A `/` press shorter than this is a tap: nothing records. A hold longer starts recording.
+    static let voiceHoldThreshold: TimeInterval = 0.300
+    /// A voice answer stops by itself this long after recording started, as if the key were released.
+    static let voiceCap: TimeInterval = 60
 
     private let context: Context
     private let schedule: Schedule
@@ -331,6 +366,13 @@ final class AskBackFlow {
     private var holdCancel: (() -> Void)?
     private var tapCancel: (() -> Void)?
     private var parkedCardID: UUID?
+
+    // voice answer state (VDASK-4), valid while a card is up
+    private(set) var voicePhase: VoicePhase = .idle
+    private var voiceID: UUID?
+    private var voiceKeyDown = false          // `/` is down as far as the flow knows; only its release clears it
+    private var voiceHoldCancel: (() -> Void)?
+    private var voiceCapCancel: (() -> Void)?
 
     init(context: Context, schedule: @escaping Schedule, now: @escaping () -> TimeInterval,
          newID: @escaping () -> UUID = { UUID() }, hooks: Hooks) {
@@ -398,6 +440,7 @@ final class AskBackFlow {
         guard isLive else { return }
         let was = phase
         cancelTimers()
+        voiceReset()
         if was == .reviewing, let id = reviewID { hooks.skipReview(id) }
         reviewID = nil
         writeID = nil
@@ -453,9 +496,17 @@ final class AskBackFlow {
     /// Records the answer for the current card, closes it and shows the next card or starts the write.
     /// `option` nil means the agent decides.
     private func decide(option: Int?, how: AskBackAnswerHow) {
+        guard phase == .asking else { return }
+        let text = option.flatMap { o in
+            questions[cardIndex].options.indices.contains(o) ? questions[cardIndex].options[o] : nil
+        }
+        decide(text: text, how: how)
+    }
+
+    /// `text` nil means the agent decides. A voice answer passes its transcript here.
+    private func decide(text: String?, how: AskBackAnswerHow) {
         guard phase == .asking, let id = cardID else { return }
-        let q = questions[cardIndex]
-        let text = option.flatMap { q.options.indices.contains($0) ? q.options[$0] : nil }
+        voiceReset()
         let answer = AskBackAnswer(text: text, how: text == nil ? .agentDecided : how)
         answers[cardIndex] = answer
         record?.questions[cardIndex].answer = answer.text
@@ -475,19 +526,24 @@ final class AskBackFlow {
         case .up: moveHighlight(-1)
         case .down: moveHighlight(1)
         case .commit:
-            guard phase == .asking else { return }
+            guard phase == .asking, !voiceKeyDown else { return }    // ignored while `/` is down
             cancelTaps()
             decide(option: highlighted, how: .arrows)
-        case .esc, .optionEsc:
+        case .esc:
             guard phase == .asking else { return }
+            // Esc during a voice answer (pressed, recording or transcribing) drops it; the card stays up.
+            if voicePhase != .idle { dropVoice(); return }
             decide(option: nil, how: .agentDecided)
+        case .optionEsc:
+            guard phase == .asking else { return }
+            decide(option: nil, how: .agentDecided)      // same as on a card; decide() drops any voice answer
         case .skipReview:
             skipReview()
         }
     }
 
     private func moveHighlight(_ delta: Int) {
-        guard phase == .asking, let id = cardID else { return }
+        guard phase == .asking, !voiceKeyDown, let id = cardID else { return }
         cancelTaps()
         let count = questions[cardIndex].options.count
         let next = min(max(highlighted + delta, 0), count - 1)
@@ -498,7 +554,7 @@ final class AskBackFlow {
 
     /// A click on option `index` of card `card`. A stale card id does nothing.
     func click(cardID card: UUID, option index: Int) {
-        guard phase == .asking, card == cardID else { return }
+        guard phase == .asking, card == cardID, !voiceKeyDown else { return }
         guard questions[cardIndex].options.indices.contains(index) else { return }
         cancelTaps()
         decide(option: index, how: .click)
@@ -510,6 +566,9 @@ final class AskBackFlow {
     @discardableResult
     func optionDown() -> Bool {
         guard phase == .asking, let id = cardID else { return false }
+        // While `/` is down every right-Option press, tap or hold, is ignored: no timer starts and no press is
+        // recorded, so its release (below, `pressActive` false) does nothing either.
+        if voiceKeyDown { return true }
         tapCancel?(); tapCancel = nil      // a new press suspends the pending tap deadline; the count stays
         pressActive = true
         consumeRelease = false
@@ -551,6 +610,7 @@ final class AskBackFlow {
     private func park() {
         guard phase == .asking, let id = cardID else { return }
         cancelTimers()
+        voiceReset()
         pressActive = false
         consumeRelease = false
         parkedCardID = id
@@ -592,6 +652,105 @@ final class AskBackFlow {
         phase = .asking
         decide(option: nil, how: .agentDecided)
         return true
+    }
+
+    // MARK: voice answer (VDASK-4): hold `/` while a card is up
+
+    /// The `/` key went down. Returns false when no card is up (the key is then not the flow's). A press while
+    /// another voice answer is in progress, while `/` is already down (autorepeat) or while a right-Option press
+    /// is down does nothing. Recording starts only when the press has lasted `voiceHoldThreshold`, so a tap of
+    /// the key records nothing.
+    @discardableResult
+    func voiceDown() -> Bool {
+        guard phase == .asking, let card = cardID else { return false }
+        guard !voiceKeyDown, voicePhase == .idle, !pressActive else { return true }
+        cancelTaps()                       // pending right-Option taps give way, as they do to Return or a click
+        voiceKeyDown = true
+        voicePhase = .pressed
+        let id = newID()
+        voiceID = id
+        hooks.voiceStatus(card, nil)       // a "didn't catch that" line goes away on the next try
+        voiceHoldCancel = schedule(Self.voiceHoldThreshold) { [weak self] in self?.voiceHoldFired(id, card) }
+        return true
+    }
+
+    private func voiceHoldFired(_ id: UUID, _ card: UUID) {
+        guard phase == .asking, card == cardID, voicePhase == .pressed, id == voiceID else { return }
+        voiceHoldCancel = nil
+        guard hooks.voiceStart() else {
+            voicePhase = .idle
+            voiceID = nil
+            hooks.voiceStatus(card, .micUnavailable)
+            return
+        }
+        voicePhase = .recording
+        hooks.voiceStatus(card, .listening)
+        voiceCapCancel = schedule(Self.voiceCap) { [weak self] in self?.voiceCapFired(id) }
+    }
+
+    private func voiceCapFired(_ id: UUID) {
+        guard phase == .asking, voicePhase == .recording, id == voiceID else { return }
+        voiceCapCancel = nil
+        stopRecording()
+    }
+
+    /// The `/` key came up. A release after the card closed, or of a press the flow ignored, does nothing.
+    @discardableResult
+    func voiceUp() -> Bool {
+        guard voiceKeyDown else { return phase == .asking }
+        voiceKeyDown = false
+        guard phase == .asking else { return false }
+        switch voicePhase {
+        case .pressed:                      // a tap: nothing was recorded, nothing is sent
+            voiceHoldCancel?(); voiceHoldCancel = nil
+            voicePhase = .idle
+            voiceID = nil
+        case .recording:
+            voiceCapCancel?(); voiceCapCancel = nil
+            stopRecording()
+        case .idle, .transcribing:          // the mic failed, the cap already stopped it, or Esc dropped it
+            break
+        }
+        return true
+    }
+
+    private func stopRecording() {
+        guard let id = voiceID, let card = cardID else { return }
+        voicePhase = .transcribing
+        hooks.voiceStatus(card, .transcribing)
+        hooks.voiceStop(id)
+    }
+
+    /// The transcript for voice answer `id` (nil text: the transcription failed). Only the answer in flight counts: a
+    /// late transcript of a dropped answer, of an earlier card or of an earlier press is ignored.
+    func voiceTranscript(_ id: UUID, text: String?) {
+        guard phase == .asking, voicePhase == .transcribing, id == voiceID, let card = cardID else { return }
+        voicePhase = .idle
+        voiceID = nil
+        let spoken = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !spoken.isEmpty else {
+            hooks.voiceStatus(card, .didntCatch)       // the card stays up, nothing else changes
+            return
+        }
+        decide(text: spoken, how: .voice)
+    }
+
+    /// Esc during a voice answer: stop recording if it is, forget the answer (its transcript will be ignored),
+    /// clear the status line. The card stays up.
+    private func dropVoice() {
+        guard let card = cardID else { return }
+        voiceReset()
+        hooks.voiceStatus(card, nil)
+    }
+
+    /// Ends any voice answer: timers off, recording discarded, the id forgotten so a late transcript is stale.
+    /// `voiceKeyDown` stays: only the key's own release clears it.
+    private func voiceReset() {
+        voiceHoldCancel?(); voiceHoldCancel = nil
+        voiceCapCancel?(); voiceCapCancel = nil
+        if voicePhase == .recording { hooks.voiceDiscard() }
+        voicePhase = .idle
+        voiceID = nil
     }
 
     // MARK: timers

@@ -52,6 +52,9 @@ private final class TraceCard: AskCardPresenting {
     func show(_ card: AskCardModel, anchor: CGPoint) { shown.append(card) }
     func setHighlight(cardID: UUID, index: Int) {}
     func hide() { hides += 1 }
+    var statuses: [(UUID, String?)] = []
+    func setStatus(cardID: UUID, text: String?) { statuses.append((cardID, text)) }
+    var lastStatus: String? { statuses.last?.1 }
 }
 
 private final class TraceClock {
@@ -120,6 +123,12 @@ private final class TraceRig {
     var liveCanPaste = true
     var liveHold = false
     var liveDone: [() -> Void] = []
+    /// VDASK-4: the fake recorder and transcriber behind `askSeams.voice*`. `voiceDone` holds the transcribe
+    /// completions the controller handed over, so a row decides when (and whether) each transcript arrives.
+    var micOK = true
+    var voiceStarts = 0
+    var voiceDiscards = 0
+    var voiceDone: [(String?) -> Void] = []
 
     init() {
         pasteboard = NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("askback-ctl-selftest-\(UUID().uuidString)")))
@@ -161,6 +170,9 @@ private final class TraceRig {
         ctl.askSeams.now = { [unowned self] in clock.now }
         ctl.askSeams.beginNewTake = { [unowned self] in newTakeStates.append(ctl.traceStateName) }
         ctl.askSeams.cardPanel = card
+        ctl.askSeams.voiceStart = { [unowned self] in voiceStarts += 1; return micOK }
+        ctl.askSeams.voiceDiscard = { [unowned self] in voiceDiscards += 1 }
+        ctl.askSeams.voiceTranscribe = { [unowned self] done in voiceDone.append(done) }
         ctl.askSeams.abPickerShow = { [unowned self] raw, cleaned in abShown.append((raw, cleaned)) }
         ctl.installHotkeyCallbacks()      // the monitor's callbacks reach this controller, as in production (no tap)
         observer = NotificationCenter.default.addObserver(
@@ -200,6 +212,27 @@ private final class TraceRig {
         traceSettle()
         return taken
     }
+    /// The `/` key through the real monitor routing the tap calls. True means the key was swallowed.
+    @discardableResult
+    func slash(down: Bool, modifiersClear: Bool = true) -> Bool {
+        let taken = hotkey.takeAskVoiceKey(keyCode: HotkeyMonitor.slashKeyCode, down: down, modifiersClear: modifiersClear)
+        traceSettle()
+        return taken
+    }
+    /// Press `/`, hold it for `seconds` of fake time, release.
+    func holdSlash(_ seconds: Double) {
+        slash(down: true)
+        clock.advance(by: seconds); traceSettle()
+        slash(down: false)
+    }
+    /// The transcript for the `n`-th transcription the controller started (default: the latest).
+    func answerVoice(_ text: String?, n: Int? = nil) {
+        let i = n ?? (voiceDone.count - 1)
+        guard voiceDone.indices.contains(i) else { return }
+        voiceDone[i](text)
+        traceSettle()
+    }
+    var cardStatus: String? { card.lastStatus }
     func pressDown() { hotkey.fireWakeup(down: true); traceSettle() }
     func release() { hotkey.fireWakeup(down: false); traceSettle() }
     func finishWrite(_ text: String = traceCleaned) {
@@ -1155,6 +1188,200 @@ enum AskBackControllerSelfTest {
             check("S6: an ask-back entry whose text landed shows that text", landed?.copyText == "landed text")
             let plain = row(entry(text: "", record: nil, raw: "raw"))
             check("S6: an entry with no ask-back record and empty text is unchanged", plain?.copyText == "")
+        }
+
+        // ---------------------------------------------------------------- VDASK-4: the voice answer (hold /)
+        let twoQuestionsJSON = "{\"spots\":[],\"questions\":["
+            + "{\"question\":\"Which day?\",\"quote\":\"ship on Friday\",\"why\":\"two days\",\"options\":[\"Friday\",\"Monday\"]},"
+            + "{\"question\":\"Who gets it?\",\"quote\":\"Blue Folder\",\"why\":\"unclear\",\"options\":[\"Ana\",\"Ben\"]}]}"
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            let id = rig.startTake()
+            check("voice: while the review runs / is not swallowed and never records",
+                  !rig.slash(down: true) && !rig.slash(down: false) && rig.voiceStarts == 0)
+            rig.answerReview()
+            let hudBefore = rig.hud.log.count
+            check("voice: with a card up a press of / is swallowed (its release too), and a Command or Control chord is not",
+                  rig.slash(down: true) && rig.slash(down: true) && rig.slash(down: false)
+                    && !rig.slash(down: true, modifiersClear: false) && !rig.slash(down: false))
+            check("voice: a press shorter than the 300 ms mark is a tap: swallowed, records nothing, answers nothing",
+                  { rig.holdSlash(0.1); return rig.voiceStarts == 0 && rig.voiceDone.isEmpty && rig.writes.isEmpty && rig.state == "asking"
+                    && rig.hotkey.askCardActive && rig.cardStatus == nil }())
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            check("voice: held past 300 ms it records and the card shows Listening, with the card and state unchanged",
+                  rig.voiceStarts == 1 && rig.cardStatus == "Listening\u{2026} release / to send" && rig.state == "asking"
+                    && rig.hotkey.askCardActive && rig.writes.isEmpty && rig.voiceDone.isEmpty)
+            rig.slash(down: false)
+            check("voice: release stops and transcribes once and the card shows Transcribing",
+                  rig.voiceDone.count == 1 && rig.cardStatus == "Transcribing\u{2026}" && rig.state == "asking" && rig.writes.isEmpty)
+            check("voice: the HUD's own take display is not touched while a voice answer runs", rig.hud.log.count == hudBefore)
+            rig.answerVoice("  Monday please \n")
+            check("voice: the transcript answers the card (method voice) and the controller moves on to the write, one write",
+                  rig.writes.count == 1 && rig.state == "writing" && !rig.hotkey.askCardActive
+                    && rig.writes.first?.request.systemPrompt.contains("1. Q: Which day?\n   A: Monday please") == true)
+            rig.answerVoice("a repeat")
+            check("voice: a repeated transcript starts no second write", rig.writes.count == 1)
+            rig.finishWrite()
+            check("voice: one paste for the take", rig.pastes == 1 && rig.state == "idle")
+            let entries = rig.entries(id)
+            check("voice: the History record has the transcript as the answer with method voice",
+                  entries.count == 1 && entries[0].status == "done"
+                    && entries[0].askBack?.questions.first?.answer == "Monday please" && entries[0].askBack?.questions.first?.how == "voice")
+            check("voice: with no card up (writing, then idle) / is not swallowed and never records again",
+                  !rig.slash(down: true) && !rig.slash(down: false) && rig.voiceStarts == 1)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.holdSlash(0.5)
+            rig.answerVoice("   ")
+            check("voice: an empty transcript leaves the card up with the Didn't catch that status and nothing else changed",
+                  rig.cardStatus == "Didn't catch that. Hold / to try again." && rig.state == "asking" && rig.hotkey.askCardActive
+                    && rig.writes.isEmpty && rig.card.shown.count == 1 && rig.card.hides == 0)
+            rig.holdSlash(0.5)
+            check("voice: the next hold clears the status and listens again", rig.voiceStarts == 2)
+            rig.answerVoice(nil)
+            check("voice: a failed transcription is the same", rig.cardStatus == "Didn't catch that. Hold / to try again."
+                    && rig.state == "asking" && rig.writes.isEmpty)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.6); traceSettle()
+            check("voice: Esc while recording is swallowed, stops the recording and the card stays up",
+                  rig.key(TKey.esc) && rig.voiceDiscards == 1 && rig.state == "asking" && rig.hotkey.askCardActive
+                    && rig.writes.isEmpty && rig.card.hides == 0 && rig.cardStatus == nil)
+            rig.slash(down: false)
+            check("voice: the release after that Esc asks for no transcript", rig.voiceDone.isEmpty)
+            rig.holdSlash(0.5)
+            check("voice: Esc while transcribing keeps the card up too", rig.key(TKey.esc) && rig.state == "asking" && rig.writes.isEmpty)
+            rig.answerVoice("Monday")
+            check("voice: a late transcript after Esc is ignored (the card stays, nothing is answered or written)",
+                  rig.state == "asking" && rig.writes.isEmpty && rig.hotkey.askCardActive && rig.cardStatus == nil)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.holdSlash(0.5)
+            check("voice: Option+Esc while transcribing is swallowed and the agent decides, as on a card",
+                  rig.key(TKey.esc, option: true) && rig.writes.count == 1 && rig.state == "writing"
+                    && rig.writes.first?.request.systemPrompt.contains(AskBackAnswersBlock.noAnswer) == true)
+            rig.answerVoice("Monday")
+            check("voice: the late transcript after Option+Esc is ignored: no second write, answers unchanged",
+                  rig.writes.count == 1 && rig.state == "writing"
+                    && rig.writes.first?.request.systemPrompt.contains("A: Monday") == false)
+            rig.finishWrite()
+            check("voice: and the take still pastes once", rig.pastes == 1)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview(twoQuestionsJSON)
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            check("voice: Option+Esc while recording stops the recording and decides the card",
+                  rig.key(TKey.esc, option: true) && rig.voiceDiscards == 1 && rig.state == "asking" && rig.card.shown.count == 2)
+            rig.slash(down: false)
+            check("voice: and the release after it sends nothing", rig.voiceDone.isEmpty && rig.writes.isEmpty)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.3); traceSettle()
+            rig.clock.advance(by: 59.9); traceSettle()
+            check("voice: just under 60 s of recording it is still recording", rig.voiceStarts == 1 && rig.voiceDone.isEmpty)
+            rig.clock.advance(by: 0.2); traceSettle()
+            check("voice: at 60 s it stops and transcribes as if released, once", rig.voiceDone.count == 1 && rig.cardStatus == "Transcribing\u{2026}")
+            rig.slash(down: false)
+            check("voice: the late release does nothing more", rig.voiceDone.count == 1 && rig.writes.isEmpty && rig.state == "asking")
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.clock.advance(by: 0.5); traceSettle()
+            rig.pressDown(); rig.clock.advance(by: 0.1); traceSettle(); rig.release()
+            rig.pressDown(); rig.clock.advance(by: 0.6); traceSettle()
+            check("voice: right-Option taps and a hold while / is down are ignored (no new take, card up, still recording)",
+                  rig.newTakeStates.isEmpty && rig.state == "asking" && rig.hotkey.askCardActive && rig.voiceDiscards == 0 && rig.writes.isEmpty)
+            rig.release()
+            rig.key(TKey.ret); rig.key(TKey.down); rig.key(TKey.up)
+            rig.card.onChoose?(rig.card.shown.last!.cardID, 1); traceSettle()
+            rig.clock.advance(by: 2); traceSettle()
+            check("voice: Return, arrows and a click are ignored while / is down, and nothing fires later",
+                  rig.writes.isEmpty && rig.state == "asking" && rig.voiceDone.isEmpty)
+            check("voice: those keys are still swallowed (the card owns them)", rig.key(TKey.ret) && rig.key(TKey.down))
+            rig.slash(down: false)
+            rig.answerVoice("Friday")
+            check("voice: the answer is the voice one, not a tap count", rig.writes.count == 1 && rig.newTakeStates.isEmpty
+                    && rig.writes.first?.request.systemPrompt.contains("A: Friday") == true)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview(twoQuestionsJSON)
+            rig.holdSlash(0.5)
+            check("voice: a click while transcribing answers the card; the transcript for it is then stale",
+                  { rig.card.onChoose?(rig.card.shown.last!.cardID, 1); traceSettle()
+                    return rig.card.shown.count == 2 && rig.state == "asking" && rig.writes.isEmpty }())
+            rig.holdSlash(0.5)
+            check("voice: card 2 starts its own transcription", rig.voiceDone.count == 2)
+            rig.answerVoice("old", n: 0)
+            check("voice: the stale transcript of the earlier card is ignored", rig.state == "asking" && rig.writes.isEmpty)
+            rig.answerVoice("Ana", n: 1)
+            check("voice: the current transcript answers card 2 and the write starts once",
+                  rig.writes.count == 1 && rig.writes.first?.request.systemPrompt.contains("A: Ana") == true
+                    && rig.writes.first?.request.systemPrompt.contains("A: Monday") == true
+                    && rig.writes.first?.request.systemPrompt.contains("A: old") == false)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.micOK = false
+            rig.holdSlash(0.5)
+            check("voice: a mic that cannot start leaves the card up with Mic unavailable and nothing else changed",
+                  rig.voiceStarts == 1 && rig.cardStatus == "Mic unavailable." && rig.state == "asking" && rig.hotkey.askCardActive
+                    && rig.voiceDone.isEmpty && rig.writes.isEmpty && rig.voiceDiscards == 0)
+            rig.micOK = true
+            rig.holdSlash(0.5); rig.answerVoice("Friday")
+            check("voice: a later hold with the mic back answers", rig.writes.count == 1)
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            rig.startTake()
+            rig.answerReview()
+            rig.slash(down: true)
+            rig.key(TKey.esc, option: true)
+            check("voice: the card closed under a held / : its autorepeat passes (no card up) but its release is swallowed once",
+                  !rig.hotkey.askCardActive && !rig.slash(down: true) && rig.slash(down: false) && !rig.slash(down: false))
+        }
+        do {
+            let rig = TraceRig(); defer { rig.close() }
+            check("voice: / with no take at all is not swallowed and never records",
+                  !rig.slash(down: true) && !rig.slash(down: false) && rig.voiceStarts == 0)
+            let appDir = URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Sources").appendingPathComponent("App")
+            let src = { (name: String) -> String in
+                (try? String(contentsOf: appDir.appendingPathComponent(name), encoding: .utf8)) ?? ""
+            }
+            let hot = src("HotkeyMonitor.swift")
+            let down = hot.range(of: "private func handleKeyDown(_ event: CGEvent)").map { String(hot[$0.lowerBound...].prefix(2600)) } ?? ""
+            check("wiring (tap callback, no window server): handleKeyDown offers / to takeAskVoiceKey before keyTakenBeforeWakeup, and the keyUp path does too",
+                  (down.range(of: "takeAskVoiceKey(keyCode: keyCode, down: true")?.lowerBound ?? down.endIndex)
+                    < (down.range(of: "keyTakenBeforeWakeup(")?.lowerBound ?? down.startIndex)
+                    && hot.contains("takeAskVoiceKey(keyCode: event.getIntegerValueField(.keyboardEventKeycode), down: false"))
+            check("wiring (production recorder and transcriber): the voice answer uses the take's own recorder and transcribeAudioSnapshot",
+                  src("DictationController.swift").contains("try audio.start(); return true")
+                    && src("DictationController.swift").contains("transcribeAudioSnapshot { text, _, _ in done(text) }"))
         }
 
         print(check.summaryLine(prefix: "[askback-controller-selftest]"))

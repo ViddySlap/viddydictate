@@ -12,6 +12,8 @@ protocol AskCardPresenting: AnyObject {
     func show(_ card: AskCardModel, anchor: CGPoint)
     func setHighlight(cardID: UUID, index: Int)
     func hide()
+    /// The one-line voice status under the options (nil clears it). A stale card id does nothing.
+    func setStatus(cardID: UUID, text: String?)
 }
 
 final class AskCardPanel: NSObject, AskCardPresenting {
@@ -59,6 +61,7 @@ final class AskCardPanel: NSObject, AskCardPresenting {
     private let container = CardContentView()
     private var rows: [(view: OptionRow, label: NSTextField)] = []
     private var model: AskCardModel?
+    private var statusLabel: NSTextField?
 
     private static let width: CGFloat = 460
 
@@ -104,6 +107,12 @@ final class AskCardPanel: NSObject, AskCardPresenting {
         for (i, row) in rows.enumerated() { style(row, number: i + 1, text: m.question.options[i], on: i == index) }
     }
 
+    func setStatus(cardID: UUID, text: String?) {
+        guard model?.cardID == cardID, let label = statusLabel else { return }
+        label.stringValue = text ?? ""
+        label.isHidden = (text ?? "").isEmpty
+    }
+
     func hide() {
         model = nil
         panel.orderOut(nil)
@@ -114,6 +123,7 @@ final class AskCardPanel: NSObject, AskCardPresenting {
     private func build(_ card: AskCardModel) {
         container.subviews.forEach { $0.removeFromSuperview() }
         rows = []
+        statusLabel = nil
         let pad: CGFloat = 18
         let inner = Self.width - pad * 2
         let green = Phosphor.green
@@ -145,9 +155,9 @@ final class AskCardPanel: NSObject, AskCardPresenting {
 
         let gripH: CGFloat = 16, rowH: CGFloat = 28, gap: CGFloat = 8
         let hQ = height(question), hS = height(said), hW = card.question.why.isEmpty ? 0 : height(why)
-        let hF: CGFloat = 16
+        let hF: CGFloat = 16, hStatus: CGFloat = 16      // the status row is always reserved: the card never resizes
         let optionsH = rowH * CGFloat(card.question.options.count)
-        var total = 8 + gripH + gap + hQ + 4 + hS + (hW > 0 ? 4 + hW : 0) + gap + optionsH + gap + hF + 12
+        var total = 8 + gripH + gap + hQ + 4 + hS + (hW > 0 ? 4 + hW : 0) + gap + optionsH + gap + hStatus + 4 + hF + 12
         total = ceil(total)
         container.frame = NSRect(x: 0, y: 0, width: Self.width, height: total)
 
@@ -184,7 +194,14 @@ final class AskCardPanel: NSObject, AskCardPresenting {
             rows.append((row, label))
             style(rows[i], number: i + 1, text: option, on: i == card.highlighted)
         }
-        y -= gap + hF
+        y -= gap + hStatus
+        let status = text("", size: 12, bold: false, alpha: 0.9)
+        status.maximumNumberOfLines = 1
+        status.isHidden = true
+        status.frame = NSRect(x: pad, y: y, width: inner, height: hStatus)
+        container.addSubview(status)
+        statusLabel = status
+        y -= 4 + hF
         footer.frame = NSRect(x: pad, y: y, width: inner, height: hF)
         container.addSubview(footer)
     }

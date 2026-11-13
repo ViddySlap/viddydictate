@@ -213,6 +213,12 @@ final class DictationController {
         /// clipboard park runs), or pastes and calls the completion when the paste check and clipboard restore
         /// would have finished. A headless row cannot reach a focused field.
         var livePaste: ((_ text: String, _ onComplete: @escaping () -> Void) -> Bool)?
+        /// VDASK-4 voice answer: stand in for the take's audio recorder and transcriber. `voiceStart` returns
+        /// false for a busy or unpermitted mic; `voiceDiscard` stops capture; `voiceTranscribe` stops capture and
+        /// hands the transcript (nil: failed) to the closure it is given, whenever the fake chooses.
+        var voiceStart: (() -> Bool)?
+        var voiceDiscard: (() -> Void)?
+        var voiceTranscribe: ((_ done: @escaping (String?) -> Void) -> Void)?
     }
     var askSeams = AskBackSeams()
 
@@ -341,6 +347,9 @@ final class DictationController {
         hotkey.onAskBackKey = { [weak self] action in self?.askFlow?.key(action) }
         hotkey.onAskCardOptionDown = { [weak self] in self?.askFlow?.optionDown() }
         hotkey.onAskCardOptionUp = { [weak self] in self?.askFlow?.optionUp() }
+        hotkey.onAskVoiceKey = { [weak self] down in
+            if down { self?.askFlow?.voiceDown() } else { self?.askFlow?.voiceUp() }
+        }
     }
 
     /// Re-read the persisted hotkey map + custom-mode chords into the live tap (called after a rebind /
@@ -1542,7 +1551,13 @@ final class DictationController {
                     }
                 })
             },
-            startNewTake: { [weak self] in self?.askStartNewTake() })
+            startNewTake: { [weak self] in self?.askStartNewTake() },
+            voiceStart: { [weak self] in self?.askVoiceStart() ?? false },
+            voiceDiscard: { [weak self] in self?.askVoiceDiscard() },
+            voiceStop: { [weak self] id in
+                self?.askVoiceStop { text in DispatchQueue.main.async { flowRef?.voiceTranscript(id, text: text) } }
+            },
+            voiceStatus: { [weak self] card, status in self?.askCardPanel?.setStatus(cardID: card, text: status?.text) })
         let flow = AskBackFlow(context: context, schedule: askSeams.schedule ?? Self.mainSchedule,
                                now: askSeams.now ?? { ProcessInfo.processInfo.systemUptime }, hooks: hooks)
         flowRef = flow
@@ -1699,6 +1714,32 @@ final class DictationController {
         endAskFlowUI()
         state = .idle
         startRecording()
+    }
+
+    // VDASK-4 voice answer. The take's own recorder and its own transcriber (`transcribeAudioSnapshot`, which posts
+    // to the same daemon and Whisper model a take uses): no second capture stack. The take's audio is stopped
+    // while a card is up, so the recorder is free; the HUD and the take's state are not touched.
+
+    /// False when the mic cannot start (busy or permission missing).
+    private func askVoiceStart() -> Bool {
+        if let start = askSeams.voiceStart { return start() }
+        do { try audio.start(); return true } catch {
+            Log.write("ask-back voice: mic start ERROR: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func askVoiceDiscard() {
+        if let discard = askSeams.voiceDiscard { discard(); return }
+        audio.stop()
+    }
+
+    /// Stops capture and transcribes; `done` gets the text, or nil when nothing was heard or the daemon failed.
+    private func askVoiceStop(_ done: @escaping (String?) -> Void) {
+        if let transcribe = askSeams.voiceTranscribe { transcribe(done); return }
+        audio.stop()
+        guard audio.detectedSpeech else { done(nil); return }      // silence never goes to Whisper
+        transcribeAudioSnapshot { text, _, _ in done(text) }
     }
 
     /// Starts a take's recording. The headless trace test replaces the audio-and-AX start with

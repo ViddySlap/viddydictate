@@ -34,6 +34,9 @@ private final class FlowHarness {
     var writes: [AskBackWriteSpec] = [], history: [AskBackHistoryEvent] = []
     var detached: [AskBackDetachedJob] = []
     var newTakes = 0, pastes = 0
+    // VDASK-4
+    var voiceStarts = 0, voiceDiscards = 0, voiceStops: [UUID] = [], micOK = true
+    var statuses: [AskVoiceStatus?] = []
     let historyID = UUID()
 
     init(provider: AskBackProvider = .claude) {
@@ -50,7 +53,11 @@ private final class FlowHarness {
             startWrite: { [unowned self] in writes.append($0) },
             history: { [unowned self] in history.append($0) },
             saveDetached: { [unowned self] in detached.append($0) },
-            startNewTake: { [unowned self] in newTakes += 1 })
+            startNewTake: { [unowned self] in newTakes += 1 },
+            voiceStart: { [unowned self] in voiceStarts += 1; return micOK },
+            voiceDiscard: { [unowned self] in voiceDiscards += 1 },
+            voiceStop: { [unowned self] in voiceStops.append($0) },
+            voiceStatus: { [unowned self] in statuses.append($1) })
         flow = AskBackFlow(context: context, schedule: clock.schedule, now: { [unowned self] in clock.now }, hooks: hooks)
     }
 
@@ -68,6 +75,8 @@ private final class FlowHarness {
         flow.writeFinished(w.writeID, ok: ok) { pastes += 1 }
     }
     func tap() { clock.advance(to: clock.now + 0.05); flow.optionDown(); clock.advance(to: clock.now + 0.1); flow.optionUp() }
+    /// Press `/`, hold it for `seconds`, release.
+    func holdSlash(_ seconds: Double) { flow.voiceDown(); clock.advance(to: clock.now + seconds); flow.voiceUp() }
     func taps(_ n: Int) { for _ in 0..<n { tap() }; clock.advance(to: clock.now + 0.4) }
 }
 
@@ -224,7 +233,7 @@ enum AskBackFlowSelfTest {
 
         // card text and placement
         check("card: footer, progress, you-said and option lines",
-              AskCardText.footer == "Tap right \u{2325} 1-4\u{00D7} \u{B7} \u{2191}\u{2193} \u{23CE} \u{B7} esc: you decide"
+              AskCardText.footer == "Tap right \u{2325} 1-4\u{00D7} \u{B7} \u{2191}\u{2193} \u{23CE} \u{B7} hold / to speak \u{B7} esc: you decide"
                 && AskCardText.progress(index: 0, total: 3) == "1 of 3" && AskCardText.progress(index: 0, total: 1) == nil
                 && AskCardText.youSaid("x") == "You said: \"x\""
                 && AskCardText.optionLine(number: 2, text: "Monday", highlighted: true) == "\u{25B8} 2  Monday")
@@ -380,6 +389,58 @@ enum AskBackFlowSelfTest {
             check("held queue: an open delivery holds it", q.poke().isEmpty)
             q.setInputs(takeLive: false, busy: false, delivering: false)
             check("held queue: with nothing in the way a poke releases it", q.poke().count == 1 && q.isEmpty)
+        }
+
+        // VDASK-4 voice answer: the pure rules (the oracle has the full set, with mutants)
+        do {
+            let h = H(); h.flow.start(); h.review([H.question(1), H.question(2)])
+            h.flow.voiceDown(); h.clock.advance(to: 0.299)
+            check("voice: nothing records before 300 ms", h.voiceStarts == 0)
+            h.clock.advance(to: 0.5)
+            check("voice: held past 300 ms it records with the Listening status",
+                  h.voiceStarts == 1 && h.statuses.last == .listening && h.flow.phase == .asking)
+            h.flow.voiceUp()
+            check("voice: release stops and transcribes once", h.voiceStops.count == 1 && h.statuses.last == .transcribing)
+            h.flow.voiceTranscript(h.voiceStops[0], text: " Monday \n")
+            check("voice: the trimmed transcript is the answer, method voice, and card 2 opens",
+                  h.flow.answers[0] == AskBackAnswer(text: "Monday", how: .voice) && h.cards.count == 2 && h.writes.isEmpty)
+            h.holdSlash(0.1)
+            check("voice: a 100 ms tap records nothing and sends nothing", h.voiceStarts == 1 && h.voiceStops.count == 1 && h.flow.voicePhase == .idle)
+            h.holdSlash(0.5)
+            h.flow.voiceTranscript(h.voiceStops[0], text: "stale")
+            check("voice: a stale transcript is ignored", h.writes.isEmpty && h.flow.answers[1] == nil)
+            h.flow.voiceTranscript(h.voiceStops[1], text: "   ")
+            check("voice: an empty transcript keeps the card with Didn't catch that", h.flow.phase == .asking && h.statuses.last == .didntCatch && h.writes.isEmpty)
+            h.holdSlash(0.5)
+            h.flow.key(.esc)
+            h.flow.voiceTranscript(h.voiceStops[2], text: "late")
+            check("voice: Esc while transcribing drops the answer, the late transcript is ignored, the card stays",
+                  h.flow.phase == .asking && h.writes.isEmpty && h.flow.answers[1] == nil)
+            h.holdSlash(0.5)
+            h.flow.key(.optionEsc)
+            h.flow.voiceTranscript(h.voiceStops[3], text: "late")
+            check("voice: Option+Esc while transcribing is agent-decides and the late transcript is ignored",
+                  h.writes.count == 1 && h.flow.answers[1] == AskBackAnswer(text: nil, how: .agentDecided))
+        }
+        do {
+            let h = H(); h.flow.start(); h.review([H.question(1)])
+            h.flow.voiceDown(); h.clock.advance(to: 0.3); h.clock.advance(to: 60.29)
+            check("voice: just under the 60 s cap it is still recording", h.voiceStops.isEmpty)
+            h.clock.advance(to: 60.31)
+            check("voice: at 60 s it stops as if released", h.voiceStops.count == 1 && h.statuses.last == .transcribing)
+        }
+        do {
+            let h = H(); h.flow.start(); h.review([H.question(1)])
+            h.flow.voiceDown(); h.clock.advance(to: 0.5)
+            h.flow.optionDown(); h.clock.advance(to: 1.2); h.flow.optionUp()
+            h.flow.key(.commit); h.flow.click(cardID: h.cards[0].cardID, option: 1)
+            check("voice: right-Option hold, Return and a click are ignored while / is down",
+                  h.newTakes == 0 && h.writes.isEmpty && h.flow.phase == .asking && h.flow.voicePhase == .recording)
+            let g = H(); g.micOK = false; g.flow.start(); g.review([H.question(1)])
+            g.holdSlash(0.5)
+            check("voice: a mic that cannot start leaves the card with Mic unavailable", g.statuses.last == .micUnavailable && g.flow.phase == .asking && g.voiceStops.isEmpty)
+            let n = H()
+            check("voice: / with no card up is not the flow's", !n.flow.voiceDown() && { n.flow.start(); return !n.flow.voiceDown() }() && n.voiceStarts == 0)
         }
 
         print(check.summaryLine(prefix: "[askback-flow-selftest]"))

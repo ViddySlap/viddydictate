@@ -111,6 +111,12 @@ final class HotkeyMonitor {
     var onAskBackKey: ((AskBackKeyAction) -> Void)?
     var onAskCardOptionDown: (() -> Void)?
     var onAskCardOptionUp: (() -> Void)?
+    /// VDASK-4 voice answer. The `/` key (keycode 44, Shift allowed) is taken only while `askCardActive`: its
+    /// press and release go to `onAskVoiceKey(down)` and the key never types. A release is taken only when its
+    /// press was, so no `/` is ever half-delivered. With no card up the key is never touched.
+    var onAskVoiceKey: ((Bool) -> Void)?
+    static let slashKeyCode: Int64 = 44
+    private var askVoiceKeyTaken = false
 
     private(set) var wakeupHeld = false
     /// Set true once a regular-key wakeup's keyDown latched, so autorepeat keyDowns are swallowed
@@ -207,6 +213,8 @@ final class HotkeyMonitor {
                 return Unmanaged.passUnretained(event)
             }
             // Only meaningful for a regular-key wakeup release.
+            if takeAskVoiceKey(keyCode: event.getIntegerValueField(.keyboardEventKeycode), down: false,
+                               modifiersClear: true) { return nil }
             let w = map.wakeup
             if !w.isModifier, event.getIntegerValueField(.keyboardEventKeycode) == w.code, wakeupHeld {
                 wakeupHeld = false
@@ -273,6 +281,10 @@ final class HotkeyMonitor {
         }
         if keyCode == returnKeyCode || keyCode == 76 { HotkeyMonitor.realReturnCount += 1 }
 
+        let f = event.flags
+        if takeAskVoiceKey(keyCode: keyCode, down: true,
+                           modifiersClear: !f.contains(.maskCommand) && !f.contains(.maskControl)
+                               && !f.contains(.maskAlternate)) { return nil }
         if keyTakenBeforeWakeup(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate)) { return nil }
 
         let w = map.wakeup
@@ -330,6 +342,24 @@ final class HotkeyMonitor {
         guard let action = AskBackKeyRouter.route(keyCode: keyCode, optionHeld: optionHeld,
                                                   cardUp: askCardActive, reviewing: askReviewActive) else { return false }
         DispatchQueue.main.async { self.onAskBackKey?(action) }
+        return true
+    }
+
+    /// The `/` step of the tap: true means the key is swallowed. A press is taken only while a card is up and with
+    /// no Command, Control or Option held; autorepeat of a taken press is swallowed with it; a release is taken
+    /// exactly when its press was. Internal for the trace test.
+    func takeAskVoiceKey(keyCode: Int64, down: Bool, modifiersClear: Bool) -> Bool {
+        guard keyCode == Self.slashKeyCode else { return false }
+        if down {
+            guard askCardActive, modifiersClear else { return false }
+            if askVoiceKeyTaken { return true }          // autorepeat
+            askVoiceKeyTaken = true
+            DispatchQueue.main.async { self.onAskVoiceKey?(true) }
+            return true
+        }
+        guard askVoiceKeyTaken else { return false }
+        askVoiceKeyTaken = false
+        DispatchQueue.main.async { self.onAskVoiceKey?(false) }
         return true
     }
 
