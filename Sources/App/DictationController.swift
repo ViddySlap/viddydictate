@@ -184,8 +184,29 @@ final class DictationController {
     /// the card panel (built on first use) and the point the card anchors to, frozen when the take ends.
     private var askFlow: AskBackFlow?
     private var askRunner: AskBackReviewRunner?
-    private var askCardPanel: AskCardPanel?
+    private var askCardPanel: AskCardPresenting?
     private var askAnchor = CGPoint.zero
+    /// S2: the old take's flow while a hold that started on its card is still down (its release detaches it, an
+    /// Esc under the same press resumes it), and the old take's own target fields, restored on a resume because
+    /// the new take's start overwrote them.
+    private var askParkedFlow: AskBackFlow?
+    private var askParkedTake: (target: DictationTarget?, wasNotes: Bool, landAtStart: Bool, noteTarget: NotesDictationTarget?)?
+
+    /// Test seams for the headless controller trace test (AskBackControllerSelfTest). Production leaves every
+    /// field nil and the code takes its normal path. `resolve` replaces the route resolution, `reviewProvider`
+    /// the review call, `claudeWrite` the Claude write adapter (first write, retry and the detached job),
+    /// `schedule` / `now` the flow's timers and clock, `beginNewTake` the audio-and-AX start of a new take.
+    struct AskBackSeams {
+        var resolve: ((LLMRouteID) -> LLMRouteResolution)?
+        var reviewProvider: AskBackReviewRunner.Provider?
+        var claudeWrite: TextTransformClient.AsyncAdapter?
+        var schedule: AskBackFlow.Schedule?
+        var now: (() -> TimeInterval)?
+        var beginNewTake: (() -> Void)?
+        var cardPanel: AskCardPresenting?
+        var abPickerShow: ((_ raw: String, _ cleaned: String) -> Void)?
+    }
+    var askSeams = AskBackSeams()
     private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
@@ -575,6 +596,8 @@ final class DictationController {
     }
 
     private func rightOptionUp() {
+        // S2: the press that started a hold on a card ends with no Esc: the old take becomes the detached job.
+        if let parked = askParkedFlow { askParkedFlow = nil; askParkedTake = nil; parked.parkedRelease() }
         // End the take ONLY from interface-unlocked recording. Arming changes what runs at the real end,
         // never what a wakeup release means while hands-free.
         if LockTransition.releaseEndsTake(
@@ -715,6 +738,7 @@ final class DictationController {
     private func cancelTake() {
         guard state == .recording || state == .locked || state == .finishing || state == .oneShotFinishing
             || state == .reviewing || state == .writing else { return }
+        if let parked = askParkedFlow { resumeParkedOldTake(parked); return }
         Log.write("take canceled (Esc) state=\(state)")
         // VDASK-3: a review or write in flight is cancelled with the take; its late answer pastes nothing.
         askFlow?.cancel()
@@ -813,7 +837,7 @@ final class DictationController {
         pendingPick = (raw: raw, cleaned: cleaned, level: level, takeID: takeID,
                        lateRecovery: lateRecovery)
         hud.hide()
-        abPicker.show(raw: raw, cleaned: cleaned)
+        if let show = askSeams.abPickerShow { show(raw, cleaned) } else { abPicker.show(raw: raw, cleaned: cleaned) }
         hotkey.abPickerActive = true
         note("pick raw or cleaned")
     }
@@ -845,8 +869,10 @@ final class DictationController {
     /// whole cycle, including its level-pick window) plus the Family-1 A/B picker, which stays bespoke on
     /// the coordinator (the transient picker counts as busy — a dictation is then mid-review). Adding a
     /// one-shot mode means adding its in-flight state to the registry's latch, not editing this predicate.
-    private var oneShotBusy: Bool {
+    /// VDASK-3: a card, a review in flight (`.reviewing`) and a question being asked (`.asking`) all count.
+    var oneShotBusy: Bool {
         oneShot.isBusy || pendingPick != nil || hotkey.abPickerActive || hotkey.askCardActive
+            || state == .reviewing || state == .asking
     }
 
     /// Reject a one-shot entry when another flow owns the stage (log + return true). The caller then
@@ -1021,6 +1047,9 @@ final class DictationController {
     }
 
     private func beginRecording() {
+        // VDASK-3: a take that never starts the paste marker (a sticky-note target) must not anchor its ask card
+        // to an earlier take's target.
+        pasteMarker.lastPlacement = nil
         // A fresh take owns a new destination gesture; an older failed transform must never land later.
         TextTransformRetryCenter.shared.invalidate()
         // refine2 BUG 2: a fresh take is a fresh gesture — bump the monotonic generation the coordinator stamps
@@ -1265,7 +1294,7 @@ final class DictationController {
         let route = LLMRouteID.cleanupRoute(for: effectiveLevel)
         // Availability-resolved at release: the pin runs when it can, else the highest-preference available
         // provider does, else the route reports itself off and the raw transcript still lands below.
-        let resolution = Settings.modelsPower.resolveRoute(
+        let resolution = askSeams.resolve?(route) ?? Settings.modelsPower.resolveRoute(
             route, fallback: .local(Settings.cleanupModel))
         // RTY1: cleanup is the one path that steps down after a RAM-capacity refusal. Resolution already
         // avoids a model this machine cannot hold, but that judgement is made from wired bytes read a
@@ -1393,10 +1422,13 @@ final class DictationController {
         let requestForBundle: TextTransformClient.RetryRequestBuilder = { bundle in
             makeRequest(bundle, askQuestions, askAnswers, timeoutDetail)
         }
+        let claudeAdapter: TextTransformClient.AsyncAdapter = askSeams.claudeWrite
+            ?? TextTransformClient.liveClaudeAdapter
         let runWrite: () -> Void = {
             TextTransformClient.transformResolved(
                 resolution, route: route, requestForBundle: requestForBundle,
-                local: CleanupClient.localAdapter(surface: .cleanup), capacityStepDown: capacityStepDown,
+                local: CleanupClient.localAdapter(surface: .cleanup), claude: claudeAdapter,
+                capacityStepDown: capacityStepDown,
                 retryCompletion: onRetryResult, completion: onResult)
         }
 
@@ -1415,8 +1447,15 @@ final class DictationController {
             phaseChanged: { [weak self] phase in self?.askPhaseChanged(phase) },
             readingCue: { [weak self] on in self?.askReadingCue(on) },
             startReview: { [weak self] id in
-                let runner = AskBackReviewRunner.live(resolution: resolution) { reviewID, outcome in
+                let deliverReview: AskBackReviewRunner.Deliver = { reviewID, outcome in
                     DispatchQueue.main.async { flowRef?.reviewOutcome(reviewID, outcome) }
+                }
+                let runner: AskBackReviewRunner
+                if let provider = self?.askSeams.reviewProvider {
+                    runner = AskBackReviewRunner(schedule: self?.askSeams.schedule ?? Self.mainSchedule,
+                                                 provider: provider, deliver: deliverReview)
+                } else {
+                    runner = AskBackReviewRunner.live(resolution: resolution, deliver: deliverReview)
                 }
                 self?.askRunner = runner
                 runner.start(id: id, text: raw, level: AskBackLevel(effectiveLevel), tier: tier, source: .dictation)
@@ -1441,14 +1480,14 @@ final class DictationController {
                     guard let bundle = resolution.bundle else { done(nil); return }
                     let request = makeRequest(bundle, job.questions, job.answers, LocalStreamTimeoutDetail())
                     TextTransformClient.transform(request, local: CleanupClient.localAdapter(surface: .cleanup),
-                                                  arming: .inert) { result in
+                                                  claude: claudeAdapter, arming: .inert) { result in
                         DispatchQueue.main.async { if case .ok(let text) = result { done(text) } else { done(nil) } }
                     }
                 }, history: { event in TranscriptionHistory.shared.apply(event) })
             },
             startNewTake: { [weak self] in self?.askStartNewTake() })
-        let flow = AskBackFlow(context: context, schedule: Self.mainSchedule,
-                               now: { ProcessInfo.processInfo.systemUptime }, hooks: hooks)
+        let flow = AskBackFlow(context: context, schedule: askSeams.schedule ?? Self.mainSchedule,
+                               now: askSeams.now ?? { ProcessInfo.processInfo.systemUptime }, hooks: hooks)
         flowRef = flow
         askFlow = flow
         flow.start()
@@ -1469,7 +1508,7 @@ final class DictationController {
         case .reviewing: state = .reviewing
         case .asking: state = .asking
         case .writing: state = .writing
-        case .notStarted, .finished, .cancelled, .detached: break
+        case .notStarted, .finished, .cancelled, .detached, .parked: break
         }
         if phase != .asking { askCardPanel?.hide() }
     }
@@ -1485,7 +1524,7 @@ final class DictationController {
     }
 
     private func askShowCard(_ card: AskCardModel) {
-        let panel = askCardPanel ?? AskCardPanel()
+        let panel: AskCardPresenting = askSeams.cardPanel ?? askCardPanel ?? AskCardPanel()
         askCardPanel = panel
         panel.onChoose = { [weak self] id, index in self?.askFlow?.click(cardID: id, option: index) }
         hud.setThinking(false)
@@ -1495,13 +1534,49 @@ final class DictationController {
         note("answer the question")
     }
 
-    /// A hold while a card is up: the flow has already closed the card and handed the old take to its detached
-    /// save-only job. The new take starts as if right Option had just gone down on an idle controller.
+    /// A hold while a card is up: the flow has closed the card and PARKED the old take (S2). The new take starts
+    /// as if right Option had just gone down on an idle controller, and the old flow is kept (with the old take's
+    /// own target fields) until that press ends: its release detaches the old take, an Esc under the same press
+    /// discards the new take and resumes the old one.
     private func askStartNewTake() {
+        askParkedFlow = askFlow
+        askParkedTake = (target, targetWasNotesWindow, takeLandAtStart, notesDelivery.noteTarget)
         askFlow = nil
         endAskFlowUI()
         state = .idle
-        beginRecording()
+        if let begin = askSeams.beginNewTake {
+            begin()
+            setActive(true)
+            state = .recording
+        } else {
+            beginRecording()
+        }
+    }
+
+    /// Esc (with Option) while the press that started a hold-on-a-card is still down: throw the new take away
+    /// silently (no toast, no History entry, no generation bump, so the old take's late write still lands) and
+    /// resume the old take as agent-decides.
+    private func resumeParkedOldTake(_ parked: AskBackFlow) {
+        Log.write("take canceled (Esc under the card hold) state=\(state): the old take goes on")
+        askParkedFlow = nil
+        let saved = askParkedTake
+        askParkedTake = nil
+        if let arm = TransformArmState.shared.cancelPerTakeArm() {
+            Log.write("\(arm.id) per-take arm cleared by cancel")
+            hud.setArmedMode(glyph: nil)
+        }
+        teardownTake(.full)
+        setActive(true)            // the old take is in flight again: Option+Esc must still be able to cancel it
+        hud.setThinking(false)
+        hud.hide()
+        if let saved = saved {
+            target = saved.target
+            targetWasNotesWindow = saved.wasNotes
+            takeLandAtStart = saved.landAtStart
+            notesDelivery.noteTarget = saved.noteTarget
+        }
+        askFlow = parked
+        parked.parkedEsc()
     }
 
     private func endAskFlowUI() {
@@ -1951,4 +2026,26 @@ extension DictationController: OneShotContext {
     /// Foreign-app twin of the note snapshot above. Retained by the retry landing closure so confirming
     /// from Settings restores the original app/field instead of writing into the Settings window.
     func authoritativeForeignTargetForGesture() -> DictationTarget? { target }
+}
+
+// MARK: - trace-test access (VDASK-3)
+//
+// Read-only views and one entry point for AskBackControllerSelfTest, which drives the real controller headless
+// (null HUD, fake review and write providers, fake clock). Nothing here is used by the app.
+extension DictationController {
+    var traceStateName: String { "\(state)" }
+    var traceHotkey: HotkeyMonitor { hotkey }
+    var traceAskFlow: AskBackFlow? { askFlow }
+    var traceParkedFlow: AskBackFlow? { askParkedFlow }
+    var traceAskAnchor: CGPoint { askAnchor }
+    var traceGeneration: Int { takeGeneration }
+
+    /// Put the controller where `finish()` leaves it just before the transcript arrives: a take that ended with
+    /// its cleanup setting and level frozen at release.
+    func traceEnterFinishing(cleanup: Bool, level: CleanupLevel) {
+        cleanupAtRelease = cleanup
+        levelAtRelease = level
+        setActive(true)
+        state = .finishing
+    }
 }

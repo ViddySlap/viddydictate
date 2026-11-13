@@ -14,6 +14,13 @@ enum RecentDictationsModel {
         let canTranscribe: Bool
     }
 
+    /// An ask-back take that has not landed yet (asking, canceled, unanswered at quit) keeps empty delivered
+    /// text; its transcript is in `raw`. Show and copy that instead of a blank row.
+    static func displayText(_ entry: TranscriptionHistory.Entry) -> String {
+        if entry.text.isEmpty, entry.askBack != nil, let raw = entry.raw, !raw.isEmpty { return raw }
+        return entry.text
+    }
+
     static func rows(
         transcripts: [TranscriptionHistory.Entry],
         retainedTakes: [(id: UUID, date: Date)],
@@ -23,11 +30,12 @@ enum RecentDictationsModel {
 
         for entry in transcripts {
             let audio = hasAudio(entry.id)
+            let shown = displayText(entry)
             byID[entry.id] = Row(
                 id: entry.id,
                 date: entry.date,
-                preview: HistoryPreview.preview(entry.text),
-                copyText: entry.text,
+                preview: HistoryPreview.preview(shown),
+                copyText: shown,
                 hasTranscript: true,
                 playEnabled: audio,
                 canTranscribe: false)

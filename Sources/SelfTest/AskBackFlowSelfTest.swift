@@ -130,8 +130,8 @@ enum AskBackFlowSelfTest {
             h.clock.advance(to: 0.40)
             let quiet = h.writes.isEmpty && h.newTakes == 0
             h.clock.advance(to: 0.65)
-            check("gesture: release at 0, press at 350: nothing at 400 ms, hold at 650 ms",
-                  quiet && h.newTakes == 1 && h.detached.count == 1)
+            check("gesture: release at 0, press at 350: nothing at 400 ms, hold at 650 ms (the old take waits, parked)",
+                  quiet && h.newTakes == 1 && h.detached.isEmpty && h.flow.phase == .parked)
         }
         do {
             let h = H(); h.flow.start(); h.review([H.question(1), H.question(2)])
@@ -147,10 +147,32 @@ enum AskBackFlowSelfTest {
             check("click: a stale card id does nothing", k.flow.answers[1] == nil && k.writes.isEmpty)
         }
 
+        // S2: right Option + Esc on a card
+        do {
+            let early = H(); early.flow.start(); early.review([H.question(1)])
+            early.flow.optionDown(); early.clock.advance(to: 0.2); early.flow.key(.optionEsc); early.clock.advance(to: 1.0)
+            check("S2 chord: Esc at 200 ms is agent-decides and no new take starts",
+                  early.newTakes == 0 && early.detached.isEmpty && early.writes.count == 1
+                    && early.writes[0].answers == [AskBackAnswer(text: nil, how: .agentDecided)])
+            let late = H(); late.flow.start(); late.review([H.question(1)])
+            late.flow.optionDown(); late.clock.advance(to: 0.6)
+            let waiting = late.newTakes == 1 && late.detached.isEmpty && late.writes.isEmpty && late.flow.phase == .parked
+            let resumed = late.flow.parkedEsc()
+            late.finishWrite()
+            check("S2 chord: Esc at 600 ms resumes the old take as agent-decides with its normal write and one paste",
+                  waiting && resumed && late.detached.isEmpty && late.writes.count == 1 && late.pastes == 1
+                    && late.writes[0].answers == [AskBackAnswer(text: nil, how: .agentDecided)])
+            let rel = H(); rel.flow.start(); rel.review([H.question(1)])
+            rel.flow.optionDown(); rel.clock.advance(to: 0.6); rel.flow.parkedRelease()
+            check("S2 chord: hold then release with no Esc detaches the old take and keeps the new take",
+                  rel.detached.count == 1 && rel.newTakes == 1 && rel.flow.phase == .detached && !rel.flow.parkedEsc())
+        }
+
         // hold: detached save-only job
         do {
             let h = H(); h.flow.start(); h.review([H.question(1), H.question(2)])
             h.flow.optionDown(); h.clock.advance(to: h.clock.now + 0.3)
+            h.flow.parkedRelease()                                       // the press ends with no Esc
             let job = h.detached.first
             check("detached: a hold hands the old take to one save-only job and starts one new take",
                   h.detached.count == 1 && h.newTakes == 1 && h.writes.isEmpty && h.pastes == 0 && h.flow.phase == .detached

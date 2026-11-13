@@ -160,7 +160,9 @@ enum HistoryMode: String {
 }
 
 final class TranscriptionHistory {
-    static let shared = TranscriptionHistory()
+    /// `var` only so the headless controller trace test can point the app at a scratch store (and put the real one
+    /// back); nothing else assigns it.
+    static var shared = TranscriptionHistory()
     static let didChange = Notification.Name("VDHistoryDidChange")
 
     struct Entry: Codable {

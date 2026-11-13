@@ -273,24 +273,7 @@ final class HotkeyMonitor {
         }
         if keyCode == returnKeyCode || keyCode == 76 { HotkeyMonitor.realReturnCount += 1 }
 
-        // Transient pickers take priority over take-cancel and normal hotkeys. Matching navigation
-        // keys are swallowed so they never reach the focused field.
-        if dispatchModalPickerKey(keyCode) { return nil }
-
-        // VDASK-3: the ask-back card (and, for plain Esc, the review wait). Nothing is taken when neither is up.
-        if let action = AskBackKeyRouter.route(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate),
-                                               cardUp: askCardActive, reviewing: askReviewActive) {
-            DispatchQueue.main.async { self.onAskBackKey?(action) }
-            return nil
-        }
-
-        // BT5: Option+Esc aborts an in-progress take. Only while a take is active (recording / locked / final
-        // processing) AND Option is held; otherwise Esc is a normal key and passes through. Placed AFTER the
-        // picker blocks so an Esc during the A/B / level pick cancels the pick (handled above), not the whole take.
-        if NotesUndoLogic.escapeAborts(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate), isTakeActive: takeActive) {
-            DispatchQueue.main.async { self.onCancelTake?() }
-            return nil   // swallow so Esc never reaches the focused app while a take is being canceled
-        }
+        if keyTakenBeforeWakeup(keyCode: keyCode, optionHeld: event.flags.contains(.maskAlternate)) { return nil }
 
         let w = map.wakeup
         // Regular-key wakeup: latch on its keyDown (swallow autorepeat), fire once.
@@ -321,9 +304,39 @@ final class HotkeyMonitor {
         return Unmanaged.passUnretained(event)
     }
 
+    /// The first three key steps of the tap, in priority order; true means the key is swallowed. Internal so the
+    /// headless controller trace test can drive the routing without a CGEvent tap.
+    func keyTakenBeforeWakeup(keyCode: Int64, optionHeld: Bool) -> Bool {
+        // Transient pickers take priority over take-cancel and normal hotkeys. Matching navigation
+        // keys are swallowed so they never reach the focused field.
+        if dispatchModalPickerKey(keyCode) { return true }
+
+        // VDASK-3: the ask-back card (and, for plain Esc, the review wait). Nothing is taken when neither is up.
+        if takeAskBackKey(keyCode: keyCode, optionHeld: optionHeld) { return true }
+
+        // BT5: Option+Esc aborts an in-progress take. Only while a take is active (recording / locked / final
+        // processing) AND Option is held; otherwise Esc is a normal key and passes through. Placed AFTER the
+        // picker blocks so an Esc during the A/B / level pick cancels the pick (handled above), not the whole take.
+        if NotesUndoLogic.escapeAborts(keyCode: keyCode, optionHeld: optionHeld, isTakeActive: takeActive) {
+            DispatchQueue.main.async { self.onCancelTake?() }
+            return true   // swallow so Esc never reaches the focused app while a take is being canceled
+        }
+        return false
+    }
+
+    /// The ask-back key step of the tap: true means the key is swallowed (and the action is sent to the flow on
+    /// main); false means it passes on to the normal handling untouched. Internal for the trace test.
+    func takeAskBackKey(keyCode: Int64, optionHeld: Bool) -> Bool {
+        guard let action = AskBackKeyRouter.route(keyCode: keyCode, optionHeld: optionHeld,
+                                                  cardUp: askCardActive, reviewing: askReviewActive) else { return false }
+        DispatchQueue.main.async { self.onAskBackKey?(action) }
+        return true
+    }
+
     /// The wakeup key went down or up. While a card is up the press belongs to the card (decided now, on the tap
     /// thread, so a press that starts a card gesture is always released into the same gesture).
-    private func fireWakeup(down: Bool) {
+    /// Internal so the headless controller trace test can drive the routing without a CGEvent tap.
+    func fireWakeup(down: Bool) {
         let toCard = askCardActive
         DispatchQueue.main.async {
             if toCard { down ? self.onAskCardOptionDown?() : self.onAskCardOptionUp?() }
@@ -367,7 +380,7 @@ final class HotkeyMonitor {
 
     /// Route transient picker keys in declared priority order. A/B intentionally wins if both
     /// pickers are ever active despite their normal mutual-exclusion invariant.
-    private func dispatchModalPickerKey(_ keyCode: Int64) -> Bool {
+    func dispatchModalPickerKey(_ keyCode: Int64) -> Bool {
         let pickersInPriorityOrder = [
             ModalPicker(
                 active: abPickerActive,

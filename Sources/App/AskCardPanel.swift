@@ -6,7 +6,15 @@ import Cocoa
 /// through this panel. A small grip at the top drags it with `performDrag(with:)`, which does not activate the
 /// app. One card shows at a time; the panel stays where it is when the next card of the same take replaces it.
 /// Text comes from `AskCardText` and placement from `AskCardGeometry` (both pure, both tested off-device).
-final class AskCardPanel: NSObject {
+/// What the controller needs from the card, so the headless controller trace test can stand in a fake.
+protocol AskCardPresenting: AnyObject {
+    var onChoose: ((UUID, Int) -> Void)? { get set }
+    func show(_ card: AskCardModel, anchor: CGPoint)
+    func setHighlight(cardID: UUID, index: Int)
+    func hide()
+}
+
+final class AskCardPanel: NSObject, AskCardPresenting {
     /// (card id, option index) from a click on an option row.
     var onChoose: ((UUID, Int) -> Void)?
 
@@ -40,6 +48,11 @@ final class AskCardPanel: NSObject {
         var onClick: (() -> Void)?
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override func mouseDown(with event: NSEvent) { onClick?() }
+        /// The label sits on top of the row; the row takes the click itself (as the History window rows do).
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let sv = superview else { return super.hitTest(point) }
+            return bounds.contains(convert(point, from: sv)) ? self : nil
+        }
     }
 
     private let panel: NSPanel

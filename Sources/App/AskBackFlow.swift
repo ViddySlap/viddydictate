@@ -257,7 +257,9 @@ struct AskBackWriteSpec: Equatable {
 }
 
 final class AskBackFlow {
-    enum Phase: Equatable { case notStarted, reviewing, asking, writing, finished, cancelled, detached }
+    /// `parked`: a hold started on a card (the card is closed and the new take is recording) but the old take
+    /// still waits. The release of that press detaches it; Esc while it is still down resumes it as agent-decides.
+    enum Phase: Equatable { case notStarted, reviewing, asking, writing, finished, cancelled, detached, parked }
 
     struct Context {
         let historyID: UUID
@@ -316,6 +318,7 @@ final class AskBackFlow {
     private var consumeRelease = false
     private var holdCancel: (() -> Void)?
     private var tapCancel: (() -> Void)?
+    private var parkedCardID: UUID?
 
     init(context: Context, schedule: @escaping Schedule, now: @escaping () -> TimeInterval,
          newID: @escaping () -> UUID = { UUID() }, hooks: Hooks) {
@@ -528,14 +531,28 @@ final class AskBackFlow {
     private func holdFired(_ id: UUID) {
         guard phase == .asking, id == cardID, pressActive else { return }
         holdCancel = nil
-        startNewTake()
+        park()
     }
 
-    /// A hold while a card is up: the card closes, the old take becomes a detached save-only job built from an
-    /// immutable copy, and a new take starts.
-    private func startNewTake() {
+    /// A hold while a card is up: the card closes and a new take starts, but the old take WAITS (parked) until
+    /// the press that started the hold ends: `parkedRelease` (no Esc) detaches it; `parkedEsc` resumes it.
+    private func park() {
         guard phase == .asking, let id = cardID else { return }
         cancelTimers()
+        pressActive = false
+        consumeRelease = false
+        parkedCardID = id
+        cardID = nil
+        phase = .parked
+        hooks.closeCard(id)
+        hooks.startNewTake()
+    }
+
+    /// The press that started the hold was released with no Esc: the old take becomes the detached save-only
+    /// job, built from an immutable copy. The new take (already recording) goes on as today.
+    func parkedRelease() {
+        guard phase == .parked else { return }
+        parkedCardID = nil
         var rec = record ?? AskBackRecord(provider: context.provider.rawValue, reviewModel: "",
                                           tier: context.tier.rawValue, reviewMs: nil, writeProvider: nil,
                                           writeModel: nil, writeMs: nil, spots: [], questions: [])
@@ -548,11 +565,21 @@ final class AskBackFlow {
             levelRaw: context.levelRaw, questions: questions, answers: answers, record: rec,
             writeProvider: context.provider.rawValue, writeModel: context.writeModel,
             generation: context.generation)
-        cardID = nil
         phase = .detached
-        hooks.closeCard(id)
         hooks.saveDetached(job)
-        hooks.startNewTake()
+    }
+
+    /// Esc while that same press is still down (the chord): the caller has discarded the new take silently; the
+    /// old take goes on as agent-decides for the card that was open (same as Esc on the card), and the next card,
+    /// the write and the paste follow as usual. Returns false when the flow is not parked.
+    @discardableResult
+    func parkedEsc() -> Bool {
+        guard phase == .parked, let id = parkedCardID else { return false }
+        parkedCardID = nil
+        cardID = id
+        phase = .asking
+        decide(option: nil, how: .agentDecided)
+        return true
     }
 
     // MARK: timers

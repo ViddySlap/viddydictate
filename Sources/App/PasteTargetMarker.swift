@@ -51,7 +51,7 @@ final class PasteTargetMarker {
     /// VDASK-3: the last placement the marker computed (a target point, or the pointer when no field could be
     /// read), kept after `stop()` so the ask card can anchor to where this take's text will land. Read-only;
     /// reset by the next `start`. Main thread only.
-    private(set) var lastPlacement: PasteTargetPlacement.Result?
+    var lastPlacement: PasteTargetPlacement.Result?   // internal set: the controller clears it when a take starts
 
     /// Main thread only; idempotent (a start while running restarts cleanly). `followsLive` is the take's frozen
     /// route: true reads live focus as before, false pins the marker to the captured element's own frame/caret so

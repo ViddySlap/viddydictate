@@ -669,6 +669,11 @@ enum TextTransformClient {
         }
     }
 
+    /// The live Claude adapter, for a caller that substitutes its own only under a test seam (VDASK-3).
+    static let liveClaudeAdapter: AsyncAdapter = { request, completion in
+        claudeTransform(request, completion: completion)
+    }
+
     private static func claudeTransform(_ request: TextTransformRequest,
                                         completion: @escaping Completion) {
         CloudCleanupClient.transform(systemPrompt: request.systemPrompt,
