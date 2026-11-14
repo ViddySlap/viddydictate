@@ -310,6 +310,10 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// non-following mode. It lives here rather than in a display link so it is a plain RunLoop timer
     /// in `.common` mode, which keeps ticking while the panel is up and the app is inactive.
     private var followTimer: Timer?
+    /// VDASK-5 repair round 2 (M1): freezes the scope/info/chip row while the pointer is at the chip, so the
+    /// ? can actually be reached. Reset on hide and every display-mode change below.
+    private var chipHold = AskBackChipHold()
+    private var lastFollowPointer: NSPoint?
     /// The optional action a clickable toast runs. Set by `toast(_:duration:forceFull:action:)` and
     /// cleared on every new toast, dismiss, or hide, so a stale action can never fire.
     private var toastAction: (() -> Void)?
@@ -318,7 +322,9 @@ final class HUDPanel: NSObject, HUDPresenting {
     private var toastClickView: HUDToastClickView?
     /// The single source of truth for the current layout (see `HUDDisplayMode`). Every transition sets it;
     /// `relayout()` switches on it. Replaces the old thinking/toasting/toastForceFull booleans.
-    private var mode: HUDDisplayMode = .pillScope
+    private var mode: HUDDisplayMode = .pillScope {
+        didSet { if mode != oldValue { resetChipHold() } }
+    }
     /// All logical owners share the existing ring. Recovery IDs prevent one completed take from hiding
     /// progress for another take that is still waiting.
     private var thinkingActivity = HUDThinkingActivity()
@@ -549,12 +555,30 @@ final class HUDPanel: NSObject, HUDPresenting {
                 panel.alphaValue = left >= toastFadeLength ? 1 : CGFloat(max(0, left / toastFadeLength))
             }
         } else {
+            // VDASK-5 repair round 2 (M1): decide the chip hold BEFORE re-anchoring the row. Once the pointer
+            // is on or entering the chip's halo, returning here leaves the scope, info pill and chip exactly
+            // where they are, so the pointer can finish the approach and click. Outside the halo the normal
+            // follow/anchor path below resumes unchanged.
+            let pointer = followPointer()
+            if mode == .pillScope {
+                let holding = chipHold.update(pointer: pointer, previousPointer: lastFollowPointer,
+                                              chip: askBackChip.onScreenFrame)
+                lastFollowPointer = pointer
+                if holding { return }
+            }
             let target = followOrigin(panelSize: panel.frame.size)
             panel.setFrameOrigin(target)
             origin = target
             // Re-anchor the info pill beside the (moving) scope pill without animating every tick.
             if mode == .pillScope { updateInfoPill(animated: false) }
         }
+    }
+
+    /// Drop a chip hold and the pointer sample behind it. Called on hide and on every display-mode change (the
+    /// mode property's didSet), so a new take, a toast or the thinking spinner can never inherit a stale hold.
+    private func resetChipHold() {
+        chipHold.reset()
+        lastFollowPointer = nil
     }
 
     private func startFollowTimer() {
@@ -668,6 +692,7 @@ final class HUDPanel: NSObject, HUDPresenting {
 
     func show() {
         refreshDisplaySettings()         // re-read scales for this take
+        resetChipHold()                  // a fresh take never inherits the previous take's hold
         mode = .pillScope                // a fresh take is always the scope pill
         presentForCurrentMode()
     }
@@ -698,6 +723,7 @@ final class HUDPanel: NSObject, HUDPresenting {
     func hide() {
         toastDeadline = nil
         panel.alphaValue = 1
+        resetChipHold()
         stopFollowTimer()
         toastTimer?.invalidate()
         toastAction = nil
@@ -1094,8 +1120,13 @@ final class HUDPanel: NSObject, HUDPresenting {
     /// capsule's on-screen frame (so the probe can assert more active elements ⇒ a wider pill). Both
     /// are synchronous logical targets, valid even mid-animation.
     var infoPillShownForTesting: Bool { infoPill.isShown }
-    var askBackChipShownForTesting: Bool { askBackChip.isShown }
+    var askBackChipShownForTesting: Bool { askBackChip.isOnScreen }
+    /// The real button hit frame in screen points (read back from the live chip window + button).
     var askBackChipFrameForTesting: NSRect { askBackChip.frame }
+    /// The real chip window's frame/visibility (includes the S2 glow padding), for S1 reachability rows.
+    var askBackChipPanelFrameForTesting: NSRect { askBackChip.panelFrame }
+    var askBackChipPanelVisibleForTesting: Bool { askBackChip.isOnScreen }
+    var askBackChipHoldingForTesting: Bool { chipHold.isHolding }
     var askBackChipStateForTesting: AskBackToggleState { askBackChip.appliedState }
     var askBackButtonStateForTesting: AskBackToggleState { askBackButton.appliedState }
     func clickAskBackChipForTesting() { askBackChip.onClick?() }

@@ -40,6 +40,7 @@ enum HUDProbe {
         probeLowPowerPill(hud, visibleFrame: vf)
         probeInfoPill(hud)
         probeAskBackChip(hud, visibleFrame: vf)
+        probeAskBackChipReach(hud, visibleFrame: vf)
         probeInfoSide(hud, visibleFrame: vf)
         probeInfoEdges(hud, visibleFrame: vf)
         probeLowPowerToast(hud, visibleFrame: vf)
@@ -213,6 +214,12 @@ enum HUDProbe {
         hud.update(state: "Locked — speaking", target: "probe", text: "", locked: true)
         check("chip-shown-when-locked", hud.infoPillShownForTesting && hud.askBackChipShownForTesting,
               "pill=\(hud.infoPillShownForTesting) chip=\(hud.askBackChipShownForTesting)")
+        let chipHit = hud.askBackChipFrameForTesting
+        let chipPanel = hud.askBackChipPanelFrameForTesting
+        check("chip-panel-real-frame-and-visibility (S1)",
+              hud.askBackChipPanelVisibleForTesting && chipPanel.contains(chipHit)
+                && chipPanel.width >= chipHit.width && chipPanel.height > chipHit.height,
+              "visible=\(hud.askBackChipPanelVisibleForTesting) panel=\(chipPanel) hit=\(chipHit) expect a visible panel with room around the button")
         hud.update(state: "Listening…", target: "probe", text: "", locked: false)
         hud.setCleanup(enabled: true, level: 1)
         check("chip-shown-when-cleanup", hud.infoPillShownForTesting && hud.askBackChipShownForTesting,
@@ -276,6 +283,111 @@ enum HUDProbe {
               "chip=\(chip) capsule=\(cap) scope=\(sc)")
         hud.hide()
         hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+    }
+
+    /// VDASK-5 repair round 2 (S1): move the pointer across follow ticks and prove the real chip can be reached
+    /// and clicked, then that leaving resumes following and hide/mode changes reset the hold.
+    private static func probeAskBackChipReach(_ hud: HUDPanel, visibleFrame vf: NSRect) {
+        Settings.hudUIScale = 1.0
+        let screens = [HUDPointerPlacement.Screen(frame: vf, visible: vf)]
+        hud.hide()
+        hud.setBullseyeArmed(false)
+        hud.setArmedMode(glyph: nil)
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.setCleanup(enabled: true, level: 1)
+        hud.screensProviderForTesting = { screens }
+        let start = NSPoint(x: vf.minX + 300, y: vf.maxY - 300)
+
+        func freezeChip(from start: NSPoint) -> Bool {
+            var pointer = start
+            hud.pointerProviderForTesting = { pointer }
+            hud.followTickForTesting()
+            for _ in 0..<80 {
+                let chip = hud.askBackChipFrameForTesting
+                if chip.contains(pointer) && hud.askBackChipHoldingForTesting { return true }
+                let target = NSPoint(x: chip.midX, y: chip.midY)
+                pointer = NSPoint(x: pointer.x + (target.x - pointer.x) * 0.1,
+                                  y: pointer.y + (target.y - pointer.y) * 0.1)
+                hud.pointerProviderForTesting = { pointer }
+                hud.followTickForTesting()
+            }
+            return hud.askBackChipHoldingForTesting
+        }
+
+        hud.pointerProviderForTesting = { start }
+        hud.show()
+        hud.followTickForTesting()
+        let chipStart = hud.askBackChipFrameForTesting
+        let panelStart = hud.askBackChipPanelFrameForTesting
+        check("chip-reach-real-panel-visible (S1)",
+              hud.askBackChipPanelVisibleForTesting && panelStart.contains(chipStart),
+              "visible=\(hud.askBackChipPanelVisibleForTesting) panel=\(panelStart) hit=\(chipStart)")
+
+        let reached = freezeChip(from: start)
+        let frozenChip = hud.askBackChipFrameForTesting
+        let frozenScope = hud.frameForTesting
+        check("chip-reachable-from-the-scope-across-ticks (S1)",
+              reached && hud.askBackChipHoldingForTesting && hud.askBackChipPanelVisibleForTesting
+                && frozenChip.contains(NSPoint(x: frozenChip.midX, y: frozenChip.midY)),
+              "reached=\(reached) holding=\(hud.askBackChipHoldingForTesting) chip=\(frozenChip) scope=\(frozenScope)")
+
+        let reachPoint = NSPoint(x: frozenChip.midX, y: frozenChip.midY)
+        hud.pointerProviderForTesting = { reachPoint }
+        hud.followTickForTesting()
+        check("chip-reachable-click-position-does-not-move (S1)",
+              frameEq(hud.askBackChipFrameForTesting, frozenChip)
+                && frameEq(hud.frameForTesting, frozenScope)
+                && hud.askBackChipFrameForTesting.contains(reachPoint),
+              "chip=\(hud.askBackChipFrameForTesting) scope=\(hud.frameForTesting) frozenChip=\(frozenChip) frozenScope=\(frozenScope) point=\(reachPoint)")
+        var clicks = 0
+        let oldClick = hud.onToggleAskBack
+        hud.onToggleAskBack = { clicks += 1 }
+        hud.clickAskBackChipForTesting()
+        hud.onToggleAskBack = oldClick
+        check("chip-reachable-click-fires (S1)", clicks == 1, "clicks=\(clicks)")
+
+        let away = NSPoint(x: vf.minX + 100, y: vf.maxY - 100)
+        hud.pointerProviderForTesting = { away }
+        hud.followTickForTesting()
+        let scopeAway = hud.frameForTesting
+        let expectedAway = HUDPointerPlacement.origin(pointer: away, size: scopeAway.size, scale: 1.0,
+                                                      screens: screens, fallback: 0)
+        check("chip-leave-resumes-following (S1)",
+              !hud.askBackChipHoldingForTesting
+                && approx(scopeAway.minX, expectedAway.x) && approx(scopeAway.minY, expectedAway.y),
+              "holding=\(hud.askBackChipHoldingForTesting) scope=\(scopeAway) expect≈\(expectedAway)")
+
+        // Hide clears the latch even after an active freeze.
+        hud.pointerProviderForTesting = { start }
+        hud.show()
+        hud.followTickForTesting()
+        let frozeForHide = freezeChip(from: start)
+        hud.hide()
+        check("chip-hide-resets-hold (S1)",
+              frozeForHide && !hud.askBackChipHoldingForTesting && !hud.askBackChipPanelVisibleForTesting,
+              "froze=\(frozeForHide) holding=\(hud.askBackChipHoldingForTesting) visible=\(hud.askBackChipPanelVisibleForTesting)")
+
+        // A display-mode change (the thinking spinner and back) clears it too.
+        hud.pointerProviderForTesting = { start }
+        hud.show()
+        hud.followTickForTesting()
+        let frozeForMode = freezeChip(from: start)
+        hud.setThinking(true)
+        let clearedByThinking = !hud.askBackChipHoldingForTesting
+        hud.setThinking(false)
+        let clearedAfterThinking = !hud.askBackChipHoldingForTesting
+        check("chip-mode-change-resets-hold (S1)",
+              frozeForMode && clearedByThinking && clearedAfterThinking,
+              "froze=\(frozeForMode) duringThinking=\(clearedByThinking) afterThinking=\(clearedAfterThinking)")
+
+        hud.hide()
+        hud.setCleanup(enabled: false, level: 0)
+        hud.setArmedMode(glyph: nil)
+        hud.setBullseyeArmed(false)
+        hud.update(state: "Listening…", target: "probe", text: "", locked: false)
+        hud.pointerProviderForTesting = { NSPoint(x: vf.minX + 400, y: vf.maxY - 200) }
+        hud.screensProviderForTesting = { [HUDPointerPlacement.Screen(frame: vf, visible: vf)] }
+        Settings.hudUIScale = 1.0
     }
 
     private static func probeInfoSide(_ hud: HUDPanel, visibleFrame vf: NSRect) {

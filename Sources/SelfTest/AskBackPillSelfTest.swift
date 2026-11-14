@@ -106,6 +106,63 @@ enum AskBackPillSelfTest {
         let edge = AskBackChipRules.frame(for: AskBackChipPlacement(
             capsule: CGRect(x: 1380, y: 300, width: 50, height: 34), visible: vis, onRight: true), size: sz)
         check("chip: stays inside the screen's visible frame", (edge?.maxX ?? 9999) <= vis.maxX)
+        // VDASK-5 repair round 2 (M1): the near-chip hold that makes the moving ? reachable.
+        let chipRect = CGRect(x: 680, y: 450, width: 37, height: 28)
+        var hold = AskBackChipHold()
+        check("chip hold: no chip means no hold, and reset is explicit",
+              !hold.update(pointer: NSPoint(x: 700, y: 460), previousPointer: nil, chip: nil)
+                && !hold.isHolding)
+        check("chip hold: starts within 40 points of the real chip frame and stays while inside",
+              hold.update(pointer: NSPoint(x: chipRect.minX - 39, y: chipRect.midY), previousPointer: nil, chip: chipRect)
+                && hold.isHolding
+                && hold.update(pointer: NSPoint(x: chipRect.midX, y: chipRect.midY), previousPointer: nil, chip: chipRect))
+        check("chip hold: releases outside the 40-point halo",
+              !hold.update(pointer: NSPoint(x: chipRect.maxX + 41, y: chipRect.midY), previousPointer: nil, chip: chipRect)
+                && !hold.isHolding)
+        check("chip hold: reset drops an active hold",
+              hold.update(pointer: NSPoint(x: chipRect.midX, y: chipRect.midY), previousPointer: nil, chip: chipRect)
+                && { hold.reset(); return !hold.isHolding }())
+        var approach = AskBackChipHold()
+        let farStart = NSPoint(x: 400, y: 500), farOne = NSPoint(x: 450, y: 500)
+        let firstMove = approach.update(pointer: farOne, previousPointer: farStart, chip: chipRect)
+        let secondMove = approach.update(pointer: NSPoint(x: 500, y: 500), previousPointer: farOne, chip: chipRect)
+        let awayAgain = approach.update(pointer: NSPoint(x: 430, y: 500), previousPointer: NSPoint(x: 500, y: 500), chip: chipRect)
+        check("chip hold: one move tick keeps following; a sustained approach freezes; turning away releases",
+              !firstMove && secondMove && awayAgain == false && !approach.isHolding)
+        // A pointer starting at the scope can travel to the chip only if the approach latches the hold before
+        // the next tick moves the row. Model the real rigid row (chip = pointer + a fixed offset) across scales.
+        func reachable(scale: CGFloat) -> Bool {
+            var latch = AskBackChipHold()
+            var pointer = NSPoint(x: 500, y: 500)
+            let offset = CGPoint(x: 180 * scale, y: -50 * scale)
+            var chip = CGRect(x: pointer.x + offset.x, y: pointer.y + offset.y, width: 37, height: 28)
+            for _ in 0..<200 {
+                let target = NSPoint(x: chip.midX, y: chip.midY)
+                let next = NSPoint(x: pointer.x + (target.x - pointer.x) * 0.1,
+                                   y: pointer.y + (target.y - pointer.y) * 0.1)
+                let held = latch.update(pointer: next, previousPointer: pointer, chip: chip)
+                pointer = next
+                if held { if chip.contains(pointer) { return true } }
+                else { chip = CGRect(x: pointer.x + offset.x, y: pointer.y + offset.y,
+                                     width: chip.width, height: chip.height) }
+            }
+            return false
+        }
+        check("chip hold: a pointer approaching from the scope can reach the chip at 60%, 100% and 150% scale",
+              reachable(scale: 0.6) && reachable(scale: 1.0) && reachable(scale: 1.5))
+        // A clamped chip at the screen's right edge is still reachable by the same approach.
+        let edgeChip = CGRect(x: vis.maxX - 37, y: 450, width: 37, height: 28)
+        var edgeHold = AskBackChipHold()
+        var edgePointer = NSPoint(x: edgeChip.midX - 180, y: edgeChip.midY)
+        var edgeReached = false
+        for _ in 0..<40 {
+            let next = NSPoint(x: edgePointer.x + (edgeChip.midX - edgePointer.x) * 0.1,
+                               y: edgePointer.y + (edgeChip.midY - edgePointer.y) * 0.1)
+            if edgeHold.update(pointer: next, previousPointer: edgePointer, chip: edgeChip) { edgePointer = next }
+            else { edgePointer = next }
+            if edgeChip.contains(edgePointer) { edgeReached = true; break }
+        }
+        check("chip hold: a chip clamped at the screen edge is reachable", edgeReached)
         let chipSrc = src("AskBackToggleChip.swift")
         check("wiring (chip panel): non-activating, never key, mouse-taking, holds the shared AskBackToggleButton, only reports a click",
               chipSrc.contains("override var canBecomeKey: Bool { false }") && chipSrc.contains("styleMask: [.borderless, .nonactivatingPanel]")
@@ -117,6 +174,12 @@ enum AskBackPillSelfTest {
                 && hud.contains("askBackChip.apply(state)")
                 && src("InfoPill.swift").contains("onPlacement?(isShown ? AskBackChipPlacement(")
                 && src("InfoPill.swift").contains("panel.ignoresMouseEvents = true"))
+        check("wiring (HUD): the chip hold is decided before the row re-anchors and is reset on hide and mode changes",
+              body("private func followTick()", "private func startFollowTimer()").contains("chipHold.update(")
+                && body("private func followTick()", "private func startFollowTimer()").contains("if holding { return }")
+                && body("    func hide() {", "    func setTakeActive").contains("resetChipHold()")
+                && body("    func show() {", "private func presentForCurrentMode").contains("resetChipHold()")
+                && hud.contains("didSet { if mode != oldValue { resetChipHold() } }"))
 
         print(check.summaryLine(prefix: "[askback-pill-selftest]"))
         return check.passed
