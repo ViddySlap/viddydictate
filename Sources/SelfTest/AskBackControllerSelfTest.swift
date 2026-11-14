@@ -1762,7 +1762,10 @@ enum AskBackControllerSelfTest {
             rig.finishWrite("Voice landed.")
             let entries = rig.store.all()
             check("oneshot trace voice: the answer lands at the captured target and History records how it was answered",
-                  rig.notes.delivered == [("note-voice", "Voice landed.")] && rig.hook.finals.isEmpty
+                  rig.notes.delivered.count == 1
+                    && rig.notes.delivered[0].noteId == "note-voice"
+                    && rig.notes.delivered[0].text == "Voice landed."
+                    && rig.hook.finals.isEmpty
                     && entries.count == 1 && entries[0].status == "done"
                     && entries[0].askBack?.questions.first?.answer == "Monday"
                     && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.voice.rawValue)
@@ -1801,7 +1804,10 @@ enum AskBackControllerSelfTest {
             rig.finishWrite("Retried answer.")
             let entries = rig.store.all()
             check("oneshot retry: exactly one successful landing reaches the captured note",
-                  rig.notes.delivered == [("note-retry", "Retried answer.")] && rig.hook.finals.isEmpty)
+                  rig.notes.delivered.count == 1
+                    && rig.notes.delivered[0].noteId == "note-retry"
+                    && rig.notes.delivered[0].text == "Retried answer."
+                    && rig.hook.finals.isEmpty)
             check("oneshot retry: History keeps the same entry and original answers, now done",
                   entries.count == 1 && entries[0].status == "done" && entries[0].text == "Retried answer."
                     && entries[0].askBack?.questions.first?.answer == "Friday"
@@ -1844,7 +1850,10 @@ enum AskBackControllerSelfTest {
                     && rig.writes[0].request.systemPrompt.contains(AskBackAnswersBlock.noAnswer))
             rig.finishWrite("Decided by the agent.")
             check("oneshot trace: the agent-decided Option+P write lands once at the captured target",
-                  rig.notes.delivered == [("note-esc", "Decided by the agent.")] && rig.hook.finals.isEmpty
+                  rig.notes.delivered.count == 1
+                    && rig.notes.delivered[0].noteId == "note-esc"
+                    && rig.notes.delivered[0].text == "Decided by the agent."
+                    && rig.hook.finals.isEmpty
                     && rig.store.all().first?.askBack?.questions.first?.how == AskBackAnswerHow.agentDecided.rawValue)
         }
         do {
@@ -1857,7 +1866,10 @@ enum AskBackControllerSelfTest {
                   local.reviews.isEmpty && local.writes.count == 1 && local.ctl.traceAskFlow == nil)
             local.finishWrite("Local landed.")
             check("oneshot trace: the local write still lands through Option+P's normal path",
-                  local.notes.delivered == [("note-local", "Local landed.")] && local.store.all().first?.askBack == nil)
+                  local.notes.delivered.count == 1
+                    && local.notes.delivered[0].noteId == "note-local"
+                    && local.notes.delivered[0].text == "Local landed."
+                    && local.store.all().first?.askBack == nil)
 
             let cleanup = TraceRig(); defer { cleanup.close() }
             cleanup.optionP(traceTranscript, level: .cleanup,
@@ -1896,7 +1908,10 @@ enum AskBackControllerSelfTest {
                     && rig.writes[0].request.systemPrompt.contains("already answered") == false)
             rig.finishWrite("Timeout landed.")
             check("oneshot trace: the timed-out review's write lands normally",
-                  rig.notes.delivered == [("note-timeout", "Timeout landed.")] && rig.ctl.traceAskFlow?.phase == .finished)
+                  rig.notes.delivered.count == 1
+                    && rig.notes.delivered[0].noteId == "note-timeout"
+                    && rig.notes.delivered[0].text == "Timeout landed."
+                    && rig.ctl.traceAskFlow?.phase == .finished)
         }
         do {
             // A right-Option hold on an Option+P card: the card closes, the latch drops at once, the old
