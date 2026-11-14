@@ -4,6 +4,17 @@ import CryptoKit
 // VDASK-2 self-test: review prompt pins, parser, caps, gate, runner identity, call seam and settings.
 // Synthetic text only. Mirrors the Linux oracle's rows (b2-out/oracle) plus the app-type rows.
 
+/// Test-only exact-result predicate. CleanupClient.Result deliberately does not conform to
+/// Equatable, and every failure arm must reject rather than being ignored.
+private func askBackExactOK(_ result: CleanupClient.Result, _ expected: String) -> Bool {
+    switch result {
+    case .ok(let actual):
+        return actual == expected
+    case .unavailable, .timedOut, .badOutput:
+        return false
+    }
+}
+
 private final class AskBackFakeClock {
     var now = 0.0
     var timers: [(id: Int, due: Double, fire: () -> Void)] = []
@@ -389,7 +400,7 @@ do {
         retryCenter.invalidate()
 
         // MARK: VDASK-3 follow-ups F1 (raw punctuation reaches the review), F2 (default Codex adapter), F3 (parser)
-        let curly = "He said \u{201C}yes\u{201D}, then left."
+        let curlyYesText = "He said \u{201C}yes\u{201D}, then left."
         check("F1 seam: rawPunctuation defaults to false and survives an explicit retry copy",
               TextTransformRequest(route: .promptPrep, bundle: .local("m"), sourceText: "s", systemPrompt: "s",
                                    userMessage: "s", timeout: 5).rawPunctuation == false
@@ -406,18 +417,18 @@ do {
                                      codex: { req, done in seamRaw.append(req.rawPunctuation); done(.ok("x")) },
                                      completion: { _ in })
         check("F1 seam: complete builds its request with rawPunctuation on, for both providers", seamRaw == [true, true])
-        let claudeJSON = "{\"result\":\"" + curly.replacingOccurrences(of: "\"", with: "\\\"") + "\"}"
+        let claudeJSON = "{\"result\":\"" + curlyYesText.replacingOccurrences(of: "\"", with: "\\\"") + "\"}"
         check("F1 claude: parseResult keeps curly quotes when normalization is off",
-              CloudCleanupClient.parseResult(stdout: claudeJSON, normalizesPunctuation: false) == .ok(curly))
+              askBackExactOK(CloudCleanupClient.parseResult(stdout: claudeJSON, normalizesPunctuation: false), curlyYesText))
         check("F1 claude: parseResult still normalizes by default (every existing caller)",
-              CloudCleanupClient.parseResult(stdout: claudeJSON) == .ok("He said \"yes\", then left."))
-        let codexSuccess = CodexRuntimeOutcome.success(CodexRuntimeSuccess(result: curly, profileHash: "p", stdoutBytes: 1, stderrBytes: 0, elapsed: 0))
+              askBackExactOK(CloudCleanupClient.parseResult(stdout: claudeJSON), "He said \"yes\", then left."))
+        let codexSuccess = CodexRuntimeOutcome.success(CodexRuntimeSuccess(result: curlyYesText, profileHash: "p", stdoutBytes: 1, stderrBytes: 0, elapsed: 0))
         let rawReq = TextTransformRequest(route: .custom("askBackReview"), bundle: .codex("gpt-6.1-sol", effort: "medium"),
                                           sourceText: "I", systemPrompt: "S", userMessage: "I", timeout: 5, rawPunctuation: true)
         check("F1 codex: resolve keeps curly quotes when normalization is off",
-              CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false, normalizesPunctuation: false) == .ok(curly))
+              askBackExactOK(CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false, normalizesPunctuation: false), curlyYesText))
         check("F1 codex: resolve normalizes by default",
-              CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false) == .ok("He said \"yes\", then left."))
+              askBackExactOK(CodexTransformResult.resolve(codexSuccess, request: rawReq, updatesAvailability: false), "He said \"yes\", then left."))
         let yesTranscript = "He said \u{201C}yes\u{201D}, then changed his mind. We ship Monday."
         let yesReply = "{\"spots\":[],\"questions\":[{\"question\":\"Which day?\",\"quote\":\"\u{201C}yes\u{201D}, then changed his mind\",\"why\":\"w\",\"options\":[\"a\",\"b\"]}]}"
         let yesParsed = AskBackReview.parse(yesReply, transcript: yesTranscript, level: .summarize)
