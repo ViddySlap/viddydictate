@@ -23,6 +23,17 @@ import Cocoa
 /// and search lands NON-destructively (answer note / HUD) so it deliberately keeps its own landing rather
 /// than routing through the shared in-place tail. The engine models these as an `input`-typed acquisition
 /// switch, an `usesLevelPicker` facet, and a `landNonDestructive` hook, not as three hard-coded methods.
+/// VDASK-7: the level picker's surface, so a headless controller row can drive Option+P without a panel.
+protocol LevelPickerPresenting: AnyObject {
+    var selectedIndex: Int { get }
+    func show(selected: Int)
+    func moveLeft()
+    func moveRight()
+    func hide()
+}
+
+extension LevelPickerPanel: LevelPickerPresenting {}
+
 final class OneShotRegistry {
     private unowned let context: OneShotContext
 
@@ -36,6 +47,9 @@ final class OneShotRegistry {
     /// holds the descriptor row + captured text + input source between showing the picker and
     /// committing/cancelling it - the async gap the other modes do not have. Only picker modes populate it.
     private lazy var levelPicker = LevelPickerPanel()
+    /// VDASK-7 test seam: a headless row supplies a fake picker. Production leaves this nil.
+    var levelPickerForTest: LevelPickerPresenting?
+    private var activeLevelPicker: LevelPickerPresenting { levelPickerForTest ?? levelPicker }
     private var pending: (entry: Entry, input: String, inputSource: NotesBullseyeLogic.InputSource)?
 
     /// BT4 (notes-bullseye): the note showing the Option+P replace highlight while the level picker is up, or
@@ -63,10 +77,28 @@ final class OneShotRegistry {
     /// explicit generic-sentence case, listed in notes/red-record.md).
     private(set) var inFlightTimeoutDetail: LocalStreamTimeoutDetail?
 
+    /// VDASK-7: the Option+P route, frozen at the level-pick commit before the review gate. The same value
+    /// builds the ask request and the unchanged (no-review) write, so a late route change cannot swap the
+    /// provider under a card. Cleared when the flow finishes or is cancelled.
+    private var selectionResolution: LLMRouteResolution?
+    /// VDASK-7: the selection's landing target, captured at the pick commit before the wait. The ask write
+    /// lands through exactly this, never through a live re-read after the card.
+    private var pendingSelectionLanding: (note: NotesDictationTarget?, foreign: DictationTarget?)?
+    /// VDASK-7 test seam: the last request builder an Option+P ask write used, so a test can prove an
+    /// explicit retry rebuilds the SAME request (with the same answers block). nil in production.
+    private var selectionLastRequestBuilder: TextTransformClient.RetryRequestBuilder?
+
     /// Test seam: override the custom-mode transform call so the headless selftest drives the shared
     /// flow with a stub instead of a live `CleanupClient` -> LM Studio round trip. nil in production
     /// (custom modes resolve through `CustomModeClient.run`, dispatching on the model kind).
     var customClientForTest: ((CustomMode, String, @escaping (CleanupClient.Result) -> Void) -> Void)?
+
+    /// VDASK-7 test seams (production leaves every one nil): replace the selection copy, the route
+    /// resolution and the provider adapters a headless controller row cannot reach.
+    var selectionCaptureForTest: (() -> String?)?
+    var routeResolutionForTest: ((LLMRouteID) -> LLMRouteResolution)?
+    var claudeWriteForTest: TextTransformClient.AsyncAdapter?
+    var localWriteForTest: TextTransformClient.AsyncAdapter?
 
     /// The one-shot modes the engine drives. `handle(command:)` maps each chord to one of these.
     enum Mode { case cleanupSelection, email, searchLocal, searchGemini }
@@ -157,6 +189,10 @@ final class OneShotRegistry {
         // A new command owns a new landing gesture. Any earlier failed transform can no longer safely
         // restore its captured selection/answer surface, so drop it before acquisition or retrieval begins.
         TextTransformRetryCenter.shared.invalidate()
+        // VDASK-7: no stale Option+P route/target/request may leak into this command.
+        selectionResolution = nil
+        pendingSelectionLanding = nil
+        selectionLastRequestBuilder = nil
         Log.write("\(entry.invokePrefix) invoked state=\(context.stateLabel)")
         // BT (item-4): clear any stale remembered target up front so a prior captured-then-no-op flow can never
         // leak its note target into this one. `captureSelection` re-captures it (to a target or nil) for the
@@ -201,6 +237,20 @@ final class OneShotRegistry {
     /// clipboard are blank; otherwise arm the busy-latch and continue. The arbiter + discard have already
     /// run in `run` (or, for the dual-mode fallback, this is a continuation after the take was consumed).
     private func captureSelection(_ entry: Entry) {
+        // VDASK-7 test seam: a headless row has no selection or pasteboard to copy. Production never sets this.
+        if let capture = selectionCaptureForTest {
+            oneShotNoteTarget = context.authoritativeNoteTargetForGesture()
+            guard let captured = capture(),
+                  let input = CleanupLogic.promptPrepInput(selection: captured, clipboard: nil) else {
+                Log.write("\(entry.mode.id): no selection and empty clipboard — no-op")
+                context.hud.toast(entry.blankToast)
+                context.note(context.readyHint)
+                return
+            }
+            busy = true
+            haveSelectionInput(entry, input: input)
+            return
+        }
         let pb = NSPasteboard.general
         let original = PasteboardSnapshot.capture(from: pb)
         let originalString = pb.string(forType: .string)
@@ -237,7 +287,7 @@ final class OneShotRegistry {
             // snapshot range and collapses the now-copied selection so the tint shows. nil when the selection
             // is in a foreign app (copied from another window) — that is not tinted.
             replaceHighlightNoteId = context.showReplaceHighlight(level: NotesReplaceHighlightLogic.from(sticky).rawValue)
-            levelPicker.show(selected: sticky.rawValue)
+            activeLevelPicker.show(selected: sticky.rawValue)
             context.levelPickerActive = true
             pending = (entry, input, .selection)
             context.note("\(entry.mode.label): pick a level")
@@ -350,9 +400,13 @@ final class OneShotRegistry {
         // and the classifier decodes the fired limit back into it for `finish`'s presentation.
         inFlightTimeoutDetail = LocalStreamTimeoutDetail()
         // Snapshot both landing worlds before the first result consumes mutable registry/controller state.
-        // The same immutable values stay captured by TextTransformClient's retry completion.
-        let noteTarget = oneShotNoteTarget
-        let foreignTarget = noteTarget == nil ? context.authoritativeForeignTargetForGesture() : nil
+        // The same immutable values stay captured by TextTransformClient's retry completion. VDASK-7: an
+        // Option+P flow uses the target it captured at the pick commit, before any review/card wait.
+        let captured = pendingSelectionLanding
+        pendingSelectionLanding = nil
+        let noteTarget = captured?.note ?? oneShotNoteTarget
+        let foreignTarget = captured.map { $0.foreign }
+            ?? (noteTarget == nil ? context.authoritativeForeignTargetForGesture() : nil)
         oneShotNoteTarget = nil
         entry.client(input, level) { [weak self] result in
             DispatchQueue.main.async {
@@ -380,6 +434,9 @@ final class OneShotRegistry {
                         historyID: UUID?, lateRecovery: Bool = false) {
         busy = false
         pending = nil
+        selectionResolution = nil
+        pendingSelectionLanding = nil
+        selectionLastRequestBuilder = nil
         defer { inFlightTimeoutDetail = nil }
         defer { context.note(context.readyHint) }
         // B13: the landing below is unchanged - the text still lands, or the selection is still left
@@ -410,16 +467,66 @@ final class OneShotRegistry {
         }
     }
 
+    // MARK: - VDASK-7 Option+P ask-back
+
+    /// Drop the registry latch when an Option+P flow finishes, cancels or parks. The frozen route/target and
+    /// the rebuilt-request builder belong to that flow, so they go with it.
+    private func releaseSelectionLatch() {
+        busy = false
+        pending = nil
+        selectionResolution = nil
+        pendingSelectionLanding = nil
+        selectionLastRequestBuilder = nil
+    }
+
+    /// The selected-text write: Option+P's own prompt, with the flow's answers block appended. The closure
+    /// captures the questions/answers it was given, so the first write and every request the transform client
+    /// rebuilds (the explicit retry) carry the same answers. No review means an empty list, so the block is
+    /// absent exactly as before.
+    private func writeCleanupSelection(input: String, level: CleanupLevel,
+                                       resolution: LLMRouteResolution,
+                                       questions: [AskBackQuestion] = [],
+                                       answers: [AskBackAnswer?] = [],
+                                       timeoutDetail: LocalStreamTimeoutDetail? = nil,
+                                       arming: TextTransformArming = .armed,
+                                       completion: @escaping (CleanupClient.Result) -> Void) {
+        let requestForBundle: TextTransformClient.RetryRequestBuilder = { [weak self] bundle in
+            let providerPrompt = Settings.modelsPower.effectiveDeveloperInstructions(
+                for: .promptPrep, provider: bundle.provider,
+                variant: .cleanup(level),
+                glossarySuffix: CorrectionDictionary.shared.contextGlossarySuffix())
+            let systemPrompt = AskBackAnswersBlock.appending(
+                to: providerPrompt, level: AskBackLevel(level), questions: questions, answers: answers)
+            let timeout = Settings.timeout(
+                local: Settings.cleanupTimeout, provider: bundle.provider)
+            return Self.makeCleanupSelectionRequest(
+                input: input, selected: bundle,
+                systemPrompt: systemPrompt, timeout: timeout,
+                timeoutDetail: timeoutDetail ?? self?.inFlightTimeoutDetail)
+        }
+        selectionLastRequestBuilder = requestForBundle
+        TextTransformClient.transformResolved(
+            resolution, route: .promptPrep, requestForBundle: requestForBundle,
+            local: localWriteForTest ?? CleanupClient.localAdapter(surface: .promptPrep),
+            claude: claudeWriteForTest ?? TextTransformClient.liveClaudeAdapter,
+            arming: arming, completion: completion)
+    }
+
+    /// VDASK-7 test seam: rebuild the last Option+P ask request exactly as an explicit retry would.
+    func selectionRetryRequestForTest(bundle: LLMProviderBundle) -> TextTransformRequest? {
+        selectionLastRequestBuilder?(bundle)
+    }
+
     // MARK: - Level picker (Option+P's async pre-step; routed from the coordinator's hotkey tap)
 
-    func pickerMoveLeft() { levelPicker.moveLeft(); refreshReplaceHighlight() }
-    func pickerMoveRight() { levelPicker.moveRight(); refreshReplaceHighlight() }
+    func pickerMoveLeft() { activeLevelPicker.moveLeft(); refreshReplaceHighlight() }
+    func pickerMoveRight() { activeLevelPicker.moveRight(); refreshReplaceHighlight() }
 
     /// BT4: recolor the Option+P replace highlight to the now-focused level as the pick moves. No-op when the
     /// selection is not in a note (`replaceHighlightNoteId` nil).
     private func refreshReplaceHighlight() {
         guard let id = replaceHighlightNoteId else { return }
-        let level = NotesReplaceHighlightLogic.from(CleanupLevel.clamped(levelPicker.selectedIndex))
+        let level = NotesReplaceHighlightLogic.from(CleanupLevel.clamped(activeLevelPicker.selectedIndex))
         context.updateReplaceHighlight(noteId: id, level: level.rawValue)
     }
 
@@ -432,15 +539,60 @@ final class OneShotRegistry {
 
     /// Return in the level picker: run the picked level's cleanup prompt over the captured text. The pick
     /// is persisted as the sticky last-used; there is no length gate (the level is an explicit pick).
+    /// VDASK-7: the level picker closes FIRST, then the frozen route + captured landing target are held for
+    /// the review/card wait. With ask-back on, Tighten/Summarize, a Claude/Codex route and >= 50 selected
+    /// words, the same ask flow a dictation take uses runs here; otherwise the write runs exactly as today.
     func commitLevelPick() {
         guard context.levelPickerActive, let p = pending else { return }
         context.levelPickerActive = false
-        let level = CleanupLevel.clamped(levelPicker.selectedIndex)
-        levelPicker.hide()
+        let level = CleanupLevel.clamped(activeLevelPicker.selectedIndex)
+        activeLevelPicker.hide()
         clearReplaceHighlight()   // BT4: committed — the transform will replace the text; drop the tint
 
         Settings.promptPrepLevel = level.rawValue   // sticky last-used, independent of the ?-slider
         context.hud.setThinking(true)
+
+        // Freeze Option+P's provider before the gate and capture its landing target before any wait (S8/S5).
+        let resolution = routeResolutionForTest?(.promptPrep) ?? Settings.promptPrepRouteResolution
+        selectionResolution = resolution
+        let noteTarget = oneShotNoteTarget
+        let foreignTarget = noteTarget == nil ? context.authoritativeForeignTargetForGesture() : nil
+        pendingSelectionLanding = (noteTarget, foreignTarget)
+        oneShotNoteTarget = nil
+
+        if let provider = resolution.bundle.map({ AskBackProvider($0.provider) }),
+           AskBackSelectionGate.asks(input: p.input, level: AskBackLevel(level),
+                                     provider: provider, enabled: Settings.askBackEnabled) {
+            let historyID = UUID()
+            let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void) -> Void = {
+                [weak self] questions, answers, done in
+                guard let self = self else { done(.unavailable("Option+P flow ended")); return }
+                let detail = LocalStreamTimeoutDetail()
+                self.inFlightTimeoutDetail = detail
+                self.writeCleanupSelection(input: p.input, level: level, resolution: resolution,
+                                           questions: questions, answers: answers,
+                                           timeoutDetail: detail, completion: done)
+            }
+            let writeDetached: ([AskBackQuestion], [AskBackAnswer?], @escaping (String?) -> Void) -> Void = {
+                [weak self] questions, answers, done in
+                guard let self = self else { done(nil); return }
+                self.writeCleanupSelection(input: p.input, level: level, resolution: resolution,
+                                           questions: questions, answers: answers,
+                                           timeoutDetail: LocalStreamTimeoutDetail(), arming: .inert) { result in
+                    if case .ok(let text) = result { done(text) } else { done(nil) }
+                }
+            }
+            let request = SelectionAskRequest(historyID: historyID, input: p.input, level: level,
+                                              resolution: resolution, noteTarget: noteTarget,
+                                              foreignTarget: foreignTarget, write: write,
+                                              writeDetached: writeDetached)
+            context.startSelectionAskBack(
+                request,
+                releaseLatch: { [weak self] in self?.releaseSelectionLatch() },
+                reacquireLatch: { [weak self] in self?.busy = true })
+            return
+        }
+
         runClient(p.entry, input: p.input, wordCount: nil, level: level,
                   inputSource: p.inputSource)
     }
@@ -449,10 +601,13 @@ final class OneShotRegistry {
     func cancelLevelPick() {
         guard context.levelPickerActive, let p = pending else { return }
         context.levelPickerActive = false
-        levelPicker.hide()
+        activeLevelPicker.hide()
         clearReplaceHighlight()   // BT4: canceled — text untouched; drop the tint
         pending = nil
         busy = false
+        selectionResolution = nil
+        pendingSelectionLanding = nil
+        selectionLastRequestBuilder = nil
         Log.write("\(p.entry.mode.id) canceled (esc) — text untouched")
         context.note(context.readyHint)
     }
@@ -512,22 +667,9 @@ final class OneShotRegistry {
                     // row's model is independent of the `?`-toggle model — mirroring how `promptPrepLevel`
                     // is P's own level. Any selected remote provider receives the same augmented prompt
                     // and fenced input (same Result contract, same in-place landing).
-                    let resolution = Settings.promptPrepRouteResolution
-                    let requestForBundle: TextTransformClient.RetryRequestBuilder = { bundle in
-                        let providerPrompt = Settings.modelsPower.effectiveDeveloperInstructions(
-                            for: .promptPrep, provider: bundle.provider,
-                            variant: .cleanup(level!),
-                            glossarySuffix: CorrectionDictionary.shared.contextGlossarySuffix())
-                        let timeout = Settings.timeout(
-                            local: Settings.cleanupTimeout, provider: bundle.provider)
-                        return Self.makeCleanupSelectionRequest(
-                            input: input, selected: bundle,
-                            systemPrompt: providerPrompt, timeout: timeout,
-                            timeoutDetail: self?.inFlightTimeoutDetail)
-                    }
-                    TextTransformClient.transformResolved(
-                        resolution, route: .promptPrep, requestForBundle: requestForBundle,
-                        local: CleanupClient.localAdapter(surface: .promptPrep), completion: done)
+                    let resolution = self?.selectionResolution ?? Settings.promptPrepRouteResolution
+                    self?.writeCleanupSelection(input: input, level: level!, resolution: resolution,
+                                                completion: done)
                 },
                 runLog: { input, _, level in "\(m.id) run level=\(level!.label) (\(input.count) chars)" },
                 landNonDestructive: nil)

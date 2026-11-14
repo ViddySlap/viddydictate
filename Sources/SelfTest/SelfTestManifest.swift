@@ -277,7 +277,8 @@ private let selfTestManifestDefinitions: [SelfTestManifestFlag: SelfTestManifest
         let askControllerOK = AskBackControllerSelfTest.run()   // VDASK-3 controller trace
         let askPillOK = AskBackPillSelfTest.run()     // VDASK-5 compact pill and the ? toggle
         let askHistoryOK = AskBackHistorySelfTest.run()   // VDASK-6 History row
-        return transformOK && askBackOK && askFlowOK && askControllerOK && askPillOK && askHistoryOK ? 0 : 1
+        let askOneShotOK = AskBackOneShotSelfTest.run()   // VDASK-7 Option+P gate
+        return transformOK && askBackOK && askFlowOK && askControllerOK && askPillOK && askHistoryOK && askOneShotOK ? 0 : 1
     },
     .codexProviderSelftest: .init(tier: .deterministic) { _ in
         CodexProviderSelfTest.run() ? 0 : 1

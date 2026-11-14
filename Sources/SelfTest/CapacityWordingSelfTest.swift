@@ -215,6 +215,9 @@ enum CapacityWordingSelfTest {
         func clearReplaceHighlight(noteId: String) {}
         func authoritativeNoteTargetForGesture() -> NotesDictationTarget? { nil }
         func authoritativeForeignTargetForGesture() -> DictationTarget? { nil }
+        func startSelectionAskBack(_ request: SelectionAskRequest,
+                                   releaseLatch: @escaping () -> Void,
+                                   reacquireLatch: @escaping () -> Void) {}
     }
 
     /// Keeps the HUD, the fake context and the registry alive together. `OneShotRegistry` stores its

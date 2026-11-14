@@ -8,6 +8,19 @@ import Foundation
 // from an injected schedule, and the clock is injected, so tests drive it with a fake clock and fake hooks.
 // All entry points run on the main thread.
 
+// MARK: - Option+P review gate
+
+/// VDASK-7: Option+P asks on the SAME gate a dictation take uses, run against the selected text.
+/// The registry passes the frozen prompt-prep provider; the picked level is the level (Option+P has no
+/// length downgrade, so there is no `effectiveLevel` step here). Kept as a pure seam so the four
+/// conditions and the 49/50-word boundary are pinned on Linux with the rest of the flow.
+enum AskBackSelectionGate {
+    static func asks(input: String, level: AskBackLevel, provider: AskBackProvider, enabled: Bool) -> Bool {
+        AskBackReview.gate(wordCount: AskBackReview.wordCount(input), level: level,
+                           provider: provider, enabled: enabled)
+    }
+}
+
 // MARK: - answers
 
 /// How a question was answered. Raw values are what History stores.

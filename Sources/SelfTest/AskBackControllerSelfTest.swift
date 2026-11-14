@@ -60,6 +60,25 @@ private final class TraceCard: AskCardPresenting {
     var lastStatus: String? { statuses.last?.1 }
 }
 
+/// VDASK-7: the level picker without a window. It mirrors `LevelPickerPanel`'s three-way index so the
+/// real commit path (and the real "closed before the card" order) runs headless.
+private final class TracePicker: LevelPickerPresenting {
+    private(set) var selectedIndex = CleanupLevel.tighten.rawValue
+    private(set) var shows = 0
+    private(set) var hides = 0
+    func show(selected: Int) { selectedIndex = CleanupLevel.clamped(selected).rawValue; shows += 1 }
+    func moveLeft() { selectedIndex = CleanupLevel.clamped(selectedIndex - 1).rawValue }
+    func moveRight() { selectedIndex = CleanupLevel.clamped(selectedIndex + 1).rawValue }
+    func hide() { hides += 1 }
+}
+
+/// VDASK-7: where the selected text's captured note target receives the transform. A headless row has no
+/// editor, so the notes-delivery callback records the landing instead.
+private final class TraceNotes {
+    var target: NotesDictationTarget?
+    var delivered: [(noteId: String, text: String)] = []
+}
+
 private final class TraceClock {
     var now = 0.0
     private var nextID = 0
@@ -103,6 +122,8 @@ private final class TraceRig {
     let hud = TraceHUD()
     let hook = TraceHook()
     let card = TraceCard()
+    let picker = TracePicker()
+    let notes = TraceNotes()
     let pasteboard: NSPasteboard
     let store: TranscriptionHistory
     let root: URL
@@ -142,8 +163,11 @@ private final class TraceRig {
         previousStore = TranscriptionHistory.shared
         TranscriptionHistory.shared = store
         let notesCallbacks = NotesDeliveryCallbacks(
-            onSnapshotNoteTarget: { _ in nil },
-            onDeliverToNoteTarget: { _, _ in .noWindow },
+            onSnapshotNoteTarget: { [notes] _ in notes.target },
+            onDeliverToNoteTarget: { [notes] target, text in
+                notes.delivered.append((noteId: target.noteId, text: text))
+                return .delivered
+            },
             onInsertIntoActiveNote: { _ in .noWindow },
             onResolveReplaceHighlightTarget: { nil },
             onShowReplaceHighlight: { _, _, _ in },
@@ -179,6 +203,9 @@ private final class TraceRig {
         ctl.askSeams.voiceDiscard = { [unowned self] in voiceDiscards += 1 }
         ctl.askSeams.voiceTranscribe = { [unowned self] done in voiceDone.append(done) }
         ctl.askSeams.abPickerShow = { [unowned self] raw, cleaned in abShown.append((raw, cleaned)) }
+        ctl.traceSetOneShotLevelPicker(picker)
+        ctl.traceSetOneShotClaudeWrite { [unowned self] request, done in writes.append((request, done)) }
+        ctl.traceSetOneShotLocalWrite { [unowned self] request, done in writes.append((request, done)) }
         ctl.installHotkeyCallbacks()      // the monitor's callbacks reach this controller, as in production (no tap)
         observer = NotificationCenter.default.addObserver(
             forName: TextTransformRetryCenter.didChange, object: TextTransformRetryCenter.shared, queue: nil) { [weak self] _ in
@@ -210,6 +237,25 @@ private final class TraceRig {
     }
     func answerReview(_ json: String = traceReviewJSON) {
         reviews.last?.done(.text(json))
+        traceSettle()
+    }
+    /// VDASK-7: run Option+P headlessly: a synthetic selection, the frozen route, the real level picker
+    /// commit. `noteId` installs the selection's captured landing target (a sticky note) so the landing can
+    /// be observed without a field.
+    func optionP(_ text: String, level: CleanupLevel = .tighten,
+                 resolution: LLMRouteResolution = .pinned(.claude("claude-trace-model")),
+                 noteId: String? = nil) {
+        if let noteId {
+            let target = NotesDictationTarget(noteId: noteId)
+            notes.target = target
+            ctl.notesDelivery.noteTarget = target
+        }
+        ctl.traceSetOneShotResolution(resolution)
+        ctl.traceSetSelectionCapture { text }
+        Settings.promptPrepLevel = level.rawValue
+        ctl.traceRunOptionP()
+        traceSettle()
+        ctl.traceCommitLevelPick()
         traceSettle()
     }
     func key(_ code: Int64, option: Bool = false) -> Bool {
@@ -292,6 +338,7 @@ enum AskBackControllerSelfTest {
         let savedEnabled = Settings.askBackEnabled
         let savedTier = Settings.askBackTier
         let savedTailCheck = Settings.tailCheckEnabled
+        let savedPrepLevel = Settings.promptPrepLevel
         Settings.askBackEnabled = true
         Settings.askBackTier = .careful
         Settings.tailCheckEnabled = true
@@ -299,6 +346,7 @@ enum AskBackControllerSelfTest {
             Settings.askBackEnabled = savedEnabled
             Settings.askBackTier = savedTier
             Settings.tailCheckEnabled = savedTailCheck
+            Settings.promptPrepLevel = savedPrepLevel
             Settings.isDictationActive = false
         }
 
@@ -1643,6 +1691,165 @@ enum AskBackControllerSelfTest {
             on.startTake()
             check("chip: clicked back on while recording, that take reviews", Settings.askBackEnabled == true
                   && on.reviews.count == 1 && on.state == "reviewing")
+        }
+
+
+        // ---------------------------------------------------------------- VDASK-7: Option+P asks on the selected text
+        do {
+            Settings.askBackEnabled = true
+
+            // A 64-word selection, Tighten, Claude: review -> card -> tap -> one write with the answer, landing
+            // at the target captured before the card, latch released, one History entry with the record.
+            let rig = TraceRig(); defer { rig.close() }
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: "note-tap")
+            check("oneshot trace: Option+P Tighten Claude 60+ words starts one review with the level picker already closed",
+                  rig.reviews.count == 1 && rig.writes.isEmpty && rig.card.shown.isEmpty
+                    && rig.picker.hides == 1 && !rig.hotkey.levelPickerActive && rig.ctl.traceOneShotBusy)
+            check("oneshot trace: the review runs against the selected text, marked as a selection",
+                  rig.reviews.first?.input == traceTranscript
+                    && rig.reviews.first?.system.contains("a piece of selected text") == true)
+            rig.answerReview()
+            check("oneshot trace: the review opens the card, and the level picker is not reopened",
+                  rig.card.shown.count == 1 && rig.state == "asking" && rig.hotkey.askCardActive
+                    && rig.picker.shows == 1 && rig.picker.hides == 1 && rig.writes.isEmpty)
+            rig.pressDown(); rig.clock.advance(by: 0.1); traceSettle(); rig.release(); rig.clock.advance(by: 0.4); traceSettle()
+            check("oneshot trace: one tap answers the card and starts exactly one write carrying that answer",
+                  rig.writes.count == 1 && rig.state == "writing"
+                    && rig.writes[0].request.systemPrompt.contains("1. Q: Which day?\n   A: Friday") == true)
+            let retry = rig.ctl.traceSelectionRetryRequest(bundle: .claude("write-model"))
+            check("oneshot trace: an explicit retry rebuilds the same request, so it reuses the same answers",
+                  retry?.systemPrompt.contains("A: Friday") == true
+                    && retry?.sourceText == traceTranscript && retry?.bundle == .claude("write-model"))
+            rig.finishWrite(traceCleaned)
+            let entries = rig.store.all()
+            check("oneshot trace: the write lands once at the captured note target, never as a paste",
+                  rig.notes.delivered.count == 1 && rig.notes.delivered[0].noteId == "note-tap"
+                    && rig.notes.delivered[0].text == traceCleaned && rig.hook.finals.isEmpty)
+            check("oneshot trace: the Option+P latch is released and the controller is idle",
+                  !rig.ctl.traceOneShotBusy && rig.state == "idle" && !rig.hotkey.takeActive)
+            check("oneshot trace: History has one entry with the landed text, status done and the tap answer",
+                  entries.count == 1 && entries[0].status == "done" && entries[0].text == traceCleaned
+                    && entries[0].mode == HistoryMode.cleanupSelection.rawValue
+                    && entries[0].askBack?.questions.first?.answer == "Friday"
+                    && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.tap.rawValue)
+        }
+        do {
+            // The same flow with a voice answer.
+            Settings.askBackEnabled = true
+            let rig = TraceRig(); defer { rig.close() }
+            rig.optionP(traceTranscript, level: .summarize,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: "note-voice")
+            rig.answerReview()
+            rig.holdSlash(0.5)
+            rig.answerVoice("Monday")
+            check("oneshot trace voice: a held / answers the Option+P card and starts one write with the transcript",
+                  rig.writes.count == 1 && rig.state == "writing"
+                    && rig.writes[0].request.systemPrompt.contains("A: Monday") == true)
+            rig.finishWrite("Voice landed.")
+            let entries = rig.store.all()
+            check("oneshot trace voice: the answer lands at the captured target and History records how it was answered",
+                  rig.notes.delivered == [("note-voice", "Voice landed.")] && rig.hook.finals.isEmpty
+                    && entries.count == 1 && entries[0].status == "done"
+                    && entries[0].askBack?.questions.first?.answer == "Monday"
+                    && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.voice.rawValue)
+        }
+        do {
+            // Esc on the card: the agent decides, one write, the normal landing.
+            Settings.askBackEnabled = true
+            let rig = TraceRig(); defer { rig.close() }
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.codex("gpt-trace")), noteId: "note-esc")
+            rig.answerReview()
+            check("oneshot trace: Esc on an Option+P card is swallowed and writes with the agent deciding",
+                  rig.key(TKey.esc) && rig.writes.count == 1
+                    && rig.writes[0].request.systemPrompt.contains(AskBackAnswersBlock.noAnswer))
+            rig.finishWrite("Decided by the agent.")
+            check("oneshot trace: the agent-decided Option+P write lands once at the captured target",
+                  rig.notes.delivered == [("note-esc", "Decided by the agent.")] && rig.hook.finals.isEmpty
+                    && rig.store.all().first?.askBack?.questions.first?.how == AskBackAnswerHow.agentDecided.rawValue)
+        }
+        do {
+            // The four no-review cases: local route, Cleanup level, 49 words, ask-back off.
+            Settings.askBackEnabled = true
+            let local = TraceRig(); defer { local.close() }
+            local.optionP(traceTranscript, level: .tighten,
+                          resolution: .pinned(.local("local-trace")), noteId: "note-local")
+            check("oneshot trace: a local Option+P route never reviews and writes at once",
+                  local.reviews.isEmpty && local.writes.count == 1 && local.ctl.traceAskFlow == nil)
+            local.finishWrite("Local landed.")
+            check("oneshot trace: the local write still lands through Option+P's normal path",
+                  local.notes.delivered == [("note-local", "Local landed.")] && local.store.all().first?.askBack == nil)
+
+            let cleanup = TraceRig(); defer { cleanup.close() }
+            cleanup.optionP(traceTranscript, level: .cleanup,
+                            resolution: .pinned(.claude("claude-trace-model")), noteId: "note-cleanup")
+            check("oneshot trace: Cleanup picked on Option+P never reviews",
+                  cleanup.reviews.isEmpty && cleanup.writes.count == 1 && cleanup.ctl.traceAskFlow == nil)
+            cleanup.finishWrite("Cleanup landed.")
+
+            let short = TraceRig(); defer { short.close() }
+            let words49 = (1...49).map { "selected\($0)" }.joined(separator: " ")
+            short.optionP(words49, level: .summarize,
+                          resolution: .pinned(.claude("claude-trace-model")), noteId: "note-49")
+            check("oneshot trace: 49 selected words never review",
+                  short.reviews.isEmpty && short.writes.count == 1 && short.ctl.traceAskFlow == nil)
+            short.finishWrite("Short landed.")
+
+            Settings.askBackEnabled = false
+            let off = TraceRig(); defer { off.close() }
+            off.optionP(traceTranscript, level: .summarize,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: "note-off")
+            check("oneshot trace: ask-back off never reviews even on a long selection",
+                  off.reviews.isEmpty && off.writes.count == 1 && off.ctl.traceAskFlow == nil)
+            off.finishWrite("Off landed.")
+            Settings.askBackEnabled = true
+        }
+        do {
+            // Review timeout: no card, one write with no answers block.
+            Settings.askBackEnabled = true
+            let rig = TraceRig(); defer { rig.close() }
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: "note-timeout")
+            check("oneshot trace: the timeout case starts the review and no card", rig.reviews.count == 1 && rig.card.shown.isEmpty)
+            rig.clock.advance(by: 90); traceSettle()
+            check("oneshot trace: a timed-out review writes once with no questions and opens no card",
+                  rig.card.shown.isEmpty && rig.writes.count == 1
+                    && rig.writes[0].request.systemPrompt.contains("already answered") == false)
+            rig.finishWrite("Timeout landed.")
+            check("oneshot trace: the timed-out review's write lands normally",
+                  rig.notes.delivered == [("note-timeout", "Timeout landed.")] && rig.ctl.traceAskFlow?.phase == .finished)
+        }
+        do {
+            // A right-Option hold on an Option+P card: the card closes, the latch drops at once, the old
+            // write becomes a detached save-only job (agent decides, History only, no landing, no HUD).
+            Settings.askBackEnabled = true
+            let rig = TraceRig(); defer { rig.close() }
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: "note-hold")
+            rig.answerReview()
+            let hidesBefore = rig.card.hides
+            rig.pressDown(); rig.clock.advance(by: 0.6); traceSettle()
+            check("oneshot trace hold: the hold closes the card, starts the new take and releases the Option+P latch at once",
+                  rig.card.hides > hidesBefore && !rig.hotkey.askCardActive && !rig.ctl.traceOneShotBusy
+                    && rig.state == "recording" && rig.newTakeStates == ["idle"]
+                    && rig.ctl.traceParkedFlow?.phase == .parked && rig.writes.isEmpty)
+            let hudBeforeRelease = rig.hud.log.count
+            rig.release()
+            check("oneshot trace hold: the release detaches the old take's one write with the agent deciding",
+                  rig.writes.count == 1 && rig.ctl.traceParkedFlow == nil
+                    && rig.writes[0].request.systemPrompt.contains(AskBackAnswersBlock.noAnswer))
+            let hudBeforeDetached = rig.hud.log.count
+            rig.writes.last?.done(.ok("Detached selection.")); traceSettle()
+            check("oneshot trace hold: the detached Option+P write touches no HUD, lands nowhere and is not held for a paste",
+                  rig.hud.log.count == hudBeforeDetached && rig.notes.delivered.isEmpty && rig.hook.finals.isEmpty
+                    && rig.heldCount() == 0 && !rig.ctl.traceOneShotBusy)
+            let entries = rig.store.all()
+            check("oneshot trace hold: History has the detached result, status done, with the open question marked new take",
+                  entries.count == 1 && entries[0].status == "done" && entries[0].text == "Detached selection."
+                    && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.newTake.rawValue)
+            check("oneshot trace hold: the parked new take still ended on its own (nothing heard), not torn down by the job",
+                  rig.state == "idle" && rig.toasts.contains("toast:Nothing heard") && hudBeforeRelease < hudBeforeDetached)
         }
 
         print(check.summaryLine(prefix: "[askback-controller-selftest]"))

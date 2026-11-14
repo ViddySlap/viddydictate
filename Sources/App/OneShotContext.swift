@@ -12,6 +12,24 @@ import Cocoa
 /// client of this seam; pieces 9-10 widen it as the transcript-acting flows are extracted. Piece 9 (Email)
 /// added the transcript-take trio (`takeHasSpeech` / `finalizeTakeAndTranscribe` / `markTakeConsumed`);
 /// piece 10 (Search) reuses that trio unchanged. It is deliberately narrow: only what a flow actually uses.
+/// VDASK-7: what the registry hands the coordinator to run the selected-text ask-back flow. The registry
+/// owns the frozen prompt-prep provider and the write request (including the answers block, so the first
+/// write and a rebuilt retry carry the same answers); the coordinator owns the review runner, card, keys,
+/// voice answer, History and the detached save-only job, exactly as it does for a dictation take.
+struct SelectionAskRequest {
+    let historyID: UUID
+    let input: String
+    let level: CleanupLevel
+    let resolution: LLMRouteResolution
+    /// The selection's landing target, captured before the review/card wait. The card never changes it.
+    let noteTarget: NotesDictationTarget?
+    let foreignTarget: DictationTarget?
+    /// The first write (and every rebuilt retry) for this flow.
+    let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void) -> Void
+    /// The detached save-only write after a right-Option hold on the card. It returns text for History only.
+    let writeDetached: ([AskBackQuestion], [AskBackAnswer?], @escaping (String?) -> Void) -> Void
+}
+
 protocol OneShotContext: AnyObject {
     /// The shared HUD (toast / thinking ring / hide). The flows surface their status through it exactly
     /// as the inline methods did.
@@ -114,4 +132,11 @@ protocol OneShotContext: AnyObject {
     /// ViddyDictate's Settings window after focus has moved, so the landing closure must retain this target
     /// instead of pasting into whichever Settings control happens to be focused.
     func authoritativeForeignTargetForGesture() -> DictationTarget?
+
+    /// VDASK-7: host the same ask-back flow for Option+P's selected text. `releaseLatch` drops the registry's
+    /// busy latch when the card parks (a new take), the flow finishes landing, or it is cancelled; `reacquire`
+    /// takes it back if an Option+Esc under the hold resumes the old Option+P take.
+    func startSelectionAskBack(_ request: SelectionAskRequest,
+                               releaseLatch: @escaping () -> Void,
+                               reacquireLatch: @escaping () -> Void)
 }
