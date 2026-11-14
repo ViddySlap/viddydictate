@@ -11,6 +11,7 @@ enum AskBackHistorySelfTest {
         let histSrc = (try? String(
             contentsOf: URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("App/HistoryWindow.swift"), encoding: .utf8)) ?? ""
+        let selfSrc = (try? String(contentsOf: URL(fileURLWithPath: #file), encoding: .utf8)) ?? ""
         // BEGIN history-rows
         func qn(_ question: String, answer: String? = nil, how: String? = nil) -> AskBackRecord.Question {
             AskBackRecord.Question(question: question, quote: "q", why: "w", options: ["a", "b"], answer: answer, how: how)
@@ -118,6 +119,17 @@ enum AskBackHistorySelfTest {
         check("wiring (row): collapsed or without a record the answers block is hidden and adds no height",
               layout.contains("} else {\n            answersLabel.isHidden = true\n        }\n        return bottom + padBottom")
                 && layout.contains("var bottom = textY + shownH"))
+        check("wiring (row): the answers label shows the helper's answers text for the entry's record",
+              rowSrc.contains("answersLabel.stringValue = entry.askBack.map { AskBackHistoryFormat.answersText($0) } ?? \"\""))
+        check("wiring (row): the answers label wraps and is not limited to one line",
+              rowSrc.contains("answersLabel.maximumNumberOfLines = 0")
+                && rowSrc.contains("answersLabel.lineBreakMode = .byWordWrapping"))
+        check("wiring (row): expanded, the answers sit below the body, measured at the text width",
+              layout.contains("let answersH = HistoryFormat.textHeight(answersLabel.stringValue, font: answersFont, width: textW)")
+                && layout.contains("answersLabel.frame = NSRect(x: padX, y: bottom + gap, width: textW, height: answersH)"))
+        check("wiring (row): expanded, the row height includes the gap and the answers",
+              layout.contains("bottom += gap + answersH")
+                && layout.contains("return bottom + padBottom"))
         check("wiring (row): the collapsed height and fade still come from the three-line text rule",
               layout.contains("let collapsedH = ceil(lineH * 3)")
                 && layout.contains("let shownH = expanded ? fullH : min(fullH, collapsedH)")
@@ -126,9 +138,30 @@ enum AskBackHistorySelfTest {
               rowSrc.contains("TargetResolver.copyToClipboard(entry.original)")
                 && rowSrc.contains("TargetResolver.copyToClipboard(entry.cleaned ?? entry.text)")
                 && !rowSrc.contains("copyToClipboard(answersLabel") && !rowSrc.contains("copyToClipboard(AskBackHistoryFormat"))
+        // The round-trip rows below call TranscriptionHistory.record, which also appends to the real
+        // DictationHistoryStore. Pin the guard that keeps them out of the user's real history.
+        let afterRows = selfSrc.range(of: "// END " + "history-rows").map { String(selfSrc[$0.upperBound...]) } ?? ""
+        let guardAt = afterRows.range(of: "Settings.keepFullHistory = false")?.lowerBound
+        let recordAt = afterRows.range(of: "store.record(")?.lowerBound
+        check("self-test guard: full history is switched off before the round-trip row records",
+              guardAt != nil && recordAt != nil && guardAt! < recordAt!)
+        check("self-test guard: the defaults domain is restored on exit",
+              afterRows.contains("defaults.persistentDomain(forName: domain)")
+                && afterRows.contains("defaults.setPersistentDomain(before, forName: domain)")
+                && afterRows.contains("defaults.removePersistentDomain(forName: domain)"))
         // END history-rows
 
-        // history.json round trip on the real store: with and without askBack.
+        // history.json round trip on a scratch store: with and without askBack. record() also writes the real
+        // full history, so keep it off and restore the defaults, as TranscriptionHistorySelfTest does.
+        Settings.registerDefaults()
+        let defaults = UserDefaults.standard
+        let domain = Bundle.main.bundleIdentifier ?? AppIdentity.bundleID
+        let before = defaults.persistentDomain(forName: domain)
+        defer {
+            if let before = before { defaults.setPersistentDomain(before, forName: domain) }
+            else { defaults.removePersistentDomain(forName: domain) }
+        }
+        Settings.keepFullHistory = false   // M1: no write to the real full history
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("vd-askhist-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -143,7 +176,7 @@ enum AskBackHistorySelfTest {
               plain?.askBack == nil && plain?.status == nil && plain?.text == "Plain text.")
         check("history.json round trip: a pending entry decodes with its record, empty text and the status the store left",
               pending?.askBack == r1 && pending?.text == "" && pending?.raw == "pending transcript"
-                && (pending?.status == "asking" || pending?.status == "unanswered at quit"))
+                && pending?.status == AskBackHistoryStatus.unansweredAtQuit)
 
         print(check.summaryLine(prefix: "[askback-history-selftest]"))
         return check.passed
