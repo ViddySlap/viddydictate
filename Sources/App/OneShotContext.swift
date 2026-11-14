@@ -24,8 +24,12 @@ struct SelectionAskRequest {
     /// The selection's landing target, captured before the review/card wait. The card never changes it.
     let noteTarget: NotesDictationTarget?
     let foreignTarget: DictationTarget?
-    /// The first write (and every rebuilt retry) for this flow.
-    let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void) -> Void
+    /// The first write plus its explicit-retry landing. The retry closure is deliberately separate from the
+    /// flow's one-shot write completion: after the first write finishes the flow is `.finished`, so passing its
+    /// completion to the retry center would silently drop a confirmed Retry. Both closures carry the captured
+    /// answers, destination and History id through the same request builder.
+    let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void,
+                @escaping (CleanupClient.Result) -> Void) -> Void
     /// The detached save-only write after a right-Option hold on the card. It returns text for History only.
     let writeDetached: ([AskBackQuestion], [AskBackAnswer?], @escaping (String?) -> Void) -> Void
 }

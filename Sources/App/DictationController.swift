@@ -215,6 +215,11 @@ final class DictationController {
         /// clipboard park runs), or pastes and calls the completion when the paste check and clipboard restore
         /// would have finished. A headless row cannot reach a focused field.
         var livePaste: ((_ text: String, _ onComplete: @escaping () -> Void) -> Bool)?
+        /// Stands in for a captured foreign target's paste (focus check, activation and clipboard work): a
+        /// headless row records the destination instead of touching another app's field.
+        var capturedTargetPaste: ((_ text: String, _ target: DictationTarget,
+                                   _ settled: @escaping () -> Void,
+                                   _ completion: @escaping (TargetResolver.CapturedTargetLandingOutcome) -> Void) -> Void)?
         /// VDASK-4 voice answer: stand in for the take's audio recorder and transcriber. `voiceStart` returns
         /// false for a busy or unpermitted mic; `voiceDiscard` stops capture; `voiceTranscribe` stops capture and
         /// hands the transcript (nil: failed) to the closure it is given, whenever the fake chooses.
@@ -999,10 +1004,11 @@ final class DictationController {
         _ text: String,
         foreignTarget: DictationTarget?,
         lateRecovery: Bool,
+        preferCapturedForeignTarget: Bool = false,
         settled: @escaping () -> Void,
         completion: @escaping (TargetResolver.CapturedTargetLandingOutcome) -> Void
     ) {
-        if !lateRecovery, callbacks.notesWindowIsKey(),
+        if !lateRecovery, !preferCapturedForeignTarget, callbacks.notesWindowIsKey(),
            notesDelivery.insertIntoActiveNote(text) == .delivered {
             Log.write("selection-transform landed via sticky-note bridge (\(text.count) chars)")
             completion(.landed)
@@ -1010,6 +1016,10 @@ final class DictationController {
             return
         }
         if let foreignTarget = foreignTarget {
+            if let fake = askSeams.capturedTargetPaste {
+                fake(text, foreignTarget, settled, completion)
+                return
+            }
             if lateRecovery {
                 TargetResolver.pasteIntoCapturedTargetWithoutActivation(
                     text, target: foreignTarget, settled: settled, completion: completion)
@@ -1043,6 +1053,21 @@ final class DictationController {
                                       noteTarget: NotesDictationTarget?,
                                       foreignTarget: DictationTarget?, historyID: UUID?,
                                       lateRecovery: Bool = false) {
+        landInPlaceTransform(result, input: input, mode: mode, level: level, wireUndo: wireUndo,
+                             uiNoun: uiNoun, logNoun: logNoun, levelLabel: levelLabel,
+                             inputSource: inputSource, noteTarget: noteTarget,
+                             foreignTarget: foreignTarget, preferCapturedForeignTarget: false,
+                             lateRecovery: lateRecovery, historyID: historyID)
+    }
+
+    /// VDASK-7 repair: the Option+P ask path can require its captured foreign destination even if Notes
+    /// became key during the review/cards. The ordinary in-place routes keep the legacy active-note bridge.
+    private func landInPlaceTransform(_ result: CleanupClient.Result, input: String, mode: HistoryMode,
+                                      level: Int?, wireUndo: Bool, uiNoun: String, logNoun: String,
+                                      levelLabel: String?, inputSource: NotesBullseyeLogic.InputSource,
+                                      noteTarget: NotesDictationTarget?,
+                                      foreignTarget: DictationTarget?, preferCapturedForeignTarget: Bool,
+                                      lateRecovery: Bool, historyID: UUID?) {
         switch result {
         case .ok(let transformed):
             let levelSuffix = levelLabel.map { ", level=\($0)" } ?? ""
@@ -1092,7 +1117,9 @@ final class DictationController {
             // and clipboard restore have finished (the registry's latch drops before this landing starts).
             let settle = beginDelivery()
             landSelectionTransform(transformed, foreignTarget: foreignTarget,
-                                   lateRecovery: lateRecovery, settled: settle) {
+                                   lateRecovery: lateRecovery,
+                                   preferCapturedForeignTarget: preferCapturedForeignTarget,
+                                   settled: settle) {
                 [weak self] outcome in
                 guard let self = self else { return }
                 if outcome.didLand {
@@ -1684,7 +1711,16 @@ final class DictationController {
                 self?.hud.update(state: "Cleaning…", target: self?.target?.label, text: "", locked: false)
                 self?.hud.setThinking(true)
                 self?.note("cleaning")
-                request.write(spec.questions, spec.answers) { result in
+                // The explicit-retry landing is NOT the flow's write completion: that completion is already
+                // `.finished` after the first attempt and would drop a confirmed Retry. It lands through the
+                // same captured request (answers, destination and History id) without touching the flow again.
+                let retryLanding: TextTransformClient.Completion = { [weak self] result in
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        self.landSelectionAskResult(result, request: request)
+                    }
+                }
+                request.write(spec.questions, spec.answers, { result in
                     DispatchQueue.main.async {
                         guard let self = self else { return }
                         var ok = false
@@ -1694,7 +1730,7 @@ final class DictationController {
                             release()
                         }
                     }
-                }
+                }, retryLanding)
             },
             history: { [weak self] event in
                 TranscriptionHistory.shared.apply(event, app: self?.target?.label ?? "")
@@ -1733,7 +1769,8 @@ final class DictationController {
                              uiNoun: "Transform", logNoun: "prompt-prep",
                              levelLabel: request.level.label, inputSource: .selection,
                              noteTarget: request.noteTarget, foreignTarget: request.foreignTarget,
-                             historyID: request.historyID)
+                             preferCapturedForeignTarget: request.foreignTarget != nil,
+                             lateRecovery: false, historyID: request.historyID)
         // Same B13 offer the normal Option+P tail shows. A detached job never reaches here.
         if case .unavailable = result, let feature = PointOfUseFeature.forRoute(.promptPrep) {
             PointOfUseOfferPresenter.shared.presentOffer(for: feature)
@@ -2494,8 +2531,14 @@ extension DictationController {
     func traceSetOneShotClaudeWrite(_ write: TextTransformClient.AsyncAdapter?) {
         oneShot.claudeWriteForTest = write
     }
+    func traceSetOneShotCodexWrite(_ write: TextTransformClient.AsyncAdapter?) {
+        oneShot.codexWriteForTest = write
+    }
     func traceSetOneShotLocalWrite(_ write: TextTransformClient.AsyncAdapter?) {
         oneShot.localWriteForTest = write
+    }
+    func traceSetForeignTarget(_ target: DictationTarget?) {
+        self.target = target
     }
     func traceSelectionRetryRequest(bundle: LLMProviderBundle) -> TextTransformRequest? {
         oneShot.selectionRetryRequestForTest(bundle: bundle)

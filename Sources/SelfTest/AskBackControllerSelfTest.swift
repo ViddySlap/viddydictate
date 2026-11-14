@@ -77,6 +77,7 @@ private final class TracePicker: LevelPickerPresenting {
 private final class TraceNotes {
     var target: NotesDictationTarget?
     var delivered: [(noteId: String, text: String)] = []
+    var activeInserted: [String] = []
 }
 
 private final class TraceClock {
@@ -154,6 +155,9 @@ private final class TraceRig {
     var voiceStarts = 0
     var voiceDiscards = 0
     var voiceDone: [(String?) -> Void] = []
+    /// VDASK-7 repair rows: a captured foreign destination and whether Notes became key during the card.
+    var notesKey = false
+    var capturedTargets: [(label: String, text: String)] = []
 
     init() {
         pasteboard = NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("askback-ctl-selftest-\(UUID().uuidString)")))
@@ -168,7 +172,10 @@ private final class TraceRig {
                 notes.delivered.append((noteId: target.noteId, text: text))
                 return .delivered
             },
-            onInsertIntoActiveNote: { _ in .noWindow },
+            onInsertIntoActiveNote: { [notes] text in
+                notes.activeInserted.append(text)
+                return .delivered
+            },
             onResolveReplaceHighlightTarget: { nil },
             onShowReplaceHighlight: { _, _, _ in },
             onClearReplaceHighlight: { _ in },
@@ -178,7 +185,7 @@ private final class TraceRig {
         ctl = DictationController(
             callbacks: DictationControllerCallbacks(
                 onStateChange: { _ in }, onOpenSettings: {}, onOpenDictionary: {}, onOpenHistory: {}, onOpenNotes: {},
-                notesWindowIsKey: { false }, onCleanupModeChange: { _ in }),
+                notesWindowIsKey: { [unowned self] in self.notesKey }, onCleanupModeChange: { _ in }),
             notesDelivery: NotesDeliveryCoordinator(callbacks: notesCallbacks),
             tailCheckHook: hook,
             clipboardPasteboard: pasteboard,
@@ -203,8 +210,14 @@ private final class TraceRig {
         ctl.askSeams.voiceDiscard = { [unowned self] in voiceDiscards += 1 }
         ctl.askSeams.voiceTranscribe = { [unowned self] done in voiceDone.append(done) }
         ctl.askSeams.abPickerShow = { [unowned self] raw, cleaned in abShown.append((raw, cleaned)) }
+        ctl.askSeams.capturedTargetPaste = { [unowned self] text, target, settled, completion in
+            capturedTargets.append((target.label, text))
+            completion(.landed)
+            settled()
+        }
         ctl.traceSetOneShotLevelPicker(picker)
         ctl.traceSetOneShotClaudeWrite { [unowned self] request, done in writes.append((request, done)) }
+        ctl.traceSetOneShotCodexWrite { [unowned self] request, done in writes.append((request, done)) }
         ctl.traceSetOneShotLocalWrite { [unowned self] request, done in writes.append((request, done)) }
         ctl.installHotkeyCallbacks()      // the monitor's callbacks reach this controller, as in production (no tap)
         observer = NotificationCenter.default.addObserver(
@@ -1753,6 +1766,71 @@ enum AskBackControllerSelfTest {
                     && entries.count == 1 && entries[0].status == "done"
                     && entries[0].askBack?.questions.first?.answer == "Monday"
                     && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.voice.rawValue)
+        }
+        do {
+            // M1/S1: a real explicit retry after a failed Option+P ask. The route is Codex and every write
+            // goes to the fake Codex adapter, so neither the provider nor the CLI can run. The first write
+            // fails, the REAL Retry center is confirmed with a provider bundle, and the retry succeeds with
+            // the same answers, captured note destination and History id.
+            Settings.askBackEnabled = true
+            TextTransformRetryCenter.shared.invalidate()
+            let rig = TraceRig(); defer { rig.close(); TextTransformRetryCenter.shared.invalidate() }
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.codex("gpt-trace")), noteId: "note-retry")
+            rig.answerReview()
+            _ = rig.key(TKey.ret)
+            check("oneshot retry: the first Option+P ask write goes to the fake Codex adapter with the answer",
+                  rig.writes.count == 1 && rig.writes[0].request.bundle == .codex("gpt-trace")
+                    && rig.writes[0].request.systemPrompt.contains("1. Q: Which day?\n   A: Friday"))
+            rig.writes[0].done(.timedOut); traceSettle()
+            let summary = TextTransformRetryCenter.shared.summary
+            check("oneshot retry: a failed Option+P ask write arms the real Retry center",
+                  summary != nil && summary?.route == .promptPrep && summary?.failedProvider == .codex
+                    && summary?.modelID == "gpt-trace")
+            var retried = false
+            if let summary = summary {
+                retried = TextTransformRetryCenter.shared.retry(
+                    summaryID: summary.id, explicitlyUsing: .codex("gpt-trace"))
+            }
+            traceSettle()
+            check("oneshot retry: confirming Retry dispatches the fake Codex once with the original answers",
+                  retried && rig.writes.count == 2
+                    && rig.writes[1].request.bundle == .codex("gpt-trace")
+                    && rig.writes[1].request.sourceText == traceTranscript
+                    && rig.writes[1].request.systemPrompt.contains("1. Q: Which day?\n   A: Friday"))
+            rig.finishWrite("Retried answer.")
+            let entries = rig.store.all()
+            check("oneshot retry: exactly one successful landing reaches the captured note",
+                  rig.notes.delivered == [("note-retry", "Retried answer.")] && rig.hook.finals.isEmpty)
+            check("oneshot retry: History keeps the same entry and original answers, now done",
+                  entries.count == 1 && entries[0].status == "done" && entries[0].text == "Retried answer."
+                    && entries[0].askBack?.questions.first?.answer == "Friday"
+                    && entries[0].askBack?.questions.first?.how == AskBackAnswerHow.arrows.rawValue)
+        }
+        do {
+            // M2: the selection is in another app. Notes becomes key during the card; the answer must still
+            // go to the captured foreign field, never to the now-active note.
+            Settings.askBackEnabled = true
+            let rig = TraceRig(); defer { rig.close() }
+            rig.ctl.traceSetForeignTarget(DictationTarget(
+                element: AXUIElementCreateApplication(getpid()), pid: getpid(),
+                label: "captured foreign field A", isTextLike: true))
+            rig.optionP(traceTranscript, level: .tighten,
+                        resolution: .pinned(.claude("claude-trace-model")), noteId: nil)
+            rig.answerReview()
+            rig.notesKey = true   // focus moved into Notes while the card was up
+            _ = rig.key(TKey.ret)
+            rig.finishWrite("Captured target answer.")
+            let entries = rig.store.all()
+            check("oneshot target: Notes becoming key during the card cannot redirect the captured foreign selection",
+                  rig.capturedTargets.count == 1
+                    && rig.capturedTargets[0].label == "captured foreign field A"
+                    && rig.capturedTargets[0].text == "Captured target answer."
+                    && rig.notes.activeInserted.isEmpty && rig.notes.delivered.isEmpty)
+            check("oneshot target: the captured foreign landing records its one History entry with the answer",
+                  entries.count == 1 && entries[0].status == "done"
+                    && entries[0].text == "Captured target answer."
+                    && entries[0].askBack?.questions.first?.answer == "Friday")
         }
         do {
             // Esc on the card: the agent decides, one write, the normal landing.

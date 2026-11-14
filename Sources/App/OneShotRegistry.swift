@@ -98,6 +98,7 @@ final class OneShotRegistry {
     var selectionCaptureForTest: (() -> String?)?
     var routeResolutionForTest: ((LLMRouteID) -> LLMRouteResolution)?
     var claudeWriteForTest: TextTransformClient.AsyncAdapter?
+    var codexWriteForTest: TextTransformClient.AsyncAdapter?
     var localWriteForTest: TextTransformClient.AsyncAdapter?
 
     /// The one-shot modes the engine drives. `handle(command:)` maps each chord to one of these.
@@ -489,6 +490,7 @@ final class OneShotRegistry {
                                        answers: [AskBackAnswer?] = [],
                                        timeoutDetail: LocalStreamTimeoutDetail? = nil,
                                        arming: TextTransformArming = .armed,
+                                       retryCompletion: TextTransformClient.Completion? = nil,
                                        completion: @escaping (CleanupClient.Result) -> Void) {
         let requestForBundle: TextTransformClient.RetryRequestBuilder = { [weak self] bundle in
             let providerPrompt = Settings.modelsPower.effectiveDeveloperInstructions(
@@ -505,11 +507,20 @@ final class OneShotRegistry {
                 timeoutDetail: timeoutDetail ?? self?.inFlightTimeoutDetail)
         }
         selectionLastRequestBuilder = requestForBundle
-        TextTransformClient.transformResolved(
-            resolution, route: .promptPrep, requestForBundle: requestForBundle,
-            local: localWriteForTest ?? CleanupClient.localAdapter(surface: .promptPrep),
-            claude: claudeWriteForTest ?? TextTransformClient.liveClaudeAdapter,
-            arming: arming, completion: completion)
+        let localAdapter = localWriteForTest ?? CleanupClient.localAdapter(surface: .promptPrep)
+        let claudeAdapter = claudeWriteForTest ?? TextTransformClient.liveClaudeAdapter
+        // A fake Codex adapter is a test-only seam; production uses transformResolved's own default.
+        if let codexAdapter = codexWriteForTest {
+            TextTransformClient.transformResolved(
+                resolution, route: .promptPrep, requestForBundle: requestForBundle,
+                local: localAdapter, claude: claudeAdapter, codex: codexAdapter,
+                arming: arming, retryCompletion: retryCompletion, completion: completion)
+        } else {
+            TextTransformClient.transformResolved(
+                resolution, route: .promptPrep, requestForBundle: requestForBundle,
+                local: localAdapter, claude: claudeAdapter,
+                arming: arming, retryCompletion: retryCompletion, completion: completion)
+        }
     }
 
     /// VDASK-7 test seam: rebuild the last Option+P ask request exactly as an explicit retry would.
@@ -564,14 +575,20 @@ final class OneShotRegistry {
            AskBackSelectionGate.asks(input: p.input, level: AskBackLevel(level),
                                      provider: provider, enabled: Settings.askBackEnabled) {
             let historyID = UUID()
-            let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void) -> Void = {
-                [weak self] questions, answers, done in
-                guard let self = self else { done(.unavailable("Option+P flow ended")); return }
+            let write: ([AskBackQuestion], [AskBackAnswer?], @escaping (CleanupClient.Result) -> Void,
+                        @escaping (CleanupClient.Result) -> Void) -> Void = {
+                [weak self] questions, answers, done, retry in
+                guard let self = self else {
+                    done(.unavailable("Option+P flow ended"))
+                    retry(.unavailable("Option+P flow ended"))
+                    return
+                }
                 let detail = LocalStreamTimeoutDetail()
                 self.inFlightTimeoutDetail = detail
                 self.writeCleanupSelection(input: p.input, level: level, resolution: resolution,
                                            questions: questions, answers: answers,
-                                           timeoutDetail: detail, completion: done)
+                                           timeoutDetail: detail, retryCompletion: retry,
+                                           completion: done)
             }
             let writeDetached: ([AskBackQuestion], [AskBackAnswer?], @escaping (String?) -> Void) -> Void = {
                 [weak self] questions, answers, done in
