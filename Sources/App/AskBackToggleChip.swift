@@ -53,6 +53,9 @@ struct AskBackChipHold: Equatable {
     /// Consecutive ticks that moved toward the chip. Two ticks (about 66 ms at 30 Hz) distinguish a deliberate
     /// approach from a single programmatic reposition (a probe, a one-tick jump) that must keep following.
     private var approachTicks = 0
+    /// Closest distance seen while an outside-halo approach hold is active. Release compares against this, not
+    /// against the previous tick, so many small retreats still add up to a release.
+    private var closestApproach = CGFloat.infinity
 
     mutating func update(pointer: CGPoint, previousPointer: CGPoint?, chip: CGRect?) -> Bool {
         guard let chip, !chip.isNull, !chip.isEmpty else {
@@ -66,8 +69,11 @@ struct AskBackChipHold: Equatable {
                 approaching = false
             } else if approaching {
                 // Freeze was started from outside the halo: keep it while the pointer closes in or holds
-                // still, and release as soon as it turns away (the normal follow path then resumes).
-                if let before, now > before + 0.5 { reset() }
+                // still, and release once it has retreated by a bounded amount from its closest approach.
+                // Comparing with the closest point (rather than the previous tick) makes sub-half-point
+                // retreats accumulate instead of being ignored forever.
+                if now < closestApproach { closestApproach = now }
+                if now > closestApproach + 0.5 { reset() }
             } else {
                 reset()
             }
@@ -75,6 +81,7 @@ struct AskBackChipHold: Equatable {
             isHolding = true
             approaching = false
             approachTicks = 0
+            closestApproach = .infinity
         } else if let before, now < before {
             // Moving into the halo: freeze before the next re-anchor can move the chip away again. Requiring a
             // second consecutive approach tick keeps a single one-tick move (existing follow rows, a test's
@@ -83,6 +90,7 @@ struct AskBackChipHold: Equatable {
             if approachTicks >= 2 {
                 isHolding = true
                 approaching = true
+                closestApproach = now
                 approachTicks = 0
             }
         } else {
@@ -95,6 +103,7 @@ struct AskBackChipHold: Equatable {
         isHolding = false
         approaching = false
         approachTicks = 0
+        closestApproach = .infinity
     }
 }
 // END askback-chip-rules
