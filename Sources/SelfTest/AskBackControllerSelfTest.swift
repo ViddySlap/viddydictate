@@ -632,17 +632,21 @@ enum AskBackControllerSelfTest {
             rig.pressDown()
             rig.clock.advance(by: 0.6)
             traceSettle()
+            check("trace S2: the new take is still recording and no detached result has been pasted",
+                  rig.state == "recording" && rig.pastes == 0 && rig.heldCount() == 0)
             rig.release()
             check("trace S2: release with no Esc detaches the old take: one detached write, with agent-decides for the open question",
                   rig.writes.count == 1 && rig.writes[0].request.systemPrompt.contains(AskBackAnswersBlock.noAnswer)
                     && rig.ctl.traceParkedFlow == nil)
             check("trace S2: the new take is kept: it ran its own normal release (Nothing heard), not a cancel",
                   rig.newTakeStates == ["idle"] && rig.state == "idle" && rig.toasts == ["toast:Nothing heard"])
+            check("trace S2: the nothing-heard take ended with the detached result still held and nothing pasted",
+                  rig.pastes == 0 && rig.heldCount() == 1)
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             let e = rig.entries(id)
             print("DIAG-R1 pastes=\(rig.pastes) held=\(rig.heldCount()) state=\(rig.state) flowPhase=\(String(describing: rig.ctl.traceAskFlow?.phase)) deliveriesOpen=\(rig.ctl.traceDeliveriesOpen) historyCount=\(e.count) historyStatus=\(e.first?.status ?? "nil")")
-            check("trace S2: the detached result is one History update, status done, and is held (not pasted yet)",
-                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 0 && rig.heldCount() == 1)
+            check("trace S2: the detached result is one History update, status done, and pastes at once while idle",
+                  e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 1 && rig.heldCount() == 0)
             check("trace: the detached write never supersedes or touches the retry (arming inert)", rig.retryPosts == 0)
             rig.clock.advance(by: 1.0)
             let after = rig.entries(id)
@@ -765,12 +769,16 @@ enum AskBackControllerSelfTest {
             rig.toCard()
             let diagR2ID = rig.takeID
             rig.holdOnCard()
+            check("held: the nothing-heard new take is still recording and no detached result has been pasted",
+                  rig.state == "recording" && rig.pastes == 0 && rig.heldCount() == 0)
             rig.release()                                      // detaches the old take; the new take heard nothing
+            check("held: the nothing-heard take ended with the detached result still held and nothing pasted",
+                  rig.pastes == 0 && rig.state == "idle" && rig.heldCount() == 1)
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             let diagR2 = rig.entries(diagR2ID)
             print("DIAG-R2 pastes=\(rig.pastes) held=\(rig.heldCount()) state=\(rig.state) flowPhase=\(String(describing: rig.ctl.traceAskFlow?.phase)) deliveriesOpen=\(rig.ctl.traceDeliveriesOpen) historyCount=\(diagR2.count) historyStatus=\(diagR2.first?.status ?? "nil")")
-            check("held: a new take that heard nothing does not drop the held result, which waits",
-                  rig.pastes == 0 && rig.state == "idle" && rig.heldCount() == 1)
+            check("held: a new take that heard nothing does not drop the held result, which pastes at once while idle",
+                  rig.pastes == 1 && rig.state == "idle" && rig.heldCount() == 0)
             rig.clock.advance(by: 1)
             check("held: it pastes after the nothing-heard take", rig.hook.finals == [traceCleaned] && rig.heldCount() == 0)
         }
@@ -1146,7 +1154,7 @@ enum AskBackControllerSelfTest {
             // S3: a held result the rogue-output check flags is not pasted unasked.
             let rig = TraceRig(); defer { rig.close() }
             let old = rig.detachedOne()
-            let rogue = String(repeating: "an answer instead of a summary ", count: 40)
+            let rogue = Array(repeating: "an answer instead of a summary", count: 40).joined(separator: " ")
             rig.writes.last?.done(.ok(rogue)); traceSettle()
             rig.newTakeSpeaks()
             rig.clock.advance(by: 5)
@@ -1726,6 +1734,7 @@ enum AskBackControllerSelfTest {
             rig.finishWrite()
             Settings.isDictationActive = false
 
+            Settings.askBackEnabled = true
             let on = TraceRig(); defer { on.close() }
             on.pressDown()
             on.ctl.toggleAskBackFromHUD()   // off
@@ -1753,7 +1762,7 @@ enum AskBackControllerSelfTest {
             let diagR13Expected = "TEXT:\n<<<\n" + traceTranscript + "\n>>>"
             print("DIAG-R13 inputPrefix=\(String(diagR13Input.prefix(8)).debugDescription) inputCount=\(diagR13Input.count) expectedCount=\(diagR13Expected.count) expectedMatch=\(diagR13Input == diagR13Expected)")
             check("oneshot trace: the review runs against the selected text, marked as a selection",
-                  rig.reviews.first?.input == traceTranscript
+                  rig.reviews.first?.input == diagR13Expected
                     && rig.reviews.first?.system.contains("a piece of selected text") == true)
             rig.answerReview()
             check("oneshot trace: the review opens the card, and the level picker is not reopened",
