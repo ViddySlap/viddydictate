@@ -118,6 +118,21 @@ private func traceSettle() {
     else { DispatchQueue.main.sync {} }
 }
 
+/// Diagnostic-only private pasteboard preflight for the runtime probe. It uses its own UUID-named board,
+/// never `.general`, and does not read or write the rig board, Settings or any controller counter.
+private func tracePasteboardPreflight() {
+    let marker = "DIAG-PB-MARKER-SYNTHETIC"
+    let board = NSPasteboard(name: NSPasteboard.Name(AppIdentity.queueLabel("askback-ctl-diag-preflight-\(UUID().uuidString)")))
+    let c0 = board.changeCount
+    _ = board.clearContents()
+    let cClear = board.changeCount
+    let setStringOK = board.setString(marker, forType: .string)
+    let cWrite = board.changeCount
+    let read = board.string(forType: .string) ?? "nil"
+    print("DIAG-PB c0=\(c0) clear=\(cClear) write=\(cWrite) setString=\(setStringOK) read=\(read) marker=\(marker)")
+    board.releaseGlobally()
+}
+
 private final class TraceRig {
     let clock = TraceClock()
     let hud = TraceHUD()
@@ -346,6 +361,7 @@ private final class TraceRig {
 enum AskBackControllerSelfTest {
     static func run() -> Bool {
         print("--- ask-back controller trace: the real controller and tap routing, fake providers and clock ---")
+        tracePasteboardPreflight()
         Settings.registerDefaults()
         let check = SelfTestReporter()
         let savedEnabled = Settings.askBackEnabled
@@ -624,6 +640,7 @@ enum AskBackControllerSelfTest {
                   rig.newTakeStates == ["idle"] && rig.state == "idle" && rig.toasts == ["toast:Nothing heard"])
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             let e = rig.entries(id)
+            print("DIAG-R1 pastes=\(rig.pastes) held=\(rig.heldCount()) state=\(rig.state) flowPhase=\(String(describing: rig.ctl.traceAskFlow?.phase)) deliveriesOpen=\(rig.ctl.traceDeliveriesOpen) historyCount=\(e.count) historyStatus=\(e.first?.status ?? "nil")")
             check("trace S2: the detached result is one History update, status done, and is held (not pasted yet)",
                   e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned && rig.pastes == 0 && rig.heldCount() == 1)
             check("trace: the detached write never supersedes or touches the retry (arming inert)", rig.retryPosts == 0)
@@ -746,9 +763,12 @@ enum AskBackControllerSelfTest {
             // The new take ends with nothing heard (hold then release): the held result still pastes.
             let rig = TraceRig(); defer { rig.close() }
             rig.toCard()
+            let diagR2ID = rig.takeID
             rig.holdOnCard()
             rig.release()                                      // detaches the old take; the new take heard nothing
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
+            let diagR2 = rig.entries(diagR2ID)
+            print("DIAG-R2 pastes=\(rig.pastes) held=\(rig.heldCount()) state=\(rig.state) flowPhase=\(String(describing: rig.ctl.traceAskFlow?.phase)) deliveriesOpen=\(rig.ctl.traceDeliveriesOpen) historyCount=\(diagR2.count) historyStatus=\(diagR2.first?.status ?? "nil")")
             check("held: a new take that heard nothing does not drop the held result, which waits",
                   rig.pastes == 0 && rig.state == "idle" && rig.heldCount() == 1)
             rig.clock.advance(by: 1)
@@ -866,6 +886,7 @@ enum AskBackControllerSelfTest {
             rig.ctl.traceParkPaste()
             rig.pasteboard.clearContents()                       // the user copied something since: nothing is parked any more
             rig.clock.advance(by: 5)
+            print("DIAG-R3 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceCleaned)")
             check("M1 park: once the pasteboard has changed since the park the held result pastes as usual",
                   rig.hook.finals == [traceNewText, traceCleaned] && rig.heldCount() == 0)
         }
@@ -909,10 +930,12 @@ enum AskBackControllerSelfTest {
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.liveCanPaste = false
             rig.newTakeSpeaks()
+            print("DIAG-R4 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceNewText)")
             check("live park: the click-away park leaves the new take's text on the clipboard and closes its delivery",
                   rig.pasteboard.string(forType: .string) == traceNewText && rig.ctl.traceDeliveriesOpen == 0)
             rig.clock.advance(by: 5)
             let e = rig.entries(old)
+            print("DIAG-R5 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceNewText)")
             check("live park: the held result is not pasted, the clipboard still holds the new take's text, the queue has moved on",
                   rig.liveAttempts == [traceNewText] && rig.pasteboard.string(forType: .string) == traceNewText && rig.heldCount() == 0)
             check("live park: the held result stays in History (done, its text)", e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
@@ -924,10 +947,12 @@ enum AskBackControllerSelfTest {
             let old = rig.detachedOne()
             rig.writes.last?.done(.ok(traceCleaned)); traceSettle()
             rig.newTakeSpeaks()
+            print("DIAG-R6 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceNewText)")
             check("M1 clipboard-only: the new take's text is on the clipboard for a manual paste",
                   rig.pasteboard.string(forType: .string) == traceNewText && rig.toasts.contains { $0.contains("Put on your clipboard") })
             rig.clock.advance(by: 5)
             let e = rig.entries(old)
+            print("DIAG-R7 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceNewText)")
             check("M1 clipboard-only: after the held turn the clipboard still holds the new take's text and the held result is History only",
                   rig.pasteboard.string(forType: .string) == traceNewText && rig.hook.finals == [traceNewText] && rig.heldCount() == 0
                     && e.count == 1 && e[0].status == "done" && e[0].text == traceCleaned)
@@ -942,6 +967,7 @@ enum AskBackControllerSelfTest {
             rig.pasteboard.clearContents()
             rig.pasteboard.setString("something Ben copied", forType: .string)
             rig.clock.advance(by: 5)
+            print("DIAG-R8 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceCleaned)")
             check("M1 clipboard-only control: the pasteboard changed first, so the held result is delivered (to the clipboard, same route)",
                   rig.hook.finals == [traceNewText, traceCleaned] && rig.pasteboard.string(forType: .string) == traceCleaned && rig.heldCount() == 0)
         }
@@ -954,6 +980,7 @@ enum AskBackControllerSelfTest {
             rig.writes[1].done(.ok("Held two.")); traceSettle()
             rig.newTakeSpeaks()
             rig.clock.advance(by: 5)
+            print("DIAG-R9 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=\(traceNewText)")
             check("M1 clipboard-only: every held result behind it is History only and the clipboard holds the new take's text",
                   rig.hook.finals == [traceNewText] && rig.heldCount() == 0 && rig.pasteboard.string(forType: .string) == traceNewText
                     && rig.entries(first).first?.text == "Held one." && rig.entries(second).first?.text == "Held two.")
@@ -1030,6 +1057,7 @@ enum AskBackControllerSelfTest {
             latch = false
             landing()
             rig.clock.advance(by: 5)
+            print("DIAG-R10 boardRead=\(rig.pasteboard.string(forType: .string) ?? "nil") changeCount=\(rig.pasteboard.changeCount) expected=the one-shot's output")
             check("one-shot rule: a one-shot that falls back to the clipboard: the held result is History only and the output stays on the clipboard",
                   rig.hook.finals.isEmpty && rig.liveAttempts.isEmpty && rig.heldCount() == 0
                     && rig.pasteboard.string(forType: .string) == "the one-shot's output" && rig.entries(old).first?.text == traceCleaned)
@@ -1125,6 +1153,7 @@ enum AskBackControllerSelfTest {
             let e = rig.entries(old)
             check("S3: a held result that trips the cleanup-suspect check is not pasted, and no picker opens",
                   rig.hook.finals == [traceNewText] && rig.abShown.isEmpty)
+            print("DIAG-R11 fixtureCount=\(rogue.count) storedCount=\(e.first?.text.count ?? -1) fixtureTrailingSpace=\(rogue.hasSuffix(" ")) storedTrailingSpace=\(e.first?.text.hasSuffix(" ") ?? false) fixtureTail=\(String(rogue.suffix(16))) storedTail=\(String((e.first?.text ?? "").suffix(16))) storedEqualsFixture=\(e.first?.text == rogue)")
             check("S3: it stays in History (done, its text) and the queue has moved on",
                   e.count == 1 && e[0].status == "done" && e[0].text == rogue && rig.heldCount() == 0)
         }
@@ -1702,6 +1731,7 @@ enum AskBackControllerSelfTest {
             on.ctl.toggleAskBackFromHUD()   // off
             on.ctl.toggleAskBackFromHUD()   // and on again before the take ends
             on.startTake()
+            print("DIAG-R12 enabled=\(Settings.askBackEnabled) reviews=\(on.reviews.count) state=\(on.state)")
             check("chip: clicked back on while recording, that take reviews", Settings.askBackEnabled == true
                   && on.reviews.count == 1 && on.state == "reviewing")
         }
@@ -1719,6 +1749,9 @@ enum AskBackControllerSelfTest {
             check("oneshot trace: Option+P Tighten Claude 60+ words starts one review with the level picker already closed",
                   rig.reviews.count == 1 && rig.writes.isEmpty && rig.card.shown.isEmpty
                     && rig.picker.hides == 1 && !rig.hotkey.levelPickerActive && rig.ctl.traceOneShotBusy)
+            let diagR13Input = rig.reviews.first?.input ?? ""
+            let diagR13Expected = "TEXT:\n<<<\n" + traceTranscript + "\n>>>"
+            print("DIAG-R13 inputPrefix=\(String(diagR13Input.prefix(8)).debugDescription) inputCount=\(diagR13Input.count) expectedCount=\(diagR13Expected.count) expectedMatch=\(diagR13Input == diagR13Expected)")
             check("oneshot trace: the review runs against the selected text, marked as a selection",
                   rig.reviews.first?.input == traceTranscript
                     && rig.reviews.first?.system.contains("a piece of selected text") == true)
