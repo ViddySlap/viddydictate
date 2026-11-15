@@ -30,7 +30,7 @@ enum TextTransformSelfTest {
         checkPasteModifierAndDiagnostics(reporter.record)
         checkLandingStep(reporter.record)
         checkPasteVerify(reporter.record)
-        checkCustomAndSearchRequestRoutes(reporter.record)
+        checkCustomAndSearchRequestRoutes(reporter.record, reporter.record)
         checkClaudePrivateTransport(reporter.record, okText: okText)
         checkTransientExitHelperCleanup(reporter.record)
         checkProcessGroupTimeout(reporter.record)
@@ -1143,7 +1143,10 @@ enum TextTransformSelfTest {
         check("paste verify: an unreadable or ambiguous read wins over a Return", ok31)
     }
 
-    private static func checkCustomAndSearchRequestRoutes(_ check: (String, Bool) -> Void) {
+    private static func checkCustomAndSearchRequestRoutes(
+        _ check: (String, Bool) -> Void,
+        _ checkDetail: (String, Bool, String) -> Void
+    ) {
         print("--- request-builder call-site route coverage ---")
         let cleanupBundle = LLMProviderBundle.claude("cleanup-c", effort: "medium")
         let cleanupRequest = DictationController.makeCleanupRequest(
@@ -1189,14 +1192,14 @@ enum TextTransformSelfTest {
               fidelityDictation.components(separatedBy: fidelityCall).count == 2)
         let fidelityStrays = ["OneShotRegistry.swift", "CustomModeClient.swift", "SearchClient.swift"]
             .filter { fidelitySource($0).contains("CleanupFidelity") }
-        check("fidelity wiring: OneShotRegistry, CustomModeClient and SearchClient never reference CleanupFidelity",
+        checkDetail("fidelity wiring: OneShotRegistry, CustomModeClient and SearchClient never reference CleanupFidelity",
               fidelityStrays.isEmpty && !fidelitySource("OneShotRegistry.swift").isEmpty
                 && !fidelitySource("CustomModeClient.swift").isEmpty && !fidelitySource("SearchClient.swift").isEmpty,
               fidelityStrays.joined(separator: ", "))
         // S2: the rules text is pinned by hash, and the append shape is exact.
         let fidelityRulesHash = SHA256.hash(data: Data(CleanupFidelity.rules.utf8))
             .map { String(format: "%02x", $0) }.joined()
-        check("fidelity rules: sha256 of CleanupFidelity.rules is pinned",
+        checkDetail("fidelity rules: sha256 of CleanupFidelity.rules is pinned",
               fidelityRulesHash == "010f757c7587d8ebdbb294e2146ca3331bc0bf2807edeb96664eea913d83fafa", fidelityRulesHash)
         check("fidelity rules: appending(to: B, routeKey: cleanupL1) == B + blank line + rules",
               CleanupFidelity.appending(to: "B", routeKey: "cleanupL1") == "B\n\n" + CleanupFidelity.rules)
