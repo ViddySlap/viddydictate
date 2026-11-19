@@ -77,7 +77,6 @@ final class AskCardPanel: NSObject, AskCardPresenting {
     }
 
     var isVisible: Bool { panel.isVisible }
-    var currentCardID: UUID? { model?.cardID }
 
     /// Show `card`. `anchor` is the take's paste target (or the pointer) in AppKit screen coordinates; it only
     /// matters for the first card of a take. A card that replaces a visible one keeps its left edge and top

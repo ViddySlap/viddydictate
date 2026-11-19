@@ -388,7 +388,6 @@ final class BootstrapInstallCoordinator {
     func activity(for componentID: String) -> InstallerLocalActivity? {
         lock.withLock { activities[componentID] }
     }
-    var isSetupPresented: Bool { lock.withLock { setupPresented } }
 
     @discardableResult
     func presentSetup() -> Bool {

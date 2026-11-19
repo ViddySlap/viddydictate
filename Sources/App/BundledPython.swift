@@ -49,7 +49,6 @@ enum BundledPython {
     /// running bundle and a bundle under test are resolved by the same arithmetic.
     static var interpreterURL: URL { interpreter(inBundleAt: Bundle.main.bundleURL) }
 
-    static var runtimeRootURL: URL { runtimeRoot(inBundleAt: Bundle.main.bundleURL) }
 
     static var isInstalled: Bool { isInstalled(inBundleAt: Bundle.main.bundleURL) }
 }

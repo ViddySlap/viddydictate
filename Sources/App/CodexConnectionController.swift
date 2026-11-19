@@ -14,10 +14,6 @@ final class CodexConnectionController {
 
     private init() {}
 
-    var isConnecting: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return loginInProgress
-    }
 
     func refreshAvailability(completion: ((CodexConnectionState) -> Void)? = nil) {
         DispatchQueue.global(qos: .utility).async {

@@ -394,9 +394,6 @@ enum ComponentPicker {
             warning: nil),
     ]
 
-    static func localAppOption(_ choice: LocalAppChoice) -> LocalAppOption {
-        localAppOptions.first { $0.choice == choice } ?? localAppOptions[0]
-    }
 
     /// The choice a fresh window opens on. LM Studio, the recommended one (D3), whatever this Mac can run: the
     /// model ticks under it then follow the same fit rules as ever, so on a Mac too small for its models the

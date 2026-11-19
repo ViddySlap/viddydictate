@@ -1143,7 +1143,6 @@ final class HUDPanel: NSObject, HUDPresenting {
         badge.keycapGeometryForTesting
     }
     /// The glyph the toast badge will draw for a Raw/Cleanup change — the live bound key, not `?`.
-    var cleanupBadgeGlyphForTesting: String { cleanupGlyph }
 
     var cleanupGlyphsForTesting: (full: String, pill: String) {
         (keycap.glyph, infoPill.cleanupGlyphForTesting)

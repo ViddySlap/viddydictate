@@ -1,7 +1,6 @@
 import Foundation
 
 enum WhisperVoiceModels {
-    static let turboRepo = WhisperModelCatalog.default.repo
 
     struct State: Equatable {
         var ticked: Set<String>

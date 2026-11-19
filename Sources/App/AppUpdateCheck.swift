@@ -252,5 +252,4 @@ final class AppUpdateNagPolicy {
     func dismiss(version: String) { dismissedVersion = version }
 
     /// Test seam: clear only the in-memory per-launch latch, leaving persisted state alone.
-    func resetLaunchLatch() { shownThisLaunch = false }
 }

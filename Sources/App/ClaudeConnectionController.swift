@@ -287,10 +287,6 @@ final class ClaudeConnectionController {
 
     private init() {}
 
-    var isSigningIn: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return signInInProgress
-    }
 
     /// Measure off the main thread (the status command spawns a process) and publish, so the stored
     /// availability a surface reads never drifts from what this flow just saw.

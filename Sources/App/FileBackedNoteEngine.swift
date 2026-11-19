@@ -167,9 +167,6 @@ final class FileBackedNoteEngine {
         return result
     }
 
-    func bufferBodyLocked(id: String) -> String? {
-        fileSessions[id]?.bufferBody
-    }
 
     func renameFileBackedNote(id rawId: String, stem rawStem: String) -> FileBackedRenameResult {
         guard let id = Self.validatedNoteId(rawId) else { return .missing }

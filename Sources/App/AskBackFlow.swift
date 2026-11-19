@@ -397,7 +397,6 @@ final class AskBackFlow {
     }
 
     var cardUp: Bool { phase == .asking }
-    var isReviewing: Bool { phase == .reviewing }
     /// True while the flow still owns the take (it has not pasted, been cancelled or been handed off).
     var isLive: Bool { phase == .reviewing || phase == .asking || phase == .writing }
 
