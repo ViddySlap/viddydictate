@@ -286,9 +286,7 @@ enum CustomModeSelfTest {
         // Pin both live exits, not just TransformArmState. Each must project the helper-restored state
         // through the same presentation path, including the unchanged Cleanup level.
         let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let controllerSource = (try? String(
-            contentsOf: sourceRoot.appendingPathComponent("Sources/App/DictationController.swift"),
-            encoding: .utf8)) ?? ""
+        let controllerSource = SelfTestSource.read("DictationController", root: sourceRoot)
         let armCallSite = sourceSlice(
             controllerSource,
             from: "private func armOneShot(source: OneShotArmSource, descriptor: OneShotMode, glyph: String) {",

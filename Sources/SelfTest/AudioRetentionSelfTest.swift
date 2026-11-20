@@ -97,8 +97,7 @@ enum AudioRetentionSelfTest {
                             && !defPath.lowercased().contains("obsidian"),
                         defPath)
 
-        let controller = (try? String(contentsOfFile: "Sources/App/DictationController.swift",
-                                      encoding: .utf8)) ?? ""
+        let controller = SelfTestSource.read("DictationController")
         let sharedSnapshot = slice(controller,
                                    from: "private func transcribeAudioSnapshot(",
                                    to: "/// Finalize an in-flight take")

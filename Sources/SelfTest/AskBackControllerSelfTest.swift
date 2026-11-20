@@ -1238,7 +1238,7 @@ enum AskBackControllerSelfTest {
             // The two callers that cannot run headless (a real focused field, the general pasteboard): named source-shape rows.
             let here = URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let resolver = (try? String(contentsOf: here.appendingPathComponent("Sources/App/TargetResolver.swift"), encoding: .utf8)) ?? ""
-            let controller = (try? String(contentsOf: here.appendingPathComponent("Sources/App/DictationController.swift"), encoding: .utf8)) ?? ""
+            let controller = SelfTestSource.read("DictationController", root: here)
             check("S2 source shape: pasteIntoFocus calls onComplete itself when the first keystroke was not posted",
                   resolver.contains("let started = driver.run()\n        if !started { onComplete?() }"))
             check("S2 source shape: pasteIntoCapturedTarget hands settled to the paste when the operation ran and fires it itself otherwise",
@@ -1263,7 +1263,7 @@ enum AskBackControllerSelfTest {
                   handle.contains("keyTakenBeforeWakeup(keyCode: keyCode"))
             check("wiring (tap callback): the wakeup press and release sites all go through fireWakeup",
                   hot.components(separatedBy: "fireWakeup(down:").count - 1 == 4)
-            let ctlSrc = source("DictationController.swift")
+            let ctlSrc = SelfTestSource.read("DictationController", root: here)
             let begin = ctlSrc.range(of: "private func beginRecording()")
                 .map { String(ctlSrc[$0.lowerBound...].prefix(6000)) } ?? ""
             check("wiring (beginRecording needs mic, AX and the daemon) S4: a take start clears the marker's last placement first",
@@ -1569,10 +1569,10 @@ enum AskBackControllerSelfTest {
                   (down.range(of: "takeAskVoiceKey(keyCode: keyCode, down: true")?.lowerBound ?? down.endIndex)
                     < (down.range(of: "keyTakenBeforeWakeup(")?.lowerBound ?? down.startIndex)
                     && hot.contains("takeAskVoiceKey(keyCode: event.getIntegerValueField(.keyboardEventKeycode), down: false"))
+            let dc = SelfTestSource.read("DictationController", root: appDir.deletingLastPathComponent().deletingLastPathComponent())
             check("wiring (production recorder and transcriber): the voice answer uses the take's own recorder and transcribeAudioSnapshot",
-                  src("DictationController.swift").contains("try audio.start(); return true")
-                    && src("DictationController.swift").contains("transcribeAudioSnapshot { text, _, _ in done(text) }"))
-            let dc = src("DictationController.swift")
+                  dc.contains("try audio.start(); return true")
+                    && dc.contains("transcribeAudioSnapshot { text, _, _ in done(text) }"))
             let discardBody = dc.range(of: "private func askVoiceDiscard()").map { String(dc[$0.lowerBound...].prefix(260)) } ?? ""
             let stopBody = dc.range(of: "private func askVoiceStop(").map { String(dc[$0.lowerBound...].prefix(420)) } ?? ""
             check("wiring (S1): production askVoiceDiscard and askVoiceStop both stop the recorder (audio.stop())",

@@ -1179,15 +1179,17 @@ enum TextTransformSelfTest {
                 route: .cleanupL1, input: "I", selected: cleanupBundle,
                 systemPrompt: fidelityBase, timeout: 1).systemPrompt == fidelityBase)
         // VDASK-1 judge follow-ups. S1: source-shape guard, read from the worktree root, comments stripped.
-        func fidelitySource(_ name: String) -> String {
-            let text = (try? String(contentsOfFile: "Sources/App/\(name)", encoding: .utf8)) ?? ""
-            return text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+        func fidelityStripped(_ text: String) -> String {
+            text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
                 guard let comment = line.range(of: "//") else { return String(line) }
                 return String(line[..<comment.lowerBound])
             }.joined(separator: "\n")
         }
+        func fidelitySource(_ name: String) -> String {
+            fidelityStripped((try? String(contentsOfFile: "Sources/App/\(name)", encoding: .utf8)) ?? "")
+        }
         let fidelityCall = "CleanupFidelity.appending(to: providerPrompt, routeKey: route.rawValue)"
-        let fidelityDictation = fidelitySource("DictationController.swift")
+        let fidelityDictation = fidelityStripped(SelfTestSource.read("DictationController"))
         check("fidelity wiring: DictationController applies CleanupFidelity.appending exactly once",
               fidelityDictation.components(separatedBy: fidelityCall).count == 2)
         let fidelityStrays = ["OneShotRegistry.swift", "CustomModeClient.swift", "SearchClient.swift"]

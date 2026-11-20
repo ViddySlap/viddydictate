@@ -551,14 +551,16 @@ enum OllamaClientWiringFixtureSelfTest {
     /// reads the resolved bundle. Read from the worktree root, comments stripped.
     private static func checkProductionCallSites(_ reporter: SelfTestReporter) {
         print("--- production call sites hand each route the backend-aware adapter ---")
-        func source(_ name: String) -> String {
-            let text = (try? String(contentsOfFile: "Sources/App/\(name)", encoding: .utf8)) ?? ""
-            return text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+        func stripped(_ text: String) -> String {
+            text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
                 guard let comment = line.range(of: "//") else { return String(line) }
                 return String(line[..<comment.lowerBound])
             }.joined(separator: "\n")
         }
-        let dictation = source("DictationController.swift")
+        func source(_ name: String) -> String {
+            stripped((try? String(contentsOfFile: "Sources/App/\(name)", encoding: .utf8)) ?? "")
+        }
+        let dictation = stripped(SelfTestSource.read("DictationController"))
         let registry = source("OneShotRegistry.swift")
         let custom = source("CustomModeClient.swift")
         let search = source("SearchClient.swift")
@@ -573,7 +575,10 @@ enum OllamaClientWiringFixtureSelfTest {
                             && custom.contains("local: CleanupClient.localAdapter(surface: .customMode)"))
         let blind = ["DictationController.swift", "OneShotRegistry.swift", "CustomModeClient.swift",
                      "StickySkillCoordinator.swift", "PromptTestBench.swift"]
-            .filter { source($0).contains("CleanupClient.cleanup(") || source($0).contains("EmailClient.email(") }
+            .filter { name in
+                let text = name == "DictationController.swift" ? dictation : source(name)
+                return text.contains("CleanupClient.cleanup(") || text.contains("EmailClient.email(")
+            }
         reporter.record("no route calls CleanupClient.cleanup or EmailClient.email around the adapters",
                         blind.isEmpty, blind.joined(separator: ", "))
         reporter.record("search runs retrieval on the route's (app, model) and synthesis through localSynthesis",

@@ -61,7 +61,7 @@ enum NotesProbe {
     static let sourceStickySkillMenuJS = sourceFile("Web/StickyNotes/src/sticky-skill-menu.js")
     static let sourceIndexHTML = sourceFile("Web/StickyNotes/static/index.html")
     static let sourceAppCSS = sourceFile("Web/StickyNotes/static/app.css")
-    static let sourceDictationController = sourceFile("Sources/App/DictationController.swift")
+    static let sourceDictationController = SelfTestSource.read("DictationController")
     static let sourceTailCheck = sourceFile("Sources/App/TailCheck.swift")
     // S8 (mini hover without focus): the three files the Swift-driven hover latch spans.
     static let sourceEventsJS = sourceFile("Web/StickyNotes/src/events.js")

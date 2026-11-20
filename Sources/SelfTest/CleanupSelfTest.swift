@@ -218,11 +218,12 @@ enum CleanupSelfTest {
             (try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)) ?? ""
         }
         // Source with block comments and whole-line or trailing line comments removed.
-        func code(_ path: String) -> String {
-            raw(path)
+        func codeText(_ text: String) -> String {
+            text
                 .replacingOccurrences(of: "(?s)/\\*.*?\\*/", with: "", options: .regularExpression)
                 .replacingOccurrences(of: "(?m)(^|[ \\t])//.*$", with: "$1", options: .regularExpression)
         }
+        func code(_ path: String) -> String { codeText(raw(path)) }
         let appDir = "Sources/App"
         let appFiles = ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(appDir).path)) ?? [])
             .filter { $0.hasSuffix(".swift") }.sorted()
@@ -233,7 +234,7 @@ enum CleanupSelfTest {
         }
 
         let recorder = code("Sources/App/AudioRecorder.swift")
-        let controller = code("Sources/App/DictationController.swift")
+        let controller = codeText(SelfTestSource.read("DictationController", root: root))
         let signal = code("Sources/App/DeckMicSignal.swift")
 
         check("deckmic-recorder-opt-in-only",
@@ -382,7 +383,13 @@ enum CleanupSelfTest {
     /// Source text of a tree-root file with block and line comments removed (empty when unreadable).
     private static func dictAddSource(_ path: String) -> String {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        guard var text = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else { return "" }
+        guard let text = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else { return "" }
+        return dictAddStripped(text)
+    }
+
+    /// Block and line comments removed from text that has already been read.
+    private static func dictAddStripped(_ text: String) -> String {
+        var text = text
         for (pattern, options) in [("/\\*.*?\\*/", NSRegularExpression.Options.dotMatchesLineSeparators),
                                    ("//.*$", NSRegularExpression.Options.anchorsMatchLines)] {
             guard let re = try? NSRegularExpression(pattern: pattern, options: options) else { return "" }
@@ -477,7 +484,7 @@ enum CleanupSelfTest {
               && tourSrc.contains("Hold {wakeup} and tap {dictionary} to add a word or phrase. The full list is on the Dictionary tab in Settings.")
               && !tourSrc.contains("tap {dictionary} to open it."))
 
-        let controllerSrc = dictAddSource("Sources/App/DictationController.swift")
+        let controllerSrc = dictAddStripped(SelfTestSource.read("DictationController"))
         let handleBody = dictAddBody("private func handle(command: HotkeyCommand)", in: controllerSrc)
         let showBody = dictAddBody("private func showDictionaryAdd()", in: controllerSrc)
         check("dict-add-chord-opens-popup",

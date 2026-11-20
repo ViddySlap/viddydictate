@@ -790,7 +790,7 @@ extension NotesProbe {
     /// (B ON, or a late-recovery retry, which keeps its base inputs). Every row below either exercises the pure
     /// model or reads a real function body out of the tree.
     static func probeLandingRoute(check: Check) {
-        let dictSource = landStripped(landSource("Sources/App/DictationController.swift"))
+        let dictSource = landStripped(SelfTestSource.read("DictationController"))
         let lockStripped = landStripped(landSource("Sources/App/LockTransition.swift"))
         let coordinatorSource = landStripped(landSource("Sources/App/NotesDeliveryCoordinator.swift"))
         let registrySource = landStripped(landSource("Sources/App/NotesWindowRegistry.swift"))

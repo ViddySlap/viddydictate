@@ -178,7 +178,7 @@ enum ModelFitRetryWiringSelfTest {
     /// the comments at that call site name these very symbols while explaining them.
     private static func checkCallSiteIsWired(_ reporter: SelfTestReporter) {
         let path = "Sources/App/DictationController.swift"
-        let source = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        let source = SelfTestSource.read("DictationController")
         reporter.record("the cleanup call site is readable from the worktree root", !source.isEmpty,
                         source.isEmpty ? "run this gate from the repository root" : path)
         guard !source.isEmpty else { return }

@@ -169,9 +169,14 @@ enum TimeoutWordingSelfTest {
         let openParenOffset = "safeFailurePresentation".count
         var failures: [String] = []
         for path in files {
-            let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-                .appendingPathComponent(path, isDirectory: false)
-            let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let source: String
+            if path == "Sources/App/DictationController.swift" {
+                source = SelfTestSource.read("DictationController")
+            } else {
+                let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                    .appendingPathComponent(path, isDirectory: false)
+                source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            }
             if source.isEmpty {
                 failures.append("\(path): unreadable")
                 continue

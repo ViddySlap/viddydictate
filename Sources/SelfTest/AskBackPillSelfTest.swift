@@ -75,7 +75,7 @@ enum AskBackPillSelfTest {
         check("wiring (info pill): the pill's slider is compact and paints through CompactPillWord.drawnIndices",
               src("InfoPill.swift").contains("slider.compactWord = true")
                 && src("StrengthSlider.swift").contains("CompactPillWord.drawnIndices(level: CleanupLevel.clamped(level).rawValue, compact: compactWord)"))
-        let dc = src("DictationController.swift")
+        let dc = SelfTestSource.read("DictationController", root: appDir.deletingLastPathComponent().deletingLastPathComponent())
         check("wiring (controller): the HUD click reaches toggleAskBackFromHUD, and a Settings or route change refreshes the ?",
               dc.contains("hud.onToggleAskBack = { [weak self] in self?.toggleAskBackFromHUD() }")
                 && dc.contains("forName: Settings.didChange, object: nil, queue: .main) { [weak self] _ in self?.refreshAskBackToggle() }")
