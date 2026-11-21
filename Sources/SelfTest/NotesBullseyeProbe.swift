@@ -654,7 +654,7 @@ extension NotesProbe {
                                from: "private func cancelTake() {",
                                to: "private func notes() {")
         let beginRecordingBody = sourceSlice(controllerSrc,
-                                       from: "private func beginRecording() {",
+                                       from: "func beginRecording() {",
                                        to: "private func finishNothingHeard(")
         let micStartErrorBody = sourceSlice(beginRecordingBody,
                                       from: "} catch {",
@@ -676,7 +676,7 @@ extension NotesProbe {
                                          to: "var targetLabel:")
 
         let teardownBody = sourceSlice(controllerSrc,
-                                 from: "private func teardownTake(_ scope: TeardownScope) {",
+                                 from: "func teardownTake(_ scope: TeardownScope) {",
                                  to: "/// Holding right-Option always starts audio capture")
         check("take teardown: only a fully-ended take clears the take-START note snapshot",
               teardownBody.contains("if case .full = scope { notesDelivery.noteTarget = nil }"),
@@ -804,7 +804,7 @@ extension NotesProbe {
         let featureTourSource = landStripped(landSource("Sources/App/FeatureTour.swift"))
 
         let finalizeBody = landBody(dictSource, "func finalize(")
-        let beginBody = landBody(dictSource, "private func beginRecording()")
+        let beginBody = landBody(dictSource, "func beginRecording()")
         let toggleBody = landBody(dictSource, "private func toggleBullseye()")
         let notesBody = landBody(dictSource, "private func notes()")
         let refreshBody = landBody(dictSource, "private func refreshBullseyeIndicator()")

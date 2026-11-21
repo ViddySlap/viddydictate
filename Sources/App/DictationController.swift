@@ -51,7 +51,7 @@ final class DictationController {
     }
 
     let hotkey = HotkeyMonitor()
-    private let audio: AudioRecorder = { let recorder = AudioRecorder(); recorder.honorsDeckMic = true; return recorder }()
+    let audio: AudioRecorder = { let recorder = AudioRecorder(); recorder.honorsDeckMic = true; return recorder }()
     private let audioWorkQueue = DispatchQueue(label: AppIdentity.queueLabel("audio-work"),
                                                qos: .userInitiated)
     private lazy var retainedTakeRecovery = RetainedTakeRecovery(progress: { [weak self] takeID, pending in
@@ -79,7 +79,7 @@ final class DictationController {
     private var recentDictationsPanel: RecentDictationsPanel?
     private var dictionaryAddPanel: DictionaryAddPanel?
     var target: DictationTarget?
-    private var targetWasNotesWindow = false
+    var targetWasNotesWindow = false
     /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
     /// arms drive a REAL `finalize()` call through the deterministic, AX-free no-target delivery branch, which
     /// this flag's fixture selects together with `takeLandAtStart`. Production behavior is unchanged -- the
@@ -190,10 +190,10 @@ final class DictationController {
     /// S2: the old take's flow while a hold that started on its card is still down (its release detaches it, an
     /// Esc under the same press resumes it), and the old take's own target fields, restored on a resume because
     /// the new take's start overwrote them.
-    private var askParkedFlow: AskBackFlow?
+    var askParkedFlow: AskBackFlow?
     /// VDASK-5: the observers that keep the HUD's ? button current when the setting or a route changes.
     private var askToggleObservers: [NSObjectProtocol] = []
-    private var askParkedTake: (target: DictationTarget?, wasNotes: Bool, landAtStart: Bool, noteTarget: NotesDictationTarget?)?
+    var askParkedTake: (target: DictationTarget?, wasNotes: Bool, landAtStart: Bool, noteTarget: NotesDictationTarget?)?
 
     /// Test seams for the headless controller trace test (AskBackControllerSelfTest). Production leaves every
     /// field nil and the code takes its normal path. `resolve` replaces the route resolution, `reviewProvider`
@@ -234,21 +234,21 @@ final class DictationController {
 
     /// The detached old takes' results, held until the take in front has finished (`AskBackHeldQueue`). In
     /// memory only: a result that has not pasted when the app quits is not pasted on relaunch.
-    private var askHeld = AskBackHeldQueue()
-    private var askHeldInfo: [UUID: (raw: String, level: Int)] = [:]
+    var askHeld = AskBackHeldQueue()
+    var askHeldInfo: [UUID: (raw: String, level: Int)] = [:]
     /// Deliveries (a take's paste, a one-shot's landing) that have not finished with the clipboard yet: their
     /// paste check and clipboard restore are still pending. A held result never pastes while one is open.
-    private var askDeliveries = 0
-    private var askHeldKick: (() -> Void)?
-    private var askHeldPoll: (() -> Void)?
-    private var askGraceUntil: TimeInterval = -1
+    var askDeliveries = 0
+    var askHeldKick: (() -> Void)?
+    var askHeldPoll: (() -> Void)?
+    var askGraceUntil: TimeInterval = -1
     /// A selection one-shot throws its incidental take away (the controller goes idle) and only then copies the
     /// selection (`TargetResolver.captureSelectionViaCopy`: a fixed 0.18 s) before it sets its busy latch. A held
     /// result must not paste into that gap: this covers the 0.18 s copy plus slack on a congested main thread.
     static let heldOneShotGrace: TimeInterval = 0.5
     /// How often a waiting held result looks at the one-shot latch (the registry has no release callback).
     static let heldPollInterval: TimeInterval = 0.25
-    private var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
+    var pendingPick: (raw: String, cleaned: String, level: CleanupLevel,
                               takeID: UUID, lateRecovery: Bool)?
 
     /// The Family-2 one-shot registry engine (ADR 0010): a table of `OneShotMode` descriptors driven
@@ -256,18 +256,18 @@ final class DictationController {
     /// client -> land), behind the `OneShotContext` seam (`DictationController` conforms below). Owns the
     /// single busy-latch for the one-shot arbiter. The controller keeps only: routing each chord to
     /// `run(mode)`, forwarding the level-picker nav keys, and reading `isBusy`. `lazy` — it captures `self`.
-    private lazy var oneShot = OneShotRegistry(context: self)
+    lazy var oneShot = OneShotRegistry(context: self)
 
     /// One-shot clipboard restore for the click-away delivery fallback. When delivery can't reach a
     /// field, the dictation is parked on the clipboard so you can paste it yourself; `pastePark` holds
     /// the clipboard contents from BEFORE the park plus the changeCount at park time, so the very next
     /// Cmd+V restores the prior clipboard once the paste has landed. Skipped (your content left alone)
     /// if you copied something else after the park.
-    private struct PastePark { let previous: PasteboardSnapshot; let changeCount: Int }
-    private var pastePark: PastePark?
+    struct PastePark { let previous: PasteboardSnapshot; let changeCount: Int }
+    var pastePark: PastePark?
     /// VDASK-3: what the last delivery left on the clipboard when it closed, and the pasteboard changeCount then.
-    private var askLastClipboardOnly = false
-    private var askLastClosedCount = 0
+    var askLastClipboardOnly = false
+    var askLastClosedCount = 0
 
     /// The notes-delivery JS-bridge callbacks (`onSnapshotNoteTarget` / `onDeliverToNoteTarget` /
     /// `onInsertIntoActiveNote` / `onSetBullseyeAtCaret` / `onDeliverToBullseye` / `onBullseyeStateChanged` /
@@ -302,7 +302,7 @@ final class DictationController {
     /// pasteboard in production; a self-test overrides it with a private, uniquely-named one so driving
     /// a real delivery branch never touches the user's actual clipboard (see `CleanupSelfTest`'s own
     /// `runClipboardTests` for the same "private named pasteboard, never general" convention).
-    private let clipboardPasteboard: NSPasteboard
+    let clipboardPasteboard: NSPasteboard
 
     init(callbacks: DictationControllerCallbacks, notesDelivery: NotesDeliveryCoordinator,
          tailCheckHook: TailCheckDictationHook? = nil,
@@ -412,7 +412,7 @@ final class DictationController {
         NotificationCenter.default.post(name: Settings.dictationActive, object: NSNumber(value: active))
     }
 
-    private func transcribeAudioSnapshot(retainingAs takeID: UUID? = nil,
+    func transcribeAudioSnapshot(retainingAs takeID: UUID? = nil,
                                          retentionEnabled: Bool? = nil,
                                          completion: @escaping (String?, String?, [TailCheck.Segment]) -> Void) {
         audioWorkQueue.async { [audio] in
@@ -789,9 +789,9 @@ final class DictationController {
     ///   the transform inserts-at-a-point instead of replacing the range). Audio still stops, state goes idle.
     /// - `stateOnly`: a finalized one-shot transcript was consumed — audio / activity / HUD ownership stays
     ///   with the one-shot caller, whose landing (or word-gate selection fallback) still needs the snapshot.
-    private enum TeardownScope { case full, gestureContinues, stateOnly }
+    enum TeardownScope { case full, gestureContinues, stateOnly }
 
-    private func teardownTake(_ scope: TeardownScope) {
+    func teardownTake(_ scope: TeardownScope) {
         targetWasNotesWindow = false
         // Only a take whose gesture is also over may drop the snapshot; see TeardownScope.
         if case .full = scope { notesDelivery.noteTarget = nil }
@@ -1172,7 +1172,7 @@ final class DictationController {
             + "take=\(takeID?.uuidString ?? "not-transcribed")")
     }
 
-    private func beginRecording() {
+    func beginRecording() {
         // VDASK-3: a take that never starts the paste marker (a sticky-note target) must not anchor its ask card
         // to an earlier take's target.
         pasteMarker.lastPlacement = nil
@@ -1640,157 +1640,6 @@ final class DictationController {
     }
 
 
-    // MARK: ask-back glue (VDASK-3). The rules live in `AskBackFlow`; these are its hands.
-
-    static let mainSchedule: AskBackFlow.Schedule = { after, fire in
-        let item = DispatchWorkItem(block: fire)
-        DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: item)
-        return { item.cancel() }
-    }
-
-    // MARK: held results. The rules live in `AskBackHeldQueue`; these feed it events and do its pastes.
-
-    private func heldNow() -> TimeInterval { (askSeams.now ?? { ProcessInfo.processInfo.systemUptime })() }
-
-    /// A card, an A/B picker, or a selection one-shot (its latch from capture to landing, plus the gap before the
-    /// latch is set) holds the stage.
-    private func heldBusy() -> Bool {
-        AskBackHeldPolicy.busy(pendingPick: pendingPick != nil, abPicker: hotkey.abPickerActive,
-                               askCard: hotkey.askCardActive, oneShotLatch: heldOneShotLatch(),
-                               oneShotGrace: heldNow() < askGraceUntil)
-    }
-
-    private func heldOneShotLatch() -> Bool { askSeams.oneShotLatch?() ?? oneShot.isBusy }
-
-    /// Feeds the queue one event with its inputs freshly read (a take is live, something is busy, a delivery is
-    /// still open), then pastes what it releases. A waiting result that is held only by the one-shot latch is
-    /// looked at again on a timer (while the line is not empty), because the registry has no release callback and
-    /// the one-shot mark needs a look at the latch.
-    private func heldApply(_ event: (inout AskBackHeldQueue) -> [AskBackHeldQueue.Paste]) {
-        askHeld.setInputs(takeLive: state != .idle, busy: heldBusy(), delivering: askDeliveries > 0,
-                          oneShotUp: heldOneShotLatch())
-        let pastes = event(&askHeld)
-        for paste in pastes { heldPaste(paste) }
-        if !askHeld.isEmpty, askHeldPoll == nil {
-            askHeldPoll = (askSeams.schedule ?? Self.mainSchedule)(Self.heldPollInterval) { [weak self] in
-                self?.askHeldPoll = nil
-                self?.heldApply { $0.poke() }
-            }
-        }
-    }
-
-    /// Something the queue waits on may have changed (a take ended, a delivery completed, a card closed): look
-    /// again one run-loop turn later, never inside the call that changed it (a teardown, a landing completion).
-    /// Level-triggered: the inputs are read when it fires, so a take that has started by then keeps the line waiting.
-    private func heldKick() {
-        guard !askHeld.isEmpty, askHeldKick == nil else { return }
-        askHeldKick = (askSeams.schedule ?? Self.mainSchedule)(0) { [weak self] in
-            self?.askHeldKick = nil
-            self?.heldApply { $0.poke() }
-        }
-    }
-
-    /// Opens a delivery: its paste check and clipboard restore have not finished. The returned closure closes it
-    /// (once) and gives a waiting held result its turn.
-    private func beginDelivery() -> () -> Void {
-        askDeliveries += 1
-        var closed = false
-        return { [weak self] in
-            guard !closed, let self = self else { return }
-            closed = true
-            self.askDeliveries -= 1
-            self.heldKick()
-        }
-    }
-
-    /// The delivery in front parked its text on the clipboard for a manual Cmd+V (`pastePark` armed) and the
-    /// pasteboard has not changed since: the held result must not overwrite it. (`clipboardPasteboard` is the
-    /// general pasteboard in the app; a self-test points it at a private one.)
-    private func heldDeliveryParked() -> Bool {
-        if let park = pastePark, clipboardPasteboard.changeCount == park.changeCount { return true }
-        return AskBackHeldPolicy.clipboardHeld(receiptClipboardOnly: askLastClipboardOnly,
-                                               changeCountAtClose: askLastClosedCount,
-                                               nowChangeCount: clipboardPasteboard.changeCount)
-    }
-
-    /// Pastes one held result through the normal delivery path (`finalize`: History by id, notes routing, the
-    /// frozen landing rule of the last take, paste or clipboard park). Only ever runs with no take live, nothing
-    /// busy and no delivery open. It is itself a delivery: the next held result waits for its completion. A result
-    /// the rogue-output check flags, or one that would overwrite parked text, stays in History only (already
-    /// written) and the line moves on.
-    private func heldPaste(_ paste: AskBackHeldQueue.Paste) {
-        let info = askHeldInfo.removeValue(forKey: paste.id)
-        let suspect = info.map { CleanupLogic.cleanupSuspect(rawCount: $0.raw.count, cleanedCount: paste.text.count) } ?? false
-        switch AskBackHeldPolicy.turn(suspect: suspect, parked: heldDeliveryParked(), oneShotSeen: paste.oneShotSeen) {
-        case .skipOneShot:
-            Log.write("held result not pasted: a selection one-shot ran while it waited, History only")
-            heldKick()
-            return
-        case .skipSuspect:
-            Log.write("held result not pasted: cleanup suspect (\(info?.raw.count ?? 0)->\(paste.text.count) chars), History only")
-            heldKick()
-            return
-        case .skipParked:
-            Log.write("held result not pasted: the delivery in front is parked on the clipboard, History only")
-            heldKick()
-            return
-        case .paste:
-            break
-        }
-        Log.write("held result pastes afterwards (\(paste.text.count) chars)")
-        finalize(delivered: paste.text, raw: info?.raw ?? paste.text, cleaned: paste.text, mode: .cleanup,
-                 level: info?.level, historyID: paste.id)
-        heldKick()
-    }
-
-    func askPhaseChanged(_ phase: AskBackFlow.Phase) {
-        hotkey.askReviewActive = phase == .reviewing
-        if phase != .asking { hotkey.askCardActive = false }
-        heldKick()
-        switch phase {
-        case .reviewing: state = .reviewing
-        case .asking: state = .asking
-        case .writing: state = .writing
-        case .notStarted, .finished, .cancelled, .detached, .parked: break
-        }
-        if phase != .asking { askCardPanel?.hide() }
-    }
-
-    func askReadingCue(_ on: Bool) {
-        if on {
-            hud.update(state: AskCardText.readingCue, target: target?.label, text: "", locked: false)
-            hud.setThinking(true)
-            note("reading your take")
-        } else {
-            hud.setThinking(false)
-        }
-    }
-
-    func askShowCard(_ card: AskCardModel) {
-        let panel: AskCardPresenting = askSeams.cardPanel ?? askCardPanel ?? AskCardPanel()
-        askCardPanel = panel
-        panel.onChoose = { [weak self] id, index in self?.askFlow?.click(cardID: id, option: index) }
-        hud.setThinking(false)
-        hud.hide()
-        panel.show(card, anchor: askAnchor)
-        hotkey.askCardActive = true
-        heldKick()
-        note("answer the question")
-    }
-
-    /// A hold while a card is up: the flow has closed the card and PARKED the old take (S2). The new take starts
-    /// as if right Option had just gone down on an idle controller, and the old flow is kept (with the old take's
-    /// own target fields) until that press ends: its release detaches the old take, an Esc under the same press
-    /// discards the new take and resumes the old one.
-    func askStartNewTake() {
-        askParkedFlow = askFlow
-        askParkedTake = (target, targetWasNotesWindow, takeLandAtStart, notesDelivery.noteTarget)
-        askFlow = nil
-        endAskFlowUI()
-        state = .idle
-        startRecording()
-    }
-
     // VDASK-4 voice answer. The take's own recorder and its own transcriber (`transcribeAudioSnapshot`, which posts
     // to the same daemon and Whisper model a take uses): no second capture stack. The take's audio is stopped
     // while a card is up, so the recorder is free; the HUD and the take's state are not touched.
@@ -1805,78 +1654,6 @@ final class DictationController {
         }
     }
     // END askvoice-mic
-
-    /// False when the mic cannot start (busy or permission missing).
-    func askVoiceStart() -> Bool {
-        // AVAudioEngine commonly starts and delivers silence when the grant is missing, so ask the grant first.
-        let authorized = askSeams.micAuthorized?() ?? Self.askVoiceMicGranted(Permissions.microphoneAuthorization())
-        guard authorized else {
-            Log.write("ask-back voice: microphone not authorized")
-            return false
-        }
-        if let start = askSeams.voiceStart { return start() }
-        do { try audio.start(); return true } catch {
-            Log.write("ask-back voice: mic start ERROR: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    func askVoiceDiscard() {
-        if let discard = askSeams.voiceDiscard { discard(); return }
-        audio.stop()
-    }
-
-    /// Stops capture and transcribes; `done` gets the text, or nil when nothing was heard or the daemon failed.
-    func askVoiceStop(_ done: @escaping (String?) -> Void) {
-        if let transcribe = askSeams.voiceTranscribe { transcribe(done); return }
-        audio.stop()
-        guard audio.detectedSpeech else { done(nil); return }      // silence never goes to Whisper
-        transcribeAudioSnapshot { text, _, _ in done(text) }
-    }
-
-    /// Starts a take's recording. The headless trace test replaces the audio-and-AX start with
-    /// `askSeams.beginNewTake`; production always takes `beginRecording()`.
-    private func startRecording() {
-        if let begin = askSeams.beginNewTake {
-            begin()
-            setActive(true)
-            state = .recording
-        } else {
-            beginRecording()
-        }
-    }
-
-    /// Esc (with Option) while the press that started a hold-on-a-card is still down: throw the new take away
-    /// silently (no toast, no History entry, no generation bump, so the old take's late write still lands) and
-    /// resume the old take as agent-decides.
-    private func resumeParkedOldTake(_ parked: AskBackFlow) {
-        Log.write("take canceled (Esc under the card hold) state=\(state): the old take goes on")
-        askParkedFlow = nil
-        let saved = askParkedTake
-        askParkedTake = nil
-        if let arm = TransformArmState.shared.cancelPerTakeArm() {
-            Log.write("\(arm.id) per-take arm cleared by cancel")
-            hud.setArmedMode(glyph: nil)
-        }
-        teardownTake(.full)
-        setActive(true)            // the old take is in flight again: Option+Esc must still be able to cancel it
-        hud.setThinking(false)
-        hud.hide()
-        if let saved = saved {
-            target = saved.target
-            targetWasNotesWindow = saved.wasNotes
-            takeLandAtStart = saved.landAtStart
-            notesDelivery.noteTarget = saved.noteTarget
-        }
-        askFlow = parked
-        parked.parkedEsc()
-    }
-
-    private func endAskFlowUI() {
-        hotkey.askCardActive = false
-        hotkey.askReviewActive = false
-        askCardPanel?.hide()
-    }
 
     /// Replace the first attempt's raw fallback at its captured destination. A retry failure only refreshes
     /// the exact safe classification and re-arms Retry; raw is never pasted a second time.

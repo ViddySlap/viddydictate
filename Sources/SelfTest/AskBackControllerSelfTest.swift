@@ -1264,7 +1264,7 @@ enum AskBackControllerSelfTest {
             check("wiring (tap callback): the wakeup press and release sites all go through fireWakeup",
                   hot.components(separatedBy: "fireWakeup(down:").count - 1 == 4)
             let ctlSrc = SelfTestSource.read("DictationController", root: here)
-            let begin = ctlSrc.range(of: "private func beginRecording()")
+            let begin = ctlSrc.range(of: "func beginRecording()")
                 .map { String(ctlSrc[$0.lowerBound...].prefix(6000)) } ?? ""
             check("wiring (beginRecording needs mic, AX and the daemon) S4: a take start clears the marker's last placement first",
                   begin.contains("pasteMarker.lastPlacement = nil") && (begin.range(of: "pasteMarker.lastPlacement = nil")?.lowerBound ?? begin.endIndex)

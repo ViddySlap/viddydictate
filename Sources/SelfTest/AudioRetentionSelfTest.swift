@@ -99,7 +99,7 @@ enum AudioRetentionSelfTest {
 
         let controller = SelfTestSource.read("DictationController")
         let sharedSnapshot = slice(controller,
-                                   from: "private func transcribeAudioSnapshot(",
+                                   from: "func transcribeAudioSnapshot(",
                                    to: "/// Finalize an in-flight take")
         let finish = slice(controller, from: "private func finish() {",
                            to: "func deliver(text rawText:")
