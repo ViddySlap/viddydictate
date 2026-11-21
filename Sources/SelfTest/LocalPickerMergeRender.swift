@@ -11,8 +11,14 @@ import Cocoa
 ///   - both apps, including `shared-id-on-both` in each, pinned to OLLAMA's copy.
 /// A closed popup shows only its selected title, so every case also prints the whole menu into the render
 /// log (`[menu]` lines: index, title, the item's ref identifier, which row is selected) and asserts the
-/// titles and the selected row. The two-app case also drives the popup's real action: choosing LM Studio's
-/// copy of the shared id writes no `localBackend`, and choosing Ollama's writes `ollama`.
+/// titles and the selected row. The two-app case is the app-first picker: an app popup, then a model popup
+/// that holds only the shown app's rows with plain labels. It drives the real clicks (the app popup, then the
+/// model row) for LM Studio's and Ollama's copy of the shared id and for each app's own coder row, and checks
+/// every stage: the app click stores nothing and leaves the model popup on its placeholder with only that
+/// app's rows, and the model click writes the picked row's own id and app (LM Studio writes no
+/// `localBackend`, Ollama writes `ollama`). The scratch store carries a fixed LM Studio Preferred local app,
+/// so no inherited setting changes which rows a card shows. A click that cannot find its row is a FAIL row,
+/// not a no-op.
 enum LocalPickerMergeRenderCases {
     typealias Report = SelfTestRenderCapture.Report
 
@@ -38,6 +44,8 @@ enum LocalPickerMergeRenderCases {
 
     private static let ollamaShared = LocalModelRef(backend: .ollama, modelID: sharedID)
     private static let lmsShared = LocalModelRef(backend: .lmStudio, modelID: sharedID)
+    private static let ollamaCoderRef = LocalModelRef(backend: .ollama, modelID: ollamaCoder)
+    private static let lmsCoderRef = LocalModelRef(backend: .lmStudio, modelID: lmsCoder)
 
     // MARK: - Hotkeys routing grid (--models-power-render)
 
@@ -49,7 +57,7 @@ enum LocalPickerMergeRenderCases {
         // (a) One app, pinned to an LM Studio model. The pre-Ollama picker: the rows' own labels, the pin
         // marked Custom, no app names, no separator.
         do {
-            let routing = ModelsPowerSettingsStore(url: root.appendingPathComponent("one-app.json"))
+            let routing = scratchStore(root.appendingPathComponent("one-app.json"))
             guard pin(.local(lmsCoder), route: .email, in: routing, report: report) else { return }
             let view = routingView(routing: routing, root: root, name: "one-app", catalog: oneApp)
             let host = mount(view)
@@ -76,52 +84,90 @@ enum LocalPickerMergeRenderCases {
 
         // (b) Both apps, pinned to Ollama's copy of the shared id.
         do {
-            let routing = ModelsPowerSettingsStore(url: root.appendingPathComponent("two-apps.json"))
+            let routing = scratchStore(root.appendingPathComponent("two-apps.json"))
             guard pin(LLMProviderBundle.local(ref: ollamaShared), route: .email, in: routing,
                       report: report) else { return }
             let view = routingView(routing: routing, root: root, name: "two-apps", catalog: twoApps)
             let host = mount(view)
             loadCatalog(view, popupID: "model|email", catalog: twoApps)
             var popup = SelfTestRenderCapture.find("model|email", in: view) as? NSPopUpButton
+            var appPopup = SelfTestRenderCapture.find("local-app|email", in: view) as? NSPopUpButton
+            dumpMenu(appPopup, label: "routing grid, two apps, app popup")
             dumpMenu(popup, label: "routing grid, two apps, Ollama pin")
-            let expected = [
-                "LM Studio · " + lmsCoderLabel,
-                "LM Studio · " + lmsSharedLabel,
-                "",
-                "Ollama · " + ollamaCoderLabel,
-                "Ollama · " + ollamaSharedLabel + "  ·  Custom",
-            ]
-            report("routing grid, two apps: LM Studio's group, a separator, Ollama's, every row named",
-                   titles(popup) == expected && popup?.item(at: 2)?.isSeparatorItem == true,
-                   titles(popup).joined(separator: " | "))
+            report("routing grid, two apps: the app popup lists LM Studio then Ollama and shows the pin's app",
+                   titles(appPopup) == ["LM Studio", "Ollama"] && appPopup?.titleOfSelectedItem == "Ollama",
+                   titles(appPopup).joined(separator: " | ") + " / " + (appPopup?.titleOfSelectedItem ?? "<none>"))
+            // The model popup holds only the shown app's rows, plain labels, the pin marked Custom.
+            let expected = [ollamaCoderLabel, ollamaSharedLabel + "  ·  Custom"]
+            report("routing grid, two apps: the model popup holds only the shown app's rows, plain labels, the pin Custom",
+                   titles(popup) == expected, titles(popup).joined(separator: " | "))
             report("routing grid, two apps: the shared-id-on-both Ollama pin selects Ollama's row",
                    selectedRef(popup) == ollamaShared, popup?.titleOfSelectedItem ?? "<none>")
-            // S3c: a 250 pt popup truncates "Ollama · shared-id-on-both (5.20 GB)  ·  Custom" when closed, so
-            // the full title is on the tooltip; the preset line names the app as the picker does.
-            report("routing grid, two apps: the popup's tooltip is the full app-labelled title",
-                   popup?.toolTip == "Ollama · " + ollamaSharedLabel + "  ·  Custom", popup?.toolTip ?? "nil")
+            // S3c: a 250 pt popup truncates "shared-id-on-both (5.20 GB)  ·  Custom" when closed, so the full
+            // title is on the tooltip; the preset line names the app as the picker does.
+            report("routing grid, two apps: the model popup's tooltip is its full selected title",
+                   popup?.toolTip == ollamaSharedLabel + "  ·  Custom", popup?.toolTip ?? "nil")
             report("routing grid, two apps: the Local preset line names the app",
                    presetLine(view) == "Local preset: CUSTOM · Ollama · \(sharedID)", presetLine(view))
 
-            // The real action, both ways.
-            choose(lmsShared, in: popup)
+            // The real clicks, both ways. Each pick is the app click, a check of the stage between (nothing
+            // stored yet, the model popup on its placeholder with only that app's rows), then the model click.
+            // LM Studio's copy of the shared id first.
+            choose(lmsShared, appPopupID: "local-app|email", modelPopupID: "model|email", in: view,
+                   store: routing, route: .email, appRows: [lmsCoderLabel, lmsSharedLabel],
+                   label: "routing grid, click LM Studio then its shared-id-on-both: both popups carry the rows to click",
+                   afterApp: "routing grid, LM Studio app click before its shared-id-on-both: the store is unchanged and the model popup shows its placeholder",
+                   menu: "routing grid, LM Studio app click before its shared-id-on-both: the model popup lists only LM Studio's rows with plain titles",
+                   report: report)
             view.refresh()
             let toLMS = routing.selectedBundle(for: .email)
             report("routing grid: choosing LM Studio's shared-id-on-both writes no localBackend",
                    toLMS.provider == .local && toLMS.modelID == sharedID && toLMS.localBackend == nil,
                    bundleText(toLMS))
             popup = SelfTestRenderCapture.find("model|email", in: view) as? NSPopUpButton
+            appPopup = SelfTestRenderCapture.find("local-app|email", in: view) as? NSPopUpButton
             report("routing grid: after that choice LM Studio's row is the selected one",
                    selectedRef(popup) == lmsShared, popup?.titleOfSelectedItem ?? "<none>")
-            // The routing grid marks the PIN's row "  ·  Custom" (LocalModelPickerItems.routingGrid), and the
-            // choice just made LM Studio's copy the pin, so its full title carries the qualifier, exactly as
-            // Ollama's did above.
+            report("routing grid: after that choice the app popup shows LM Studio",
+                   appPopup?.titleOfSelectedItem == "LM Studio", appPopup?.titleOfSelectedItem ?? "<none>")
+            // The routing grid marks the PIN's row "  ·  Custom" (LocalModelPickerItems.routingGridSuffix), and
+            // the choice just made LM Studio's copy the pin, so its full title carries the qualifier, exactly
+            // as Ollama's did above. The model popup holds plain labels, no app prefix.
             report("routing grid: the tooltip and the preset line follow the choice",
                    popup?.toolTip != nil && popup?.toolTip == popup?.titleOfSelectedItem
-                       && popup?.toolTip == "LM Studio · " + lmsSharedLabel + "  ·  Custom"
+                       && popup?.toolTip == lmsSharedLabel + "  ·  Custom"
                        && presetLine(view) == "Local preset: CUSTOM · LM Studio · \(sharedID)",
                    "\(popup?.toolTip ?? "nil") / \(presetLine(view))")
-            choose(ollamaShared, in: popup)
+            // Each app's own coder row next: its id differs from the id stored at that moment, so a write that
+            // keeps the stored id (or the stored app) fails here, where the equal shared ids could not show it.
+            choose(ollamaCoderRef, appPopupID: "local-app|email", modelPopupID: "model|email", in: view,
+                   store: routing, route: .email, appRows: [ollamaCoderLabel, ollamaSharedLabel],
+                   label: "routing grid, click Ollama then its coder row: both popups carry the rows to click",
+                   afterApp: "routing grid, Ollama app click before its coder row: the store is unchanged and the model popup shows its placeholder",
+                   menu: "routing grid, Ollama app click before its coder row: the model popup lists only Ollama's rows with plain titles",
+                   report: report)
+            view.refresh()
+            let toOllamaCoder = routing.selectedBundle(for: .email)
+            report("routing grid: choosing Ollama's coder row writes its own model id and localBackend ollama",
+                   toOllamaCoder.provider == .local && toOllamaCoder.modelID == ollamaCoder
+                       && toOllamaCoder.localBackend == .ollama, bundleText(toOllamaCoder))
+            choose(lmsCoderRef, appPopupID: "local-app|email", modelPopupID: "model|email", in: view,
+                   store: routing, route: .email, appRows: [lmsCoderLabel, lmsSharedLabel],
+                   label: "routing grid, click LM Studio then its coder row: both popups carry the rows to click",
+                   afterApp: "routing grid, LM Studio app click before its coder row: the store is unchanged and the model popup shows its placeholder",
+                   menu: "routing grid, LM Studio app click before its coder row: the model popup lists only LM Studio's rows with plain titles",
+                   report: report)
+            view.refresh()
+            let toLMSCoder = routing.selectedBundle(for: .email)
+            report("routing grid: choosing LM Studio's coder row writes its own model id and no localBackend",
+                   toLMSCoder.provider == .local && toLMSCoder.modelID == lmsCoder
+                       && toLMSCoder.localBackend == nil, bundleText(toLMSCoder))
+            choose(ollamaShared, appPopupID: "local-app|email", modelPopupID: "model|email", in: view,
+                   store: routing, route: .email, appRows: [ollamaCoderLabel, ollamaSharedLabel],
+                   label: "routing grid, click Ollama then its shared-id-on-both: both popups carry the rows to click",
+                   afterApp: "routing grid, Ollama app click before its shared-id-on-both: the store is unchanged and the model popup shows its placeholder",
+                   menu: "routing grid, Ollama app click before its shared-id-on-both: the model popup lists only Ollama's rows with plain titles",
+                   report: report)
             view.refresh()
             let toOllama = routing.selectedBundle(for: .email)
             report("routing grid: choosing Ollama's shared-id-on-both writes localBackend ollama",
@@ -145,6 +191,7 @@ enum LocalPickerMergeRenderCases {
         defer { try? FileManager.default.removeItem(at: root) }
         let builtInID = StickySkillRegistry.builtInSkillID
         let popupID = "sticky-skill-model|\(builtInID)"
+        let appPopupID = "sticky-skill-local-app|\(builtInID)"
         let card = "sticky-skill-card|\(builtInID)"
 
         // (a) One app, pinned to an LM Studio model.
@@ -179,27 +226,73 @@ enum LocalPickerMergeRenderCases {
             let host = mount(view)
             loadCatalog(view, popupID: popupID, catalog: twoApps)
             var popup = SelfTestRenderCapture.find(popupID, in: view) as? NSPopUpButton
+            let appPopup = SelfTestRenderCapture.find(appPopupID, in: view) as? NSPopUpButton
+            dumpMenu(appPopup, label: "sticky skill, two apps, app popup")
             dumpMenu(popup, label: "sticky skill, two apps, Ollama pin")
-            var expected = ["LM Studio · " + lmsCoderLabel, "LM Studio · " + lmsSharedLabel]
+            // The rows each app's model popup holds once the user picks that app. LM Studio's end with the
+            // shipped default's " - Staff pick" row: the card appends the default of the effective Preferred
+            // local app, and the fixture's store prefers LM Studio (`scratchStore`), so Ollama gets no
+            // staff pick row whatever the user's own setting is.
+            var lmsRows = [lmsCoderLabel, lmsSharedLabel]
             if let tested = LLMProviderDefaults.testedBundle(for: .local, route: route) {
-                expected.append("LM Studio · " + shortName(tested.modelID) + " - Staff pick")
+                lmsRows.append(shortName(tested.modelID) + " - Staff pick")
             }
-            expected += ["", "Ollama · " + ollamaCoderLabel, "Ollama · " + ollamaSharedLabel]
-            report("sticky skill, two apps: LM Studio's group, a separator, Ollama's, every row named",
-                   titles(popup) == expected, titles(popup).joined(separator: " | "))
+            let ollamaRows = [ollamaCoderLabel, ollamaSharedLabel]
+            report("sticky skill, two apps: the app popup lists LM Studio then Ollama and shows the pin's app",
+                   titles(appPopup) == ["LM Studio", "Ollama"] && appPopup?.titleOfSelectedItem == "Ollama",
+                   titles(appPopup).joined(separator: " | ") + " / " + (appPopup?.titleOfSelectedItem ?? "<none>"))
+            // Ollama's rows only: the shipped LM Studio default and LM Studio's catalog rows are in the other
+            // app, and the pin's " - Current" row folds into the catalog row for the same (app, id).
+            report("sticky skill, two apps: the model popup holds only the shown app's rows, plain labels",
+                   titles(popup) == ollamaRows, titles(popup).joined(separator: " | "))
             report("sticky skill, two apps: the shared-id-on-both Ollama pin selects Ollama's row",
                    selectedRef(popup) == ollamaShared, popup?.titleOfSelectedItem ?? "<none>")
-            report("sticky skill, two apps: the popup's tooltip is the full app-labelled title",
-                   popup?.toolTip == "Ollama · " + ollamaSharedLabel, popup?.toolTip ?? "nil")
+            report("sticky skill, two apps: the model popup's tooltip is its full selected title",
+                   popup?.toolTip == ollamaSharedLabel, popup?.toolTip ?? "nil")
 
-            choose(lmsShared, in: popup)
+            choose(lmsShared, appPopupID: appPopupID, modelPopupID: popupID, in: view,
+                   store: routing, route: route, appRows: lmsRows,
+                   label: "sticky skill, click LM Studio then its shared-id-on-both: both popups carry the rows to click",
+                   afterApp: "sticky skill, LM Studio app click before its shared-id-on-both: the store is unchanged and the model popup shows its placeholder",
+                   menu: "sticky skill, LM Studio app click before its shared-id-on-both: the model popup lists only LM Studio's rows with plain titles",
+                   report: report)
             view.refresh()
             let toLMS = routing.selectedBundle(for: route)
             report("sticky skill: choosing LM Studio's shared-id-on-both writes no localBackend",
                    toLMS.provider == .local && toLMS.modelID == sharedID && toLMS.localBackend == nil,
                    bundleText(toLMS))
             popup = SelfTestRenderCapture.find(popupID, in: view) as? NSPopUpButton
-            choose(ollamaShared, in: popup)
+            report("sticky skill: after that choice LM Studio's row is the selected one",
+                   selectedRef(popup) == lmsShared, popup?.titleOfSelectedItem ?? "<none>")
+            // Each app's own coder row next, as in the routing grid: a different id from the stored one.
+            choose(ollamaCoderRef, appPopupID: appPopupID, modelPopupID: popupID, in: view,
+                   store: routing, route: route, appRows: ollamaRows,
+                   label: "sticky skill, click Ollama then its coder row: both popups carry the rows to click",
+                   afterApp: "sticky skill, Ollama app click before its coder row: the store is unchanged and the model popup shows its placeholder",
+                   menu: "sticky skill, Ollama app click before its coder row: the model popup lists only Ollama's rows with plain titles",
+                   report: report)
+            view.refresh()
+            let toOllamaCoder = routing.selectedBundle(for: route)
+            report("sticky skill: choosing Ollama's coder row writes its own model id and localBackend ollama",
+                   toOllamaCoder.provider == .local && toOllamaCoder.modelID == ollamaCoder
+                       && toOllamaCoder.localBackend == .ollama, bundleText(toOllamaCoder))
+            choose(lmsCoderRef, appPopupID: appPopupID, modelPopupID: popupID, in: view,
+                   store: routing, route: route, appRows: lmsRows,
+                   label: "sticky skill, click LM Studio then its coder row: both popups carry the rows to click",
+                   afterApp: "sticky skill, LM Studio app click before its coder row: the store is unchanged and the model popup shows its placeholder",
+                   menu: "sticky skill, LM Studio app click before its coder row: the model popup lists only LM Studio's rows with plain titles",
+                   report: report)
+            view.refresh()
+            let toLMSCoder = routing.selectedBundle(for: route)
+            report("sticky skill: choosing LM Studio's coder row writes its own model id and no localBackend",
+                   toLMSCoder.provider == .local && toLMSCoder.modelID == lmsCoder
+                       && toLMSCoder.localBackend == nil, bundleText(toLMSCoder))
+            choose(ollamaShared, appPopupID: appPopupID, modelPopupID: popupID, in: view,
+                   store: routing, route: route, appRows: ollamaRows,
+                   label: "sticky skill, click Ollama then its shared-id-on-both: both popups carry the rows to click",
+                   afterApp: "sticky skill, Ollama app click before its shared-id-on-both: the store is unchanged and the model popup shows its placeholder",
+                   menu: "sticky skill, Ollama app click before its shared-id-on-both: the model popup lists only Ollama's rows with plain titles",
+                   report: report)
             view.refresh()
             let toOllama = routing.selectedBundle(for: route)
             report("sticky skill: choosing Ollama's shared-id-on-both writes localBackend ollama",
@@ -236,7 +329,7 @@ enum LocalPickerMergeRenderCases {
 
     private static func stickyView(root: URL, name: String, catalog: [LMStudioModelOption])
         -> (StickySkillsSettingsView, ModelsPowerSettingsStore, LLMRouteID) {
-        let routing = ModelsPowerSettingsStore(url: root.appendingPathComponent("\(name)-models-power.json"))
+        let routing = scratchStore(root.appendingPathComponent("\(name)-models-power.json"))
         let modes = CustomModeStore(url: root.appendingPathComponent("\(name)-custom-modes.json"),
                                     routingStore: routing)
         let skills = StickySkillStore(url: root.appendingPathComponent("\(name)-sticky-skills.json"))
@@ -249,6 +342,14 @@ enum LocalPickerMergeRenderCases {
         let route = skills.skill(id: StickySkillRegistry.builtInSkillID)?.routeID
             ?? .custom(StickySkillRegistry.noteToHandoffCustomModeID)
         return (view, routing, route)
+    }
+
+    /// The scratch store every case uses: its own JSON file AND a fixed LM Studio Preferred local app. The
+    /// store would otherwise read `Settings.preferredLocalBackend` (`ModelsPowerSettings.swift:184`), and an
+    /// Ollama preference there changes which staff pick row the Sticky card appends, and so which rows the
+    /// model popup holds. LM Studio is also what an unset preference resolves to on a Mac with both apps.
+    private static func scratchStore(_ url: URL) -> ModelsPowerSettingsStore {
+        ModelsPowerSettingsStore(url: url, preferredLocalBackend: { .lmStudio })
     }
 
     private static func pin(_ bundle: LLMProviderBundle, route: LLMRouteID, in routing: ModelsPowerSettingsStore,
@@ -300,14 +401,66 @@ enum LocalPickerMergeRenderCases {
         popup.flatMap { LocalModelPickerItems.selectedRef(in: $0) }
     }
 
-    /// Select the row for `ref` and send the popup's action, exactly as a click on that row does.
-    private static func choose(_ ref: LocalModelRef, in popup: NSPopUpButton?) {
-        guard let popup,
-              let item = popup.itemArray.first(where: {
-                  $0.identifier?.rawValue == LocalModelPickerItems.itemIdentifier(for: ref)
-              }) else { return }
-        popup.select(item)
-        _ = popup.sendAction(popup.action, to: popup.target)
+    /// The app-first picker's two real clicks, in order, with the stage between them checked.
+    /// (1) Pick the app in the app popup and send its action. That action refills the model popup and writes
+    /// nothing, so `afterApp` asserts the stored bundle is still what it was and the model popup shows its
+    /// placeholder as the selected row, and `menu` asserts the refilled popup is the placeholder then exactly
+    /// `appRows` (the chosen app's rows, plain titles), every row owned by the chosen app, no separator, no
+    /// app-prefixed title. (2) Only then pick the model row and send its action, whose write the caller
+    /// asserts. A missing app popup, app row, model popup or model row, or an action that was not dispatched,
+    /// is a FAIL row under `label`, never a silent no-op; `label` passes only after both actions were sent.
+    private static func choose(_ ref: LocalModelRef, appPopupID: String, modelPopupID: String,
+                               in view: NSView, store: ModelsPowerSettingsStore, route: LLMRouteID,
+                               appRows: [String], label: String, afterApp: String, menu: String,
+                               report: Report) {
+        guard let appPopup = SelfTestRenderCapture.find(appPopupID, in: view) as? NSPopUpButton else {
+            report(label, false, "no app popup \(appPopupID)")
+            return
+        }
+        guard let appItem = appPopup.itemArray.first(where: { $0.identifier?.rawValue == ref.backend.rawValue })
+        else {
+            report(label, false, "the app popup has no \(ref.backend.displayName) row: "
+                   + titles(appPopup).joined(separator: " | "))
+            return
+        }
+        let before = store.selectedBundle(for: route)
+        appPopup.select(appItem)
+        guard appPopup.sendAction(appPopup.action, to: appPopup.target) else {
+            report(label, false, "the app popup's action was not dispatched")
+            return
+        }
+        guard let modelPopup = SelfTestRenderCapture.find(modelPopupID, in: view) as? NSPopUpButton else {
+            report(label, false, "no model popup \(modelPopupID) after the app click")
+            return
+        }
+        let after = store.selectedBundle(for: route)
+        let placeholder = LocalModelPickerItems.modelPlaceholder
+        report(afterApp,
+               after == before && modelPopup.titleOfSelectedItem == placeholder && selectedRef(modelPopup) == nil,
+               "\(bundleText(after)) / selected \"\(modelPopup.titleOfSelectedItem ?? "<none>")\"")
+        let shown = Array(modelPopup.itemArray.dropFirst())
+        let ownRows = shown.allSatisfy {
+            !$0.isSeparatorItem
+                && LocalModelPickerItems.ref(fromItemIdentifier: $0.identifier?.rawValue)?.backend == ref.backend
+        }
+        let plainTitles = shown.allSatisfy { item in
+            !LocalBackendID.allCases.contains {
+                item.title.hasPrefix($0.displayName + LocalModelPickerItems.appPrefixSeparator)
+            }
+        }
+        report(menu, titles(modelPopup) == [placeholder] + appRows && ownRows && plainTitles,
+               titles(modelPopup).joined(separator: " | "))
+        let rowID = LocalModelPickerItems.itemIdentifier(for: ref)
+        guard let item = modelPopup.itemArray.first(where: { $0.identifier?.rawValue == rowID }) else {
+            report(label, false, "the model popup has no row \(rowID): " + titles(modelPopup).joined(separator: " | "))
+            return
+        }
+        modelPopup.select(item)
+        guard modelPopup.sendAction(modelPopup.action, to: modelPopup.target) else {
+            report(label, false, "the model popup's action was not dispatched")
+            return
+        }
+        report(label, true, "dispatched the \(ref.backend.displayName) app click, then the model row \(rowID)")
     }
 
     /// The whole menu as text: a closed popup photographs only its selected title.
