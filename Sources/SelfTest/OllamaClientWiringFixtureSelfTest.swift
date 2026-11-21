@@ -568,9 +568,88 @@ enum OllamaClientWiringFixtureSelfTest {
         reporter.record("the call sites are readable from the worktree root",
                         ![dictation, registry, custom, search, vision].contains(""),
                         "run this gate from the repository root")
+        // The prompt-prep dispatch in writeCleanupSelection, as one stripped block: the fallback binding
+        // and both arms' call heads with their local arguments, so a swapped route, a changed adapter or a
+        // shadowing binding between them breaks the match.
+        let promptPrepDispatch = [
+            "        let localAdapter = localWriteForTest ?? CleanupClient.localAdapter(surface: .promptPrep)",
+            "        let claudeAdapter = claudeWriteForTest ?? TextTransformClient.liveClaudeAdapter",
+            "        ",
+            "        if let codexAdapter = codexWriteForTest {",
+            "            TextTransformClient.transformResolved(",
+            "                resolution, route: .promptPrep, requestForBundle: requestForBundle,",
+            "                local: localAdapter, claude: claudeAdapter, codex: codexAdapter,",
+            "                arming: arming, retryCompletion: retryCompletion, completion: completion)",
+            "        } else {",
+            "            TextTransformClient.transformResolved(",
+            "                resolution, route: .promptPrep, requestForBundle: requestForBundle,",
+            "                local: localAdapter, claude: claudeAdapter,",
+            "                arming: arming, retryCompletion: retryCompletion, completion: completion)",
+            "        }",
+        ].joined(separator: "\n")
+        // Fail-closed inventory of every call of transformResolved in the registry, however spelled (qualified,
+        // member access split over lines, unqualified). Every whole-word occurrence of the identifier must be
+        // followed, after optional whitespace and newlines, by "("; from there the argument list is found by
+        // matching parentheses, its top-level (depth 1) "route:" argument must be a literal case (".name" or
+        // "LLMRouteID.name", name ASCII), and nil means some occurrence could not be classified.
+        // Assumes no "(" or ")" inside string literals within these calls (true at base).
+        func countPromptPrepTransformCalls() -> Int? {
+            let name = Array("transformResolved".unicodeScalars)
+            let text = Array(registry.unicodeScalars)
+            let blanks = CharacterSet(charactersIn: " \t\r\n")
+            func isWordScalar(_ s: Unicode.Scalar) -> Bool {
+                ("a"..."z").contains(s) || ("A"..."Z").contains(s) || ("0"..."9").contains(s) || s == "_"
+            }
+            var promptPrep = 0
+            var i = 0
+            while i + name.count <= text.count {
+                let end = i + name.count
+                let wholeWord = (i == 0 || !isWordScalar(text[i - 1]))
+                    && (end == text.count || !isWordScalar(text[end]))
+                guard Array(text[i..<end]) == name, wholeWord else { i += 1; continue }
+                var open = end
+                while open < text.count, blanks.contains(text[open]) { open += 1 }
+                guard open < text.count, text[open] == "(" else { return nil }
+                var parens = 1
+                var braces = 0
+                var closed = false
+                var arguments = [""]
+                for ch in text[(open + 1)...] {
+                    if ch == "(" { parens += 1 }
+                    if ch == ")" { parens -= 1 }
+                    if ch == "{" { braces += 1 }
+                    if ch == "}" { braces -= 1 }
+                    if braces < 0 { return nil }
+                    if parens == 0 { closed = true; break }
+                    if ch == "," && parens == 1 && braces == 0 {
+                        arguments.append("")
+                    } else {
+                        arguments[arguments.count - 1].unicodeScalars.append(ch)
+                    }
+                }
+                guard closed, braces == 0 else { return nil }
+                let routes = arguments
+                    .map { $0.trimmingCharacters(in: blanks) }
+                    .filter { $0.hasPrefix("route:") }
+                guard routes.count == 1 else { return nil }
+                var value = routes[0].dropFirst("route:".count)
+                    .trimmingCharacters(in: blanks)
+                if value.hasPrefix("LLMRouteID.") { value = String(value.dropFirst("LLMRouteID.".count)) }
+                else if value.hasPrefix(".") { value = String(value.dropFirst()) }
+                else { return nil }
+                // ASCII-only identifier: letters, digits, underscore, first not a digit.
+                guard let first = value.unicodeScalars.first, !("0"..."9").contains(first),
+                      value.unicodeScalars.allSatisfy(isWordScalar) else { return nil }
+                if value == "promptPrep" { promptPrep += 1 }
+                i = open + 1
+            }
+            return promptPrep
+        }
+        let promptPrepTransformCalls = countPromptPrepTransformCalls()
         reporter.record("cleanup, prompt-prep, email and custom modes use the backend-aware adapters",
                         dictation.contains("local: CleanupClient.localAdapter(surface: .cleanup)")
-                            && registry.contains("local: CleanupClient.localAdapter(surface: .promptPrep)")
+                            && registry.contains(promptPrepDispatch)
+                            && promptPrepTransformCalls == 2
                             && registry.contains("local: EmailClient.localAdapter()")
                             && custom.contains("local: CleanupClient.localAdapter(surface: .customMode)"))
         let blind = ["DictationController.swift", "OneShotRegistry.swift", "CustomModeClient.swift",
