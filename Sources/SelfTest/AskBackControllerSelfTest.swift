@@ -1573,8 +1573,8 @@ enum AskBackControllerSelfTest {
             check("wiring (production recorder and transcriber): the voice answer uses the take's own recorder and transcribeAudioSnapshot",
                   dc.contains("try audio.start(); return true")
                     && dc.contains("transcribeAudioSnapshot { text, _, _ in done(text) }"))
-            let discardBody = dc.range(of: "private func askVoiceDiscard()").map { String(dc[$0.lowerBound...].prefix(260)) } ?? ""
-            let stopBody = dc.range(of: "private func askVoiceStop(").map { String(dc[$0.lowerBound...].prefix(420)) } ?? ""
+            let discardBody = dc.range(of: "func askVoiceDiscard()").map { String(dc[$0.lowerBound...].prefix(260)) } ?? ""
+            let stopBody = dc.range(of: "func askVoiceStop(").map { String(dc[$0.lowerBound...].prefix(420)) } ?? ""
             check("wiring (S1): production askVoiceDiscard and askVoiceStop both stop the recorder (audio.stop())",
                   discardBody.contains("audio.stop()") && stopBody.contains("audio.stop()"))
             let seamLine = "if let transcribe = askSeams.voiceTranscribe { transcribe(done); return }"

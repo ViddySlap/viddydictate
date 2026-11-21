@@ -35,8 +35,8 @@ final class DictationController {
     /// app-wide active flag because its transcribe / client / landing pipeline is still abortable.
     ///   reviewing / asking / writing (VDASK-3): a Tighten or Summarize take with ask-back on, between
     ///   `.finishing` (transcribe) and the paste: the review call runs, a question card waits, the write runs.
-    private enum State { case idle, recording, locked, finishing, oneShotFinishing, reviewing, asking, writing }
-    private var state: State = .idle {
+    enum State { case idle, recording, locked, finishing, oneShotFinishing, reviewing, asking, writing }
+    var state: State = .idle {
         didSet {
             // BUG 1 take-liveness: push the HUD a single "is a take live" signal on EVERY state change, so a
             // mid-take confirmation toast (Option+N bullseye-set, Option+B no-bullseye) reverts to the
@@ -50,7 +50,7 @@ final class DictationController {
         }
     }
 
-    private let hotkey = HotkeyMonitor()
+    let hotkey = HotkeyMonitor()
     private let audio: AudioRecorder = { let recorder = AudioRecorder(); recorder.honorsDeckMic = true; return recorder }()
     private let audioWorkQueue = DispatchQueue(label: AppIdentity.queueLabel("audio-work"),
                                                qos: .userInitiated)
@@ -78,7 +78,7 @@ final class DictationController {
     private let callbacks: DictationControllerCallbacks
     private var recentDictationsPanel: RecentDictationsPanel?
     private var dictionaryAddPanel: DictionaryAddPanel?
-    private var target: DictationTarget?
+    var target: DictationTarget?
     private var targetWasNotesWindow = false
     /// Internal, not private (vdtpwg2 repair, part D): `TailCheckSelfTest`'s `hook-wired`/`hook-after-paste`
     /// arms drive a REAL `finalize()` call through the deterministic, AX-free no-target delivery branch, which
@@ -93,7 +93,7 @@ final class DictationController {
     /// alone.
     var takeLandAtStart = false
     private var recordingStartedAt: Date?
-    private lazy var pasteMarker = PasteTargetMarker()
+    lazy var pasteMarker = PasteTargetMarker()
 
     /// The persistent Cleanup toggle state captured at the moment of release — "state-at-release
     /// wins": the dictation being held is processed according to the toggle when right-Option is let
@@ -157,7 +157,7 @@ final class DictationController {
     /// abort" contract holds even when Esc fires mid-processing (`.finishing`).
     private let takeGenerationLock = NSLock()
     private var takeGenerationStorage = 0
-    private var takeGeneration: Int {
+    var takeGeneration: Int {
         get {
             takeGenerationLock.lock()
             defer { takeGenerationLock.unlock() }
@@ -183,10 +183,10 @@ final class DictationController {
 
     /// VDASK-3 ask-back. The flow for the take in progress (nil when the take never asked), its review runner,
     /// the card panel (built on first use) and the point the card anchors to, frozen when the take ends.
-    private var askFlow: AskBackFlow?
-    private var askRunner: AskBackReviewRunner?
-    private var askCardPanel: AskCardPresenting?
-    private var askAnchor = CGPoint.zero
+    var askFlow: AskBackFlow?
+    var askRunner: AskBackReviewRunner?
+    var askCardPanel: AskCardPresenting?
+    var askAnchor = CGPoint.zero
     /// S2: the old take's flow while a hold that started on its card is still down (its release detaches it, an
     /// Esc under the same press resumes it), and the old take's own target fields, restored on a resume because
     /// the new take's start overwrote them.
@@ -403,7 +403,7 @@ final class DictationController {
         DaemonClient.health { ok, detail in Log.write("wake daemon health ok=\(ok) (\(detail))") }
     }
 
-    private func setActive(_ active: Bool) {
+    func setActive(_ active: Bool) {
         Settings.isDictationActive = active
         // BT5: mirror take-active into the tap so Esc is swallowed + routed to `cancelTake()` ONLY while a take is
         // in flight (recording / locked / the main take's `.finishing` processing, where active stays true); when
@@ -1062,7 +1062,7 @@ final class DictationController {
 
     /// VDASK-7 repair: the Option+P ask path can require its captured foreign destination even if Notes
     /// became key during the review/cards. The ordinary in-place routes keep the legacy active-note bridge.
-    private func landInPlaceTransform(_ result: CleanupClient.Result, input: String, mode: HistoryMode,
+    func landInPlaceTransform(_ result: CleanupClient.Result, input: String, mode: HistoryMode,
                                       level: Int?, wireUndo: Bool, uiNoun: String, logNoun: String,
                                       levelLabel: String?, inputSource: NotesBullseyeLogic.InputSource,
                                       noteTarget: NotesDictationTarget?,
@@ -1639,150 +1639,10 @@ final class DictationController {
         flow.start()
     }
 
-    // MARK: VDASK-7: Option+P ask-back host
-
-    /// Host the same ask-back flow a dictation take uses for Option+P's selected text. The registry has
-    /// already closed the level picker, frozen the prompt-prep provider and captured the landing target; this
-    /// method owns only the controller-side effects: the review runner, the card/keys/voice answer, History,
-    /// the detached save-only job, and the latch hand-back. Landing runs through the normal selection-transform
-    /// tail so the write replaces the captured selection exactly as it does without ask-back.
-    func startSelectionAskBack(_ request: SelectionAskRequest,
-                               releaseLatch: @escaping () -> Void,
-                               reacquireLatch: @escaping () -> Void) {
-        // Freeze where the card opens before the review wait, like a dictation take freezes its anchor at
-        // `finish()`: the marker's last placement, else the pointer (the HUD rides with it).
-        if let placed = pasteMarker.lastPlacement, placed.kind != .pointer { askAnchor = placed.center }
-        else { askAnchor = NSEvent.mouseLocation }
-
-        let level = AskBackLevel(request.level)
-        let provider = request.resolution.bundle.map { AskBackProvider($0.provider) } ?? .local
-        let tier = Settings.askBackTier
-        weak var flowRef: AskBackFlow?
-        var latchReleased = false
-        let release = {
-            guard !latchReleased else { return }
-            latchReleased = true
-            releaseLatch()
-        }
-        let reacquire = {
-            guard latchReleased else { return }
-            latchReleased = false
-            reacquireLatch()
-        }
-
-        // A review or write is cancelable exactly like a dictation take's (Option+Esc). The audio is gone
-        // (Option+P discarded its incidental take), but the take-active flag is what routes that chord.
-        setActive(true)
-
-        let context = AskBackFlow.Context(
-            historyID: request.historyID, transcript: request.input, level: level,
-            levelRaw: request.level.rawValue, tier: tier, provider: provider,
-            writeModel: request.resolution.bundle?.modelID ?? "", generation: takeGeneration,
-            source: .selection)
-
-        let hooks = AskBackFlow.Hooks(
-            phaseChanged: { [weak self] phase in
-                // S5: a right-Option hold parks the Option+P take and releases the registry latch at once,
-                // so the old flow can never land over the new take. An Esc under that hold resumes it.
-                if phase == .parked || phase == .cancelled { release() }
-                if phase == .asking { reacquire() }
-                self?.askPhaseChanged(phase)
-            },
-            readingCue: { [weak self] on in self?.askReadingCue(on) },
-            startReview: { [weak self] id in
-                let deliverReview: AskBackReviewRunner.Deliver = { reviewID, outcome in
-                    DispatchQueue.main.async { flowRef?.reviewOutcome(reviewID, outcome) }
-                }
-                let runner: AskBackReviewRunner
-                if let provider = self?.askSeams.reviewProvider {
-                    runner = AskBackReviewRunner(schedule: self?.askSeams.schedule ?? Self.mainSchedule,
-                                                 provider: provider, deliver: deliverReview)
-                } else {
-                    runner = AskBackReviewRunner.live(resolution: request.resolution, deliver: deliverReview)
-                }
-                self?.askRunner = runner
-                runner.start(id: id, text: request.input, level: level, tier: tier, source: .selection)
-            },
-            skipReview: { [weak self] id in self?.askRunner?.skip(id) },
-            showCard: { [weak self] card in self?.askShowCard(card) },
-            highlight: { [weak self] id, index in self?.askCardPanel?.setHighlight(cardID: id, index: index) },
-            closeCard: { [weak self] _ in self?.hotkey.askCardActive = false },
-            startWrite: { [weak self] spec in
-                self?.hud.update(state: "Cleaning…", target: self?.target?.label, text: "", locked: false)
-                self?.hud.setThinking(true)
-                self?.note("cleaning")
-                // The explicit-retry landing is NOT the flow's write completion: that completion is already
-                // `.finished` after the first attempt and would drop a confirmed Retry. It lands through the
-                // same captured request (answers, destination and History id) without touching the flow again.
-                let retryLanding: TextTransformClient.Completion = { [weak self] result in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-                        self.landSelectionAskResult(result, request: request)
-                    }
-                }
-                request.write(spec.questions, spec.answers, { result in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-                        var ok = false
-                        if case .ok = result { ok = true }
-                        flowRef?.writeFinished(spec.writeID, ok: ok) {
-                            self.landSelectionAskResult(result, request: request)
-                            release()
-                        }
-                    }
-                }, retryLanding)
-            },
-            history: { [weak self] event in
-                TranscriptionHistory.shared.apply(event, app: self?.target?.label ?? "")
-            },
-            saveDetached: { [weak self] job in
-                // Option+P keeps History only: the detached write never lands, never touches the HUD and
-                // never offers an install. The latch already dropped when the card parked.
-                release()
-                AskBackDetached.run(
-                    job,
-                    now: self?.askSeams.now ?? { ProcessInfo.processInfo.systemUptime },
-                    write: { _, done in request.writeDetached(job.questions, job.answers, done) },
-                    history: { event in TranscriptionHistory.shared.apply(event) })
-            },
-            startNewTake: { [weak self] in self?.askStartNewTake() },
-            voiceStart: { [weak self] in self?.askVoiceStart() ?? false },
-            voiceDiscard: { [weak self] in self?.askVoiceDiscard() },
-            voiceStop: { [weak self] id in
-                self?.askVoiceStop { text in DispatchQueue.main.async { flowRef?.voiceTranscript(id, text: text) } }
-            },
-            voiceStatus: { [weak self] card, status in self?.askCardPanel?.setStatus(cardID: card, text: status?.text) })
-        let flow = AskBackFlow(context: context, schedule: askSeams.schedule ?? Self.mainSchedule,
-                               now: askSeams.now ?? { ProcessInfo.processInfo.systemUptime }, hooks: hooks)
-        flowRef = flow
-        askFlow = flow
-        flow.start()
-    }
-
-    /// Land an Option+P ask write through the unchanged selection-transform tail, then hand the take back to
-    /// idle and release the registry latch. The History record is the same pending id the flow inserted, so
-    /// `record` updates it with the landed text and keeps the `askBack` record.
-    private func landSelectionAskResult(_ result: CleanupClient.Result, request: SelectionAskRequest) {
-        hud.setThinking(false)
-        landInPlaceTransform(result, input: request.input, mode: .cleanupSelection,
-                             level: request.level.rawValue, wireUndo: false,
-                             uiNoun: "Transform", logNoun: "prompt-prep",
-                             levelLabel: request.level.label, inputSource: .selection,
-                             noteTarget: request.noteTarget, foreignTarget: request.foreignTarget,
-                             preferCapturedForeignTarget: request.foreignTarget != nil,
-                             lateRecovery: false, historyID: request.historyID)
-        // Same B13 offer the normal Option+P tail shows. A detached job never reaches here.
-        if case .unavailable = result, let feature = PointOfUseFeature.forRoute(.promptPrep) {
-            PointOfUseOfferPresenter.shared.presentOffer(for: feature)
-        }
-        setActive(false)
-        state = .idle
-        note(readyHint)
-    }
 
     // MARK: ask-back glue (VDASK-3). The rules live in `AskBackFlow`; these are its hands.
 
-    private static let mainSchedule: AskBackFlow.Schedule = { after, fire in
+    static let mainSchedule: AskBackFlow.Schedule = { after, fire in
         let item = DispatchWorkItem(block: fire)
         DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: item)
         return { item.cancel() }
@@ -1883,7 +1743,7 @@ final class DictationController {
         heldKick()
     }
 
-    private func askPhaseChanged(_ phase: AskBackFlow.Phase) {
+    func askPhaseChanged(_ phase: AskBackFlow.Phase) {
         hotkey.askReviewActive = phase == .reviewing
         if phase != .asking { hotkey.askCardActive = false }
         heldKick()
@@ -1896,7 +1756,7 @@ final class DictationController {
         if phase != .asking { askCardPanel?.hide() }
     }
 
-    private func askReadingCue(_ on: Bool) {
+    func askReadingCue(_ on: Bool) {
         if on {
             hud.update(state: AskCardText.readingCue, target: target?.label, text: "", locked: false)
             hud.setThinking(true)
@@ -1906,7 +1766,7 @@ final class DictationController {
         }
     }
 
-    private func askShowCard(_ card: AskCardModel) {
+    func askShowCard(_ card: AskCardModel) {
         let panel: AskCardPresenting = askSeams.cardPanel ?? askCardPanel ?? AskCardPanel()
         askCardPanel = panel
         panel.onChoose = { [weak self] id, index in self?.askFlow?.click(cardID: id, option: index) }
@@ -1922,7 +1782,7 @@ final class DictationController {
     /// as if right Option had just gone down on an idle controller, and the old flow is kept (with the old take's
     /// own target fields) until that press ends: its release detaches the old take, an Esc under the same press
     /// discards the new take and resumes the old one.
-    private func askStartNewTake() {
+    func askStartNewTake() {
         askParkedFlow = askFlow
         askParkedTake = (target, targetWasNotesWindow, takeLandAtStart, notesDelivery.noteTarget)
         askFlow = nil
@@ -1947,7 +1807,7 @@ final class DictationController {
     // END askvoice-mic
 
     /// False when the mic cannot start (busy or permission missing).
-    private func askVoiceStart() -> Bool {
+    func askVoiceStart() -> Bool {
         // AVAudioEngine commonly starts and delivers silence when the grant is missing, so ask the grant first.
         let authorized = askSeams.micAuthorized?() ?? Self.askVoiceMicGranted(Permissions.microphoneAuthorization())
         guard authorized else {
@@ -1961,13 +1821,13 @@ final class DictationController {
         }
     }
 
-    private func askVoiceDiscard() {
+    func askVoiceDiscard() {
         if let discard = askSeams.voiceDiscard { discard(); return }
         audio.stop()
     }
 
     /// Stops capture and transcribes; `done` gets the text, or nil when nothing was heard or the daemon failed.
-    private func askVoiceStop(_ done: @escaping (String?) -> Void) {
+    func askVoiceStop(_ done: @escaping (String?) -> Void) {
         if let transcribe = askSeams.voiceTranscribe { transcribe(done); return }
         audio.stop()
         guard audio.detectedSpeech else { done(nil); return }      // silence never goes to Whisper
