@@ -729,30 +729,10 @@ final class ModelsPowerSettingsView: NSView {
 
     private func effortPopup(route: LLMRouteID, selected: LLMProviderBundle,
                              x: CGFloat, y: CGFloat, width: CGFloat) -> NSPopUpButton {
-        let p = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25), pullsDown: false)
-        var efforts: [String]
-        if selected.provider == .codex,
-           let advertised = CodexPickerCatalog.efforts(
-                for: selected.modelID, catalog: codexCatalogCache?.catalog) {
-            efforts = [""] + advertised
-        } else {
-            efforts = ["", "low", "medium", "high"]
-        }
-        if let effort = selected.effort, !efforts.contains(effort) { efforts.append(effort) }
-        for effort in efforts {
-            p.addItem(withTitle: effort.isEmpty ? "Default" : CodexPickerCatalog.safeLabel(effort))
-            p.lastItem?.representedObject = effort
-        }
-        let selectedRaw = selected.effort ?? ""
-        if let item = p.itemArray.first(where: { ($0.representedObject as? String) == selectedRaw }) {
-            p.select(item)
-        }
-        p.identifier = NSUserInterfaceItemIdentifier("effort|\(route.rawValue)")
-        p.target = self
-        p.action = #selector(effortChanged(_:))
-        p.isEnabled = selected.provider != .local
-        p.toolTip = selected.provider == .local ? "Local routes do not use an effort setting." : nil
-        return p
+        RoutePopupBuilders.effortPopup(
+            identifier: "effort|\(route.rawValue)", selected: selected,
+            catalog: codexCatalogCache?.catalog, x: x, y: y, width: width,
+            target: self, action: #selector(effortChanged(_:)))
     }
 
     private func addAdvancedBundleEditor(to card: NSView, route: LLMRouteID, y: CGFloat,
@@ -1250,7 +1230,7 @@ final class ModelsPowerSettingsView: NSView {
     }
 
     private func compactModelName(_ id: String) -> String {
-        id.contains("/") ? String(id.split(separator: "/").last!) : id
+        RoutePopupBuilders.compactModelName(id)
     }
 
     static func identifierSuffix(_ control: NSControl, prefix: String) -> String? {
@@ -1280,13 +1260,6 @@ final class ModelsPowerSettingsView: NSView {
     }
 
     private func descendant(id: String) -> NSView? {
-        func find(_ root: NSView) -> NSView? {
-            for child in root.subviews {
-                if child.identifier?.rawValue == id { return child }
-                if let match = find(child) { return match }
-            }
-            return nil
-        }
-        return find(self)
+        RoutePopupBuilders.descendant(id: id, in: self)
     }
 }

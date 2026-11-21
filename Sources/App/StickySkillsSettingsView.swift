@@ -404,31 +404,10 @@ final class StickySkillsSettingsView: NSView {
 
     private func effortPopup(skill: StickySkill, selected: LLMProviderBundle,
                              x: CGFloat, y: CGFloat, width: CGFloat) -> NSPopUpButton {
-        let popup = NSPopUpButton(frame: NSRect(x: x, y: y, width: width, height: 25),
-                                  pullsDown: false)
-        var efforts: [String]
-        if selected.provider == .codex,
-           let advertised = CodexPickerCatalog.efforts(
-               for: selected.modelID, catalog: codexCatalogCache?.catalog) {
-            efforts = [""] + advertised
-        } else {
-            efforts = ["", "low", "medium", "high"]
-        }
-        if let current = selected.effort, !efforts.contains(current) { efforts.append(current) }
-        for effort in efforts {
-            popup.addItem(withTitle: effort.isEmpty ? "Default" : CodexPickerCatalog.safeLabel(effort))
-            popup.lastItem?.representedObject = effort
-        }
-        let raw = selected.effort ?? ""
-        if let item = popup.itemArray.first(where: {
-            ($0.representedObject as? String) == raw
-        }) { popup.select(item) }
-        popup.identifier = NSUserInterfaceItemIdentifier("sticky-skill-effort|\(skill.id)")
-        popup.target = self
-        popup.action = #selector(effortChanged(_:))
-        popup.isEnabled = selected.provider != .local
-        popup.toolTip = selected.provider == .local ? "Local routes do not use an effort setting." : nil
-        return popup
+        RoutePopupBuilders.effortPopup(
+            identifier: "sticky-skill-effort|\(skill.id)", selected: selected,
+            catalog: codexCatalogCache?.catalog, x: x, y: y, width: width,
+            target: self, action: #selector(effortChanged(_:)))
     }
 
     // MARK: - Actions
@@ -614,17 +593,10 @@ final class StickySkillsSettingsView: NSView {
     }
 
     private func compactModelName(_ id: String) -> String {
-        id.contains("/") ? String(id.split(separator: "/").last!) : id
+        RoutePopupBuilders.compactModelName(id)
     }
 
     private func descendant(id: String) -> NSView? {
-        func find(_ root: NSView) -> NSView? {
-            for child in root.subviews {
-                if child.identifier?.rawValue == id { return child }
-                if let found = find(child) { return found }
-            }
-            return nil
-        }
-        return find(self)
+        RoutePopupBuilders.descendant(id: id, in: self)
     }
 }
